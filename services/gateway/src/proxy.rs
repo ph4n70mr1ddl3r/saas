@@ -20,15 +20,21 @@ const SAFE_RESPONSE_HEADERS: &[&str] = &[
     "retry-after",
 ];
 
+const MAX_RESPONSE_BODY: usize = 10 * 1024 * 1024; // 10 MiB
+
 /// Sanitize a request URI to prevent path traversal attacks.
+/// Handles percent-encoding of dots and double-encoding attempts.
 fn sanitize_request_uri(uri: &axum::http::Uri) -> String {
     let path = uri.path();
-    let normalized: String = path
+
+    // Decode percent-encoded characters to normalize before checking
+    let decoded_path = percent_decode_str(path);
+    let normalized: String = decoded_path
         .split('/')
         .filter(|segment| {
             if segment.is_empty() { return false; }
-            let decoded = segment.replace("%2e", ".").replace("%2E", ".");
-            decoded != ".." && decoded != "."
+            let seg = segment.replace("%2e", ".").replace("%2E", ".");
+            seg != ".." && seg != "."
         })
         .collect::<Vec<_>>()
         .join("/");
@@ -40,6 +46,28 @@ fn sanitize_request_uri(uri: &axum::http::Uri) -> String {
     }
 }
 
+/// Percent-decode a string, replacing %XX sequences with their byte values.
+fn percent_decode_str(s: &str) -> String {
+    let mut result = Vec::new();
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (
+                char::from(bytes[i + 1]).to_digit(16),
+                char::from(bytes[i + 2]).to_digit(16),
+            ) {
+                result.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        result.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&result).into_owned()
+}
+
 pub async fn forward_request(
     req: Request<Body>,
     backend_url: &str,
@@ -48,13 +76,21 @@ pub async fn forward_request(
 ) -> Response<Body> {
     let (parts, body) = req.into_parts();
 
+    // Pass through HTTP methods faithfully, reject unknown ones
     let method = match parts.method {
         Method::GET => reqwest::Method::GET,
         Method::POST => reqwest::Method::POST,
         Method::PUT => reqwest::Method::PUT,
         Method::DELETE => reqwest::Method::DELETE,
         Method::PATCH => reqwest::Method::PATCH,
-        _ => reqwest::Method::GET,
+        Method::HEAD => reqwest::Method::HEAD,
+        Method::OPTIONS => reqwest::Method::OPTIONS,
+        _ => {
+            return (
+                axum::http::StatusCode::METHOD_NOT_ALLOWED,
+                axum::Json(serde_json::json!({"error": {"code": "METHOD_NOT_ALLOWED", "message": "HTTP method not supported by gateway"}}))
+            ).into_response();
+        }
     };
 
     let sanitized_uri = sanitize_request_uri(&parts.uri);
@@ -96,7 +132,10 @@ pub async fn forward_request(
     match builder.send().await {
         Ok(resp) => {
             let status = axum::http::StatusCode::from_u16(resp.status().as_u16())
-                .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+                .unwrap_or_else(|fallback| {
+                    tracing::warn!("Backend returned non-standard status code: {}", fallback);
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                });
 
             let mut response_builder = Response::builder().status(status);
 
@@ -110,6 +149,16 @@ pub async fn forward_request(
 
             match resp.bytes().await {
                 Ok(body_bytes) => {
+                    if body_bytes.len() > MAX_RESPONSE_BODY {
+                        tracing::warn!(
+                            "Backend response body exceeded {} bytes, truncating",
+                            MAX_RESPONSE_BODY
+                        );
+                        return (
+                            axum::http::StatusCode::BAD_GATEWAY,
+                            axum::Json(serde_json::json!({"error": {"code": "BAD_GATEWAY", "message": "Backend response too large"}}))
+                        ).into_response();
+                    }
                     response_builder.body(Body::from(body_bytes)).unwrap_or_else(|_| {
                         Response::builder()
                             .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
@@ -119,12 +168,15 @@ pub async fn forward_request(
                 }
                 Err(e) => {
                     tracing::error!("Failed to read backend response: {}", e);
-                    (axum::http::StatusCode::BAD_GATEWAY, "Backend error").into_response()
+                    (
+                        axum::http::StatusCode::BAD_GATEWAY,
+                        axum::Json(serde_json::json!({"error": {"code": "BAD_GATEWAY", "message": "Backend response read error"}}))
+                    ).into_response()
                 }
             }
         }
         Err(e) => {
-            tracing::error!("Failed to connect to backend {}: {}", url, e);
+            tracing::error!("Failed to connect to backend: {}", e);
             (
                 axum::http::StatusCode::BAD_GATEWAY,
                 axum::Json(serde_json::json!({"error": {"code": "BAD_GATEWAY", "message": "Backend unavailable"}}))

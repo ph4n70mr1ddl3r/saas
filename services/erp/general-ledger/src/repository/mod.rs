@@ -85,14 +85,41 @@ impl LedgerRepo {
     }
 
     pub async fn close_period(&self, id: &str) -> AppResult<Period> {
-        let period = self.get_period(id).await?;
+        let mut tx = self.pool.begin().await?;
+
+        let period = sqlx::query_as::<_, Period>(
+            "SELECT id, name, start_date, end_date, status, fiscal_year FROM periods WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Period '{}' not found", id)))?;
+
         if period.status == "closed" {
             return Err(AppError::Validation("Period is already closed".into()));
         }
+
+        // Check for draft journal entries in this period
+        let draft_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM journal_entries WHERE period_id = ? AND status = 'draft'",
+        )
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        if draft_count > 0 {
+            return Err(AppError::Validation(format!(
+                "Cannot close period: {} draft journal entries exist",
+                draft_count
+            )));
+        }
+
         sqlx::query("UPDATE periods SET status = 'closed' WHERE id = ?")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+
+        tx.commit().await?;
         self.get_period(id).await
     }
 
@@ -183,13 +210,71 @@ impl LedgerRepo {
         self.get_journal_entry(id).await
     }
 
+    /// Reverse a journal entry by creating a counter-entry with swapped debit/credit lines,
+    /// then marking the original as reversed. All within a single transaction.
     pub async fn reverse_journal_entry(&self, id: &str) -> AppResult<JournalEntry> {
         let mut tx = self.pool.begin().await?;
 
+        // Mark original as reversed
         sqlx::query("UPDATE journal_entries SET status = 'reversed' WHERE id = ?")
             .bind(id)
             .execute(&mut *tx)
             .await?;
+
+        // Create counter-entry with swapped lines
+        let reversal_id = uuid::Uuid::new_v4().to_string();
+        let original = sqlx::query_as::<_, JournalEntry>(
+            "SELECT id, entry_number, description, period_id, status, posted_at, created_by, created_at FROM journal_entries WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        let reversal_number = format!("REV-{}", original.entry_number);
+
+        sqlx::query(
+            "INSERT INTO journal_entries (id, entry_number, description, period_id, created_by) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(&reversal_id)
+        .bind(&reversal_number)
+        .bind(format!("Reversal of {}", original.entry_number))
+        .bind(&original.period_id)
+        .bind(&original.created_by)
+        .execute(&mut *tx)
+        .await?;
+
+        // Copy lines with swapped debit/credit
+        let original_lines = sqlx::query_as::<_, JournalLine>(
+            "SELECT id, entry_id, account_id, debit_cents, credit_cents, description, created_at FROM journal_lines WHERE entry_id = ?",
+        )
+        .bind(id)
+        .fetch_all(&mut *tx)
+        .await?;
+
+        for line in &original_lines {
+            let line_id = uuid::Uuid::new_v4().to_string();
+            sqlx::query(
+                "INSERT INTO journal_lines (id, entry_id, account_id, debit_cents, credit_cents, description) VALUES (?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&line_id)
+            .bind(&reversal_id)
+            .bind(&line.account_id)
+            .bind(line.credit_cents) // swap: credit becomes debit
+            .bind(line.debit_cents)  // swap: debit becomes credit
+            .bind(format!("Reversal of JE {}", original.entry_number))
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        // Post the reversal entry immediately
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "UPDATE journal_entries SET status = 'posted', posted_at = ? WHERE id = ?",
+        )
+        .bind(&now)
+        .bind(&reversal_id)
+        .execute(&mut *tx)
+        .await?;
 
         tx.commit().await?;
         self.get_journal_entry(id).await

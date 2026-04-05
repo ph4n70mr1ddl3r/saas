@@ -9,7 +9,7 @@ use crate::rate_limit;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub service_map: Arc<RwLock<HashMap<String, String>>>,
+    pub service_map: Arc<HashMap<String, String>>,
     pub http_client: Client,
     pub rate_limiter: Arc<RwLock<HashMap<String, rate_limit::TokenBucket>>>,
 }
@@ -32,12 +32,9 @@ async fn proxy_handler(
 ) -> Response<Body> {
     let path = req.uri().path().to_string();
 
-    // Rate limiting using real client IP
-    let ip = req.headers().get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').last())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| addr.ip().to_string());
+    // Rate limiting using direct client IP only (not trusting X-Forwarded-For
+    // unless deployed behind a known load balancer that strips/replaces it)
+    let ip = addr.ip().to_string();
 
     {
         let mut limiters = state.rate_limiter.write().await;
@@ -53,9 +50,8 @@ async fn proxy_handler(
 
     // Route to backend service based on path prefix
     let service_key = resolve_service(&path);
-    let service_map = state.service_map.read().await;
 
-    if let Some(backend_url) = service_map.get(&service_key) {
+    if let Some(backend_url) = state.service_map.get(&service_key) {
         proxy::forward_request(req, backend_url, &state.http_client, &ip).await
     } else {
         axum::response::IntoResponse::into_response(
@@ -94,7 +90,7 @@ fn resolve_service(path: &str) -> String {
     if path.starts_with("/api/v1/vendors") || path.starts_with("/api/v1/ap-invoices") {
         return "ap".to_string();
     }
-    if path.starts_with("/api/v1/payments") {
+    if path.starts_with("/api/v1/ap-payments") {
         return "ap".to_string();
     }
     if path.starts_with("/api/v1/customers") || path.starts_with("/api/v1/ar-invoices") || path.starts_with("/api/v1/receipts") {

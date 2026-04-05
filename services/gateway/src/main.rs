@@ -3,6 +3,7 @@ use std::env;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::signal;
 use tokio::sync::RwLock;
 
 mod proxy;
@@ -56,10 +57,12 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(cleanup_rate_limiter(rate_limiter.clone()));
 
     let state = AppState {
-        service_map: Arc::new(RwLock::new(service_map)),
+        service_map: Arc::new(service_map),
         http_client: reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .connect_timeout(Duration::from_secs(5))
+            .pool_max_idle_per_host(10)
+            .pool_idle_timeout(Duration::from_secs(90))
             .build()?,
         rate_limiter,
     };
@@ -71,7 +74,33 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
     tracing::info!("API Gateway listening on port {}", port);
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
 
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("failed to install signal handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => { tracing::info!("Received Ctrl+C, shutting down"); },
+        _ = terminate => { tracing::info!("Received SIGTERM, shutting down"); },
+    }
 }

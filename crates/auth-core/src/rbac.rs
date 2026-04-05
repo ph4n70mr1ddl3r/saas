@@ -52,12 +52,9 @@ pub fn is_domain_admin(roles: &[String], domain: &str) -> bool {
 
 /// Require admin or domain-specific admin role, returning a 403 error string if not.
 pub fn require_admin(roles: &[String], domain: &str) -> Result<(), String> {
-    if is_admin(roles) {
+    if is_domain_admin(roles, domain) {
         return Ok(());
     }
     let admin_role = format!("{}_admin", domain);
-    if roles.iter().any(|r| r.eq_ignore_ascii_case(&admin_role)) {
-        return Ok(());
-    }
     Err(format!("Admin or {} role required", admin_role))
 }

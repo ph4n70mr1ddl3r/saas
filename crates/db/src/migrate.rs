@@ -2,10 +2,16 @@ use sqlx::SqlitePool;
 use anyhow::Result;
 
 /// Runs migrations from a directory of SQL files.
+/// Tracks applied migrations in a `_migrations` table to ensure idempotency.
 /// Each file is executed inside a transaction.
-/// NOTE: For production use, consider using sqlx::migrate!() which tracks
-/// applied migrations and ensures idempotency.
 pub async fn run_migrations(pool: &SqlitePool, migrations_dir: &str) -> Result<()> {
+    // Ensure the tracking table exists
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS _migrations (filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)",
+    )
+    .execute(pool)
+    .await?;
+
     let entries = std::fs::read_dir(migrations_dir)?;
     let mut sql_files: Vec<_> = entries
         .filter_map(|e| e.ok())
@@ -24,13 +30,37 @@ pub async fn run_migrations(pool: &SqlitePool, migrations_dir: &str) -> Result<(
             anyhow::bail!("Migration file '{}' is outside of migrations directory", path.display());
         }
 
-        let sql = std::fs::read_to_string(&path)?;
+        let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
 
-        tracing::info!("Running migration: {}", path.display());
+        // Check if already applied
+        let already_applied: bool = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM _migrations WHERE filename = ?",
+        )
+        .bind(&filename)
+        .fetch_one(pool)
+        .await?
+        > 0;
+
+        if already_applied {
+            tracing::debug!("Migration already applied, skipping: {}", filename);
+            continue;
+        }
+
+        let sql = std::fs::read_to_string(&path)?;
+        tracing::info!("Running migration: {}", filename);
 
         // Execute each migration inside a transaction
         let mut tx = pool.begin().await?;
         sqlx::raw_sql(&sql).execute(&mut *tx).await?;
+
+        // Record the migration as applied
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query("INSERT INTO _migrations (filename, applied_at) VALUES (?, ?)")
+            .bind(&filename)
+            .bind(&now)
+            .execute(&mut *tx)
+            .await?;
+
         tx.commit().await?;
     }
     Ok(())

@@ -53,6 +53,13 @@ impl ArService {
         // Validate customer exists
         self.repo.get_customer(&input.customer_id).await?;
 
+        // Validate line amounts are non-negative
+        for line in &input.lines {
+            if line.amount_cents < 0 {
+                return Err(AppError::Validation("Invoice line amounts must be non-negative".into()));
+            }
+        }
+
         let invoice = self.repo.create_invoice(input).await?;
 
         // Update status to sent (draft -> sent on creation)
@@ -79,11 +86,22 @@ impl ArService {
     }
 
     pub async fn create_receipt(&self, input: &CreateReceiptRequest) -> AppResult<Receipt> {
-        // Validate invoice exists and is in sent status
-        let invoice = self.repo.get_invoice(&input.invoice_id).await?;
-        if invoice.status != "sent" {
-            return Err(AppError::Validation("Can only receipt against sent invoices".into()));
+        // Validate amount is positive
+        if input.amount_cents <= 0 {
+            return Err(AppError::Validation("Receipt amount must be positive".into()));
         }
+
+        // Validate invoice exists and is in sent or partial status
+        let invoice = self.repo.get_invoice(&input.invoice_id).await?;
+        if invoice.status != "sent" && invoice.status != "partial" {
+            return Err(AppError::Validation("Can only receipt against sent or partially paid invoices".into()));
+        }
+
+        // Verify customer_id matches the invoice
+        if invoice.customer_id != input.customer_id {
+            return Err(AppError::Validation("Customer ID does not match invoice".into()));
+        }
+
         self.repo.create_receipt(input).await
     }
 }

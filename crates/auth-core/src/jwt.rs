@@ -38,6 +38,9 @@ pub fn decode_token(token: &str, secret: &str) -> Result<Claims, jsonwebtoken::e
 pub fn init_jwt_secret() {
     let secret = std::env::var("JWT_SECRET")
         .expect("FATAL: JWT_SECRET environment variable must be set");
+    if secret.len() < 32 {
+        panic!("FATAL: JWT_SECRET must be at least 32 characters, got {}", secret.len());
+    }
     JWT_SECRET.set(secret).expect("JWT_SECRET already initialized");
 }
 

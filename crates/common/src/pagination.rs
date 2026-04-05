@@ -8,7 +8,7 @@ pub struct PaginationParams {
 
 impl PaginationParams {
     pub fn offset(&self) -> u32 {
-        (self.page().saturating_sub(1)) * self.per_page()
+        (self.page().saturating_sub(1)).saturating_mul(self.per_page())
     }
     pub fn per_page(&self) -> u32 {
         self.per_page.unwrap_or(20).min(100).max(1)

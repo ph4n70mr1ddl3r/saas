@@ -52,6 +52,14 @@ impl ApService {
     pub async fn create_invoice(&self, input: &CreateApInvoiceRequest) -> AppResult<ApInvoiceWithLines> {
         // Validate vendor exists
         self.repo.get_vendor(&input.vendor_id).await?;
+
+        // Validate line amounts are non-negative
+        for line in &input.lines {
+            if line.amount_cents < 0 {
+                return Err(AppError::Validation("Invoice line amounts must be non-negative".into()));
+            }
+        }
+
         let invoice = self.repo.create_invoice(input).await?;
         let lines = self.repo.get_invoice_lines(&invoice.id).await?;
         Ok(ApInvoiceWithLines { invoice, lines })
@@ -89,11 +97,22 @@ impl ApService {
     }
 
     pub async fn create_payment(&self, input: &CreatePaymentRequest) -> AppResult<Payment> {
+        // Validate amount is positive
+        if input.amount_cents <= 0 {
+            return Err(AppError::Validation("Payment amount must be positive".into()));
+        }
+
         // Validate invoice exists and is approved
         let invoice = self.repo.get_invoice(&input.invoice_id).await?;
-        if invoice.status != "approved" {
-            return Err(AppError::Validation("Can only pay approved invoices".into()));
+        if invoice.status != "approved" && invoice.status != "partial" {
+            return Err(AppError::Validation("Can only pay approved or partially paid invoices".into()));
         }
+
+        // Verify vendor_id matches the invoice
+        if invoice.vendor_id != input.vendor_id {
+            return Err(AppError::Validation("Vendor ID does not match invoice".into()));
+        }
+
         self.repo.create_payment(input).await
     }
 }

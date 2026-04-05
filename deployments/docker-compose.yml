@@ -4,12 +4,20 @@ networks:
   frontend:
   backend:
 
+x-healthcheck: &default-healthcheck
+  healthcheck:
+    test: ["CMD", "nc", "-z", "localhost", "8000"]
+    interval: 10s
+    timeout: 5s
+    retries: 10
+    start_period: 15s
+
 services:
   nats:
     image: nats:2-alpine
     ports:
-      - "4222:4222"
-      - "8222:8222"
+      - "127.0.0.1:4222:4222"
+      - "127.0.0.1:8222:8222"
     command: ["--jetstream", "--store_dir", "/data"]
     volumes:
       - nats-data:/data
@@ -39,6 +47,7 @@ services:
     networks:
       - backend
     restart: unless-stopped
+    <<: *default-healthcheck
 
   config-svc:
     build:
@@ -58,6 +67,7 @@ services:
     networks:
       - backend
     restart: unless-stopped
+    <<: *default-healthcheck
 
   # === HCM Module ===
   employee:
@@ -78,6 +88,7 @@ services:
     networks:
       - backend
     restart: unless-stopped
+    <<: *default-healthcheck
 
   payroll:
     build:
@@ -97,6 +108,7 @@ services:
     networks:
       - backend
     restart: unless-stopped
+    <<: *default-healthcheck
 
   benefits:
     build:
@@ -116,6 +128,7 @@ services:
     networks:
       - backend
     restart: unless-stopped
+    <<: *default-healthcheck
 
   time-labor:
     build:
@@ -135,6 +148,7 @@ services:
     networks:
       - backend
     restart: unless-stopped
+    <<: *default-healthcheck
 
   recruiting:
     build:
@@ -154,6 +168,7 @@ services:
     networks:
       - backend
     restart: unless-stopped
+    <<: *default-healthcheck
 
   # === ERP Module ===
   general-ledger:
@@ -174,6 +189,7 @@ services:
     networks:
       - backend
     restart: unless-stopped
+    <<: *default-healthcheck
 
   accounts-payable:
     build:
@@ -193,6 +209,7 @@ services:
     networks:
       - backend
     restart: unless-stopped
+    <<: *default-healthcheck
 
   accounts-receivable:
     build:
@@ -212,6 +229,7 @@ services:
     networks:
       - backend
     restart: unless-stopped
+    <<: *default-healthcheck
 
   fixed-assets:
     build:
@@ -231,6 +249,7 @@ services:
     networks:
       - backend
     restart: unless-stopped
+    <<: *default-healthcheck
 
   cash-management:
     build:
@@ -250,6 +269,7 @@ services:
     networks:
       - backend
     restart: unless-stopped
+    <<: *default-healthcheck
 
   # === SCM Module ===
   inventory:
@@ -270,6 +290,7 @@ services:
     networks:
       - backend
     restart: unless-stopped
+    <<: *default-healthcheck
 
   procurement:
     build:
@@ -289,6 +310,7 @@ services:
     networks:
       - backend
     restart: unless-stopped
+    <<: *default-healthcheck
 
   order-management:
     build:
@@ -308,6 +330,7 @@ services:
     networks:
       - backend
     restart: unless-stopped
+    <<: *default-healthcheck
 
   manufacturing:
     build:
@@ -327,6 +350,7 @@ services:
     networks:
       - backend
     restart: unless-stopped
+    <<: *default-healthcheck
 
   # === Gateway (front door) ===
   gateway:
@@ -359,22 +383,38 @@ services:
     ports:
       - "8000:8000"
     depends_on:
-      - iam
-      - config-svc
-      - employee
-      - payroll
-      - benefits
-      - time-labor
-      - recruiting
-      - general-ledger
-      - accounts-payable
-      - accounts-receivable
-      - fixed-assets
-      - cash-management
-      - inventory
-      - procurement
-      - order-management
-      - manufacturing
+      iam:
+        condition: service_healthy
+      config-svc:
+        condition: service_healthy
+      employee:
+        condition: service_healthy
+      payroll:
+        condition: service_healthy
+      benefits:
+        condition: service_healthy
+      time-labor:
+        condition: service_healthy
+      recruiting:
+        condition: service_healthy
+      general-ledger:
+        condition: service_healthy
+      accounts-payable:
+        condition: service_healthy
+      accounts-receivable:
+        condition: service_healthy
+      fixed-assets:
+        condition: service_healthy
+      cash-management:
+        condition: service_healthy
+      inventory:
+        condition: service_healthy
+      procurement:
+        condition: service_healthy
+      order-management:
+        condition: service_healthy
+      manufacturing:
+        condition: service_healthy
     networks:
       - frontend
       - backend

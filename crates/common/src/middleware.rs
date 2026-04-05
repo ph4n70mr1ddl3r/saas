@@ -5,9 +5,25 @@ use std::env;
 
 pub fn create_cors_layer() -> CorsLayer {
     let cors_origin = env::var("CORS_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".to_string());
-    
-    CorsLayer::new()
-        .allow_origin(HeaderValue::from_bytes(cors_origin.as_bytes()).expect("Invalid CORS origin"))
+
+    let origins: Vec<HeaderValue> = cors_origin
+        .split(',')
+        .filter_map(|o| {
+            let trimmed = o.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            HeaderValue::from_str(trimmed).ok()
+        })
+        .collect();
+
+    let cors = if origins.len() == 1 {
+        CorsLayer::new().allow_origin(origins.into_iter().next().unwrap())
+    } else {
+        CorsLayer::new().allow_origin(origins)
+    };
+
+    cors
         .allow_methods([
             Method::GET,
             Method::POST,

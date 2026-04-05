@@ -15,7 +15,11 @@ const MAX_MESSAGE_SIZE: usize = 512 * 1024; // 512KB, well under NATS 1MB defaul
 
 impl NatsBus {
     pub async fn connect(url: &str, source: &str) -> Result<Self> {
-        let client = async_nats::connect(url).await?;
+        let client = async_nats::ConnectOptions::new()
+            .name(source.to_string())
+            .retry_on_initial_connect()
+            .connect(url)
+            .await?;
         Ok(Self { client, source: source.to_string() })
     }
 

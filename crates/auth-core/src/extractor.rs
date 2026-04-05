@@ -43,6 +43,11 @@ impl<S: Send + Sync> FromRequestParts<S> for AuthUser {
             .strip_prefix("Bearer ")
             .ok_or(AuthError::InvalidToken)?;
 
+        let token = token.trim();
+        if token.is_empty() {
+            return Err(AuthError::InvalidToken);
+        }
+
         let secret = crate::jwt::read_jwt_secret();
 
         let claims = decode_token(token, &secret)

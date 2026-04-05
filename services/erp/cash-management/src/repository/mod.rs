@@ -74,6 +74,11 @@ impl CashManagementRepo {
     }
 
     pub async fn create_bank_transaction(&self, input: &CreateBankTransactionRequest) -> AppResult<BankTransaction> {
+        // Validate amount is positive
+        if input.amount_cents <= 0 {
+            return Err(AppError::Validation("Transaction amount must be positive".into()));
+        }
+
         let id = uuid::Uuid::new_v4().to_string();
 
         // Compute delta: positive for deposits, negative for withdrawals
@@ -100,25 +105,29 @@ impl CashManagementRepo {
         .execute(&mut *tx)
         .await?;
 
-        // Atomic balance update - eliminates TOCTOU race
+        // Atomic balance update
         sqlx::query("UPDATE bank_accounts SET balance_cents = balance_cents + ? WHERE id = ?")
             .bind(delta)
             .bind(&input.bank_account_id)
             .execute(&mut *tx)
             .await?;
 
-        tx.commit().await?;
+        // Check for negative balance BEFORE commit (prevents overdrafts)
+        let balance: i64 = sqlx::query_scalar(
+            "SELECT balance_cents FROM bank_accounts WHERE id = ?",
+        )
+        .bind(&input.bank_account_id)
+        .fetch_one(&mut *tx)
+        .await?;
 
-        // Verify balance did not go negative after the update
-        let account = self.get_bank_account(&input.bank_account_id).await?;
-        if account.balance_cents < 0 {
-            // This is a data integrity concern - log a warning
-            tracing::warn!(
-                bank_account_id = %input.bank_account_id,
-                balance_cents = account.balance_cents,
-                "Bank account balance went negative after transaction"
-            );
+        if balance < 0 {
+            // Rollback the transaction by returning early - the tx is dropped without commit
+            return Err(AppError::Validation(
+                "Transaction would result in negative bank account balance".into(),
+            ));
         }
+
+        tx.commit().await?;
 
         sqlx::query_as::<_, BankTransaction>(
             "SELECT id, bank_account_id, amount_cents, transaction_date, description, type, reference, created_at FROM bank_transactions WHERE id = ?",
@@ -160,9 +169,18 @@ impl CashManagementRepo {
     pub async fn create_reconciliation(&self, input: &CreateReconciliationRequest) -> AppResult<Reconciliation> {
         let id = uuid::Uuid::new_v4().to_string();
 
-        // Get the current book balance from the bank account
-        let account = self.get_bank_account(&input.bank_account_id).await?;
-        let book_balance_cents = account.balance_cents;
+        // Wrap balance read and insert in a single transaction to prevent TOCTOU
+        let mut tx = self.pool.begin().await?;
+
+        // Get the current book balance from the bank account (within tx)
+        let book_balance_cents: i64 = sqlx::query_scalar(
+            "SELECT balance_cents FROM bank_accounts WHERE id = ?",
+        )
+        .bind(&input.bank_account_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|_| AppError::NotFound(format!("Bank account '{}' not found", input.bank_account_id)))?;
+
         let difference_cents = input.statement_balance_cents - book_balance_cents;
         let status = if difference_cents == 0 { "completed" } else { "open" };
 
@@ -177,8 +195,10 @@ impl CashManagementRepo {
         .bind(book_balance_cents)
         .bind(difference_cents)
         .bind(status)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+
+        tx.commit().await?;
 
         sqlx::query_as::<_, Reconciliation>(
             "SELECT id, bank_account_id, period_start, period_end, statement_balance_cents, book_balance_cents, difference_cents, status, created_at FROM reconciliations WHERE id = ?",
