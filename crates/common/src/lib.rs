@@ -1,5 +1,5 @@
 pub mod error;
-pub mod response;
-pub mod pagination;
-pub mod tracing_setup;
 pub mod middleware;
+pub mod pagination;
+pub mod response;
+pub mod tracing_setup;

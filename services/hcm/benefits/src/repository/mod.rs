@@ -1,6 +1,6 @@
-use sqlx::SqlitePool;
-use saas_common::error::{AppError, AppResult};
 use crate::models::*;
+use saas_common::error::{AppError, AppResult};
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
 pub struct BenefitsRepo {
@@ -58,8 +58,12 @@ impl BenefitsRepo {
         let name = input.name.as_deref().unwrap_or(&existing.name);
         let plan_type = input.plan_type.as_deref().unwrap_or(&existing.plan_type);
         let description = input.description.as_ref().or(existing.description.as_ref());
-        let employer_contribution = input.employer_contribution_cents.unwrap_or(existing.employer_contribution_cents);
-        let employee_contribution = input.employee_contribution_cents.unwrap_or(existing.employee_contribution_cents);
+        let employer_contribution = input
+            .employer_contribution_cents
+            .unwrap_or(existing.employer_contribution_cents);
+        let employee_contribution = input
+            .employee_contribution_cents
+            .unwrap_or(existing.employee_contribution_cents);
         let is_active = input.is_active.unwrap_or(existing.is_active);
 
         sqlx::query(
@@ -98,7 +102,10 @@ impl BenefitsRepo {
         .ok_or_else(|| AppError::NotFound(format!("Enrollment '{}' not found", id)))
     }
 
-    pub async fn list_enrollments_by_employee(&self, employee_id: &str) -> AppResult<Vec<Enrollment>> {
+    pub async fn list_enrollments_by_employee(
+        &self,
+        employee_id: &str,
+    ) -> AppResult<Vec<Enrollment>> {
         let rows = sqlx::query_as::<_, Enrollment>(
             "SELECT id, employee_id, plan_id, status, enrolled_at, cancelled_at FROM enrollments WHERE employee_id = ? ORDER BY enrolled_at DESC"
         )
@@ -108,7 +115,11 @@ impl BenefitsRepo {
         Ok(rows)
     }
 
-    pub async fn find_active_enrollment(&self, employee_id: &str, plan_id: &str) -> AppResult<Option<Enrollment>> {
+    pub async fn find_active_enrollment(
+        &self,
+        employee_id: &str,
+        plan_id: &str,
+    ) -> AppResult<Option<Enrollment>> {
         let row = sqlx::query_as::<_, Enrollment>(
             "SELECT id, employee_id, plan_id, status, enrolled_at, cancelled_at FROM enrollments WHERE employee_id = ? AND plan_id = ? AND status = 'active'"
         )
@@ -119,28 +130,27 @@ impl BenefitsRepo {
         Ok(row)
     }
 
-    pub async fn create_enrollment(&self, input: &CreateEnrollmentRequest) -> AppResult<Enrollment> {
+    pub async fn create_enrollment(
+        &self,
+        input: &CreateEnrollmentRequest,
+    ) -> AppResult<Enrollment> {
         let id = uuid::Uuid::new_v4().to_string();
-        sqlx::query(
-            "INSERT INTO enrollments (id, employee_id, plan_id) VALUES (?, ?, ?)"
-        )
-        .bind(&id)
-        .bind(&input.employee_id)
-        .bind(&input.plan_id)
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("INSERT INTO enrollments (id, employee_id, plan_id) VALUES (?, ?, ?)")
+            .bind(&id)
+            .bind(&input.employee_id)
+            .bind(&input.plan_id)
+            .execute(&self.pool)
+            .await?;
         self.get_enrollment(&id).await
     }
 
     pub async fn cancel_enrollment(&self, id: &str) -> AppResult<Enrollment> {
         let now = chrono::Utc::now().to_rfc3339();
-        sqlx::query(
-            "UPDATE enrollments SET status = 'cancelled', cancelled_at = ? WHERE id = ?"
-        )
-        .bind(&now)
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("UPDATE enrollments SET status = 'cancelled', cancelled_at = ? WHERE id = ?")
+            .bind(&now)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         self.get_enrollment(id).await
     }
 }

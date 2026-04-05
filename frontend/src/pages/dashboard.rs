@@ -1,6 +1,6 @@
+use crate::components::auth_guard::AuthGuard;
 use leptos::prelude::*;
 use leptos_router::components::A;
-use crate::components::auth_guard::AuthGuard;
 
 #[component]
 pub fn DashboardPage() -> impl IntoView {

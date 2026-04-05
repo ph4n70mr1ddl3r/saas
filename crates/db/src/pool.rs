@@ -1,6 +1,6 @@
-use sqlx::SqlitePool;
-use sqlx::sqlite::SqlitePoolOptions;
 use anyhow::Result;
+use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::SqlitePool;
 use std::time::Duration;
 
 pub async fn create_pool(database_url: &str) -> Result<SqlitePool> {

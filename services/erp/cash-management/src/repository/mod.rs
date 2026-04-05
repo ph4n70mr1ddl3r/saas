@@ -1,6 +1,6 @@
-use sqlx::SqlitePool;
-use saas_common::error::{AppError, AppResult};
 use crate::models::*;
+use saas_common::error::{AppError, AppResult};
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
 pub struct CashManagementRepo {
@@ -33,7 +33,10 @@ impl CashManagementRepo {
         .ok_or_else(|| AppError::NotFound(format!("Bank account '{}' not found", id)))
     }
 
-    pub async fn create_bank_account(&self, input: &CreateBankAccountRequest) -> AppResult<BankAccount> {
+    pub async fn create_bank_account(
+        &self,
+        input: &CreateBankAccountRequest,
+    ) -> AppResult<BankAccount> {
         let id = uuid::Uuid::new_v4().to_string();
         let balance_cents = input.balance_cents.unwrap_or(0);
         let currency = input.currency.as_deref().unwrap_or("USD");
@@ -73,10 +76,15 @@ impl CashManagementRepo {
         Ok(rows)
     }
 
-    pub async fn create_bank_transaction(&self, input: &CreateBankTransactionRequest) -> AppResult<BankTransaction> {
+    pub async fn create_bank_transaction(
+        &self,
+        input: &CreateBankTransactionRequest,
+    ) -> AppResult<BankTransaction> {
         // Validate amount is positive
         if input.amount_cents <= 0 {
-            return Err(AppError::Validation("Transaction amount must be positive".into()));
+            return Err(AppError::Validation(
+                "Transaction amount must be positive".into(),
+            ));
         }
 
         let id = uuid::Uuid::new_v4().to_string();
@@ -113,12 +121,11 @@ impl CashManagementRepo {
             .await?;
 
         // Check for negative balance BEFORE commit (prevents overdrafts)
-        let balance: i64 = sqlx::query_scalar(
-            "SELECT balance_cents FROM bank_accounts WHERE id = ?",
-        )
-        .bind(&input.bank_account_id)
-        .fetch_one(&mut *tx)
-        .await?;
+        let balance: i64 =
+            sqlx::query_scalar("SELECT balance_cents FROM bank_accounts WHERE id = ?")
+                .bind(&input.bank_account_id)
+                .fetch_one(&mut *tx)
+                .await?;
 
         if balance < 0 {
             // Rollback the transaction by returning early - the tx is dropped without commit
@@ -166,23 +173,34 @@ impl CashManagementRepo {
         Ok(rows)
     }
 
-    pub async fn create_reconciliation(&self, input: &CreateReconciliationRequest) -> AppResult<Reconciliation> {
+    pub async fn create_reconciliation(
+        &self,
+        input: &CreateReconciliationRequest,
+    ) -> AppResult<Reconciliation> {
         let id = uuid::Uuid::new_v4().to_string();
 
         // Wrap balance read and insert in a single transaction to prevent TOCTOU
         let mut tx = self.pool.begin().await?;
 
         // Get the current book balance from the bank account (within tx)
-        let book_balance_cents: i64 = sqlx::query_scalar(
-            "SELECT balance_cents FROM bank_accounts WHERE id = ?",
-        )
-        .bind(&input.bank_account_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|_| AppError::NotFound(format!("Bank account '{}' not found", input.bank_account_id)))?;
+        let book_balance_cents: i64 =
+            sqlx::query_scalar("SELECT balance_cents FROM bank_accounts WHERE id = ?")
+                .bind(&input.bank_account_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|_| {
+                    AppError::NotFound(format!(
+                        "Bank account '{}' not found",
+                        input.bank_account_id
+                    ))
+                })?;
 
         let difference_cents = input.statement_balance_cents - book_balance_cents;
-        let status = if difference_cents == 0 { "completed" } else { "open" };
+        let status = if difference_cents == 0 {
+            "completed"
+        } else {
+            "open"
+        };
 
         sqlx::query(
             "INSERT INTO reconciliations (id, bank_account_id, period_start, period_end, statement_balance_cents, book_balance_cents, difference_cents, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -207,5 +225,120 @@ impl CashManagementRepo {
         .fetch_one(&self.pool)
         .await
         .map_err(|e| e.into())
+    }
+
+    // --- Cash Flow Statement ---
+
+    pub async fn cash_flow_statement(
+        &self,
+        period_start: &str,
+        period_end: &str,
+    ) -> AppResult<Vec<CashFlowRow>> {
+        let rows = sqlx::query_as::<_, CashFlowRow>(
+            r#"
+            SELECT
+                COALESCE(flow_category, 'uncategorized') AS category,
+                description,
+                amount_cents
+            FROM bank_transactions
+            WHERE transaction_date >= ? AND transaction_date <= ?
+                AND flow_category IS NOT NULL
+            ORDER BY flow_category, transaction_date
+            "#,
+        )
+        .bind(period_start)
+        .bind(period_end)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    // --- Transfers ---
+
+    pub async fn transfer_between_accounts(
+        &self,
+        from_id: &str,
+        to_id: &str,
+        amount_cents: i64,
+        transfer_date: &str,
+        description: Option<&str>,
+        reference: Option<&str>,
+    ) -> AppResult<(BankTransaction, BankTransaction)> {
+        let withdrawal_id = uuid::Uuid::new_v4().to_string();
+        let deposit_id = uuid::Uuid::new_v4().to_string();
+
+        let mut tx = self.pool.begin().await?;
+
+        // Insert withdrawal on source account
+        sqlx::query(
+            "INSERT INTO bank_transactions (id, bank_account_id, amount_cents, transaction_date, description, type, reference, flow_category) VALUES (?, ?, ?, ?, ?, 'withdrawal', ?, 'operating')",
+        )
+        .bind(&withdrawal_id)
+        .bind(from_id)
+        .bind(amount_cents)
+        .bind(transfer_date)
+        .bind(description)
+        .bind(reference)
+        .execute(&mut *tx)
+        .await?;
+
+        // Debit source account balance
+        sqlx::query("UPDATE bank_accounts SET balance_cents = balance_cents - ? WHERE id = ?")
+            .bind(amount_cents)
+            .bind(from_id)
+            .execute(&mut *tx)
+            .await?;
+
+        // Check source balance is non-negative
+        let from_balance: i64 =
+            sqlx::query_scalar("SELECT balance_cents FROM bank_accounts WHERE id = ?")
+                .bind(from_id)
+                .fetch_one(&mut *tx)
+                .await?;
+
+        if from_balance < 0 {
+            return Err(AppError::Validation(
+                "Transfer would result in negative balance on source account".into(),
+            ));
+        }
+
+        // Insert deposit on target account
+        sqlx::query(
+            "INSERT INTO bank_transactions (id, bank_account_id, amount_cents, transaction_date, description, type, reference, flow_category) VALUES (?, ?, ?, ?, ?, 'deposit', ?, 'operating')",
+        )
+        .bind(&deposit_id)
+        .bind(to_id)
+        .bind(amount_cents)
+        .bind(transfer_date)
+        .bind(description)
+        .bind(reference)
+        .execute(&mut *tx)
+        .await?;
+
+        // Credit target account balance
+        sqlx::query("UPDATE bank_accounts SET balance_cents = balance_cents + ? WHERE id = ?")
+            .bind(amount_cents)
+            .bind(to_id)
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+
+        // Fetch the created transactions
+        let withdrawal = sqlx::query_as::<_, BankTransaction>(
+            "SELECT id, bank_account_id, amount_cents, transaction_date, description, type, reference, created_at FROM bank_transactions WHERE id = ?",
+        )
+        .bind(&withdrawal_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        let deposit = sqlx::query_as::<_, BankTransaction>(
+            "SELECT id, bank_account_id, amount_cents, transaction_date, description, type, reference, created_at FROM bank_transactions WHERE id = ?",
+        )
+        .bind(&deposit_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok((withdrawal, deposit))
     }
 }

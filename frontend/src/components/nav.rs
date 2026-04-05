@@ -1,6 +1,6 @@
+use crate::state::auth::use_auth;
 use leptos::prelude::*;
 use leptos_router::components::A;
-use crate::state::auth::use_auth;
 
 #[component]
 pub fn NavBar() -> impl IntoView {

@@ -1,13 +1,13 @@
 use saas_common::tracing_setup;
-use saas_db::{pool::create_pool, migrate::run_migrations};
+use saas_db::{migrate::run_migrations, pool::create_pool};
 use saas_nats_bus::NatsBus;
 use std::env;
 
 mod handlers;
 mod models;
 mod repository;
-mod service;
 mod routes;
+mod service;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -15,13 +15,9 @@ async fn main() -> anyhow::Result<()> {
 
     saas_auth_core::jwt::init_jwt_secret();
 
-    let database_url = env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "sqlite:./data/iam.db".into());
-    let nats_url = env::var("NATS_URL")
-        .unwrap_or_else(|_| "nats://localhost:4222".into());
-    let port: u16 = env::var("PORT")
-        .unwrap_or_else(|_| "8001".into())
-        .parse()?;
+    let database_url = env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:./data/iam.db".into());
+    let nats_url = env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".into());
+    let port: u16 = env::var("PORT").unwrap_or_else(|_| "8001".into()).parse()?;
 
     // Ensure data directory exists
     std::fs::create_dir_all("./data")?;

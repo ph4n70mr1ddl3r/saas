@@ -1,8 +1,8 @@
-use sqlx::SqlitePool;
-use saas_nats_bus::NatsBus;
-use saas_common::error::{AppError, AppResult};
 use crate::models::*;
 use crate::repository::FixedAssetsRepo;
+use saas_common::error::{AppError, AppResult};
+use saas_nats_bus::NatsBus;
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
 pub struct FixedAssetsService {
@@ -31,7 +31,9 @@ impl FixedAssetsService {
 
     pub async fn create_asset(&self, input: &CreateAssetRequest) -> AppResult<Asset> {
         if input.purchase_cost_cents < 0 {
-            return Err(AppError::Validation("Purchase cost must be non-negative".into()));
+            return Err(AppError::Validation(
+                "Purchase cost must be non-negative".into(),
+            ));
         }
         if input.useful_life_months <= 0 {
             return Err(AppError::Validation("Useful life must be positive".into()));
@@ -45,7 +47,8 @@ impl FixedAssetsService {
             let valid = ["active", "disposed"];
             if !valid.contains(&status.as_str()) {
                 return Err(AppError::Validation(format!(
-                    "Invalid status '{}'. Must be one of: {:?}", status, valid
+                    "Invalid status '{}'. Must be one of: {:?}",
+                    status, valid
                 )));
             }
         }
@@ -66,7 +69,11 @@ impl FixedAssetsService {
         // for this period, before doing any work.
         let assets = self.repo.list_active_assets().await?;
         for asset in &assets {
-            if self.repo.has_depreciation_for_period(&asset.id, period).await? {
+            if self
+                .repo
+                .has_depreciation_for_period(&asset.id, period)
+                .await?
+            {
                 return Err(AppError::Conflict(format!(
                     "Depreciation already exists for asset '{}' in period '{}'. Abort to prevent duplicates.",
                     asset.id, period
@@ -78,7 +85,11 @@ impl FixedAssetsService {
 
         for asset in &assets {
             // Skip if already depreciated this period (defensive double-check)
-            if self.repo.has_depreciation_for_period(&asset.id, period).await? {
+            if self
+                .repo
+                .has_depreciation_for_period(&asset.id, period)
+                .await?
+            {
                 continue;
             }
 
@@ -96,18 +107,22 @@ impl FixedAssetsService {
             // Get accumulated depreciation so far
             let last = self.repo.get_last_depreciation(&asset.id).await?;
             let previous_accumulated = last.as_ref().map(|d| d.accumulated_cents).unwrap_or(0);
-            let previous_nbv = last.as_ref().map(|d| d.net_book_value_cents).unwrap_or(asset.purchase_cost_cents);
+            let previous_nbv = last
+                .as_ref()
+                .map(|d| d.net_book_value_cents)
+                .unwrap_or(asset.purchase_cost_cents);
 
             let new_accumulated = previous_accumulated + monthly_depreciation;
             let new_nbv = previous_nbv - monthly_depreciation;
 
             // Don't depreciate below salvage value
             let new_nbv = std::cmp::max(new_nbv, asset.salvage_value_cents);
-            let actual_depreciation = if previous_nbv - monthly_depreciation < asset.salvage_value_cents {
-                (previous_nbv - asset.salvage_value_cents).max(0)
-            } else {
-                monthly_depreciation
-            };
+            let actual_depreciation =
+                if previous_nbv - monthly_depreciation < asset.salvage_value_cents {
+                    (previous_nbv - asset.salvage_value_cents).max(0)
+                } else {
+                    monthly_depreciation
+                };
 
             if actual_depreciation <= 0 {
                 continue;
@@ -116,13 +131,16 @@ impl FixedAssetsService {
             let final_accumulated = previous_accumulated + actual_depreciation;
             let final_nbv = previous_nbv - actual_depreciation;
 
-            let schedule = self.repo.insert_depreciation(
-                &asset.id,
-                period,
-                actual_depreciation,
-                final_accumulated,
-                final_nbv,
-            ).await?;
+            let schedule = self
+                .repo
+                .insert_depreciation(
+                    &asset.id,
+                    period,
+                    actual_depreciation,
+                    final_accumulated,
+                    final_nbv,
+                )
+                .await?;
 
             results.push(schedule);
         }

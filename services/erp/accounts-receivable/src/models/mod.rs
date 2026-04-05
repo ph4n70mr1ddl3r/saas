@@ -88,3 +88,49 @@ pub struct ArInvoiceWithLines {
     pub invoice: ArInvoice,
     pub lines: Vec<ArInvoiceLine>,
 }
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct CreditMemo {
+    pub id: String,
+    pub customer_id: String,
+    pub amount_cents: i64,
+    pub reason: Option<String>,
+    pub status: String,
+    pub applied_to_invoice_id: Option<String>,
+    pub applied_amount_cents: i64,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateCreditMemoRequest {
+    pub customer_id: String,
+    pub amount_cents: i64,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ApplyCreditMemoRequest {
+    pub invoice_id: String,
+    pub amount_cents: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ArAgingRow {
+    pub customer_id: String,
+    pub customer_name: String,
+    pub invoice_id: String,
+    pub invoice_number: String,
+    pub total_cents: i64,
+    pub due_date: String,
+    pub aging_bucket: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ArAgingReport {
+    pub current_total: i64,
+    pub bucket_1_30_total: i64,
+    pub bucket_31_60_total: i64,
+    pub bucket_61_90_total: i64,
+    pub bucket_90_plus_total: i64,
+    pub invoices: Vec<ArAgingRow>,
+}

@@ -1,9 +1,9 @@
-use sqlx::SqlitePool;
-use saas_nats_bus::NatsBus;
-use saas_common::error::{AppError, AppResult};
-use saas_proto::events::PayRunCompleted;
 use crate::models::*;
 use crate::repository::PayrollRepo;
+use saas_common::error::{AppError, AppResult};
+use saas_nats_bus::NatsBus;
+use saas_proto::events::PayRunCompleted;
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
 pub struct PayrollService {
@@ -29,18 +29,30 @@ impl PayrollService {
         self.repo.get_compensation(id).await
     }
 
-    pub async fn list_compensation_by_employee(&self, employee_id: &str) -> AppResult<Vec<Compensation>> {
+    pub async fn list_compensation_by_employee(
+        &self,
+        employee_id: &str,
+    ) -> AppResult<Vec<Compensation>> {
         self.repo.list_compensation_by_employee(employee_id).await
     }
 
-    pub async fn create_compensation(&self, input: CreateCompensationRequest) -> AppResult<Compensation> {
+    pub async fn create_compensation(
+        &self,
+        input: CreateCompensationRequest,
+    ) -> AppResult<Compensation> {
         if input.amount_cents < 0 {
-            return Err(AppError::Validation("amount_cents must be non-negative".into()));
+            return Err(AppError::Validation(
+                "amount_cents must be non-negative".into(),
+            ));
         }
         self.repo.create_compensation(&input).await
     }
 
-    pub async fn update_compensation(&self, id: &str, input: UpdateCompensationRequest) -> AppResult<Compensation> {
+    pub async fn update_compensation(
+        &self,
+        id: &str,
+        input: UpdateCompensationRequest,
+    ) -> AppResult<Compensation> {
         self.repo.update_compensation(id, &input).await
     }
 
@@ -57,9 +69,10 @@ impl PayrollService {
     pub async fn process_pay_run(&self, id: &str) -> AppResult<PayRun> {
         let pay_run = self.repo.get_pay_run(id).await?;
         if pay_run.status != "draft" {
-            return Err(AppError::Validation(
-                format!("Pay run '{}' is not in draft status (current: {})", id, pay_run.status)
-            ));
+            return Err(AppError::Validation(format!(
+                "Pay run '{}' is not in draft status (current: {})",
+                id, pay_run.status
+            )));
         }
 
         let original_status = pay_run.status.clone();
@@ -67,11 +80,15 @@ impl PayrollService {
 
         // Only process compensation records with effective_date within the pay period
         let compensations = self.repo.list_compensation().await?;
-        let filtered: Vec<_> = compensations.into_iter().filter(|c| {
-            c.end_date.is_none() && c.amount_cents > 0
-            && c.effective_date <= pay_run.period_end
-            && (c.effective_date.is_empty() || c.effective_date >= pay_run.period_start)
-        }).collect();
+        let filtered: Vec<_> = compensations
+            .into_iter()
+            .filter(|c| {
+                c.end_date.is_none()
+                    && c.amount_cents > 0
+                    && c.effective_date <= pay_run.period_end
+                    && (c.effective_date.is_empty() || c.effective_date >= pay_run.period_start)
+            })
+            .collect();
 
         let mut total_net_cents: i64 = 0;
         let mut payslip_count: u32 = 0;
@@ -80,20 +97,27 @@ impl PayrollService {
         for comp in &filtered {
             let gross = comp.amount_cents;
             let tax = (gross * 22 + 50) / 100; // Rounded integer division for 22%
-            let deductions = self.repo.list_deductions_by_employee(&comp.employee_id).await?;
+            let deductions = self
+                .repo
+                .list_deductions_by_employee(&comp.employee_id)
+                .await?;
             let total_deductions: i64 = deductions.iter().map(|d| d.amount_cents).sum();
             let net = gross - tax - total_deductions;
 
             // Prevent negative net pay
             if net < 0 {
                 // Roll back to original status on failure
-                self.repo.update_pay_run_status(id, &original_status).await?;
+                self.repo
+                    .update_pay_run_status(id, &original_status)
+                    .await?;
                 return Err(AppError::Validation(
-                    "Net pay would be negative after deductions".into()
+                    "Net pay would be negative after deductions".into(),
                 ));
             }
 
-            self.repo.create_payslip(id, &comp.employee_id, gross, net, tax, total_deductions).await?;
+            self.repo
+                .create_payslip(id, &comp.employee_id, gross, net, tax, total_deductions)
+                .await?;
             total_net_cents += net;
             payslip_count += 1;
         }
@@ -108,7 +132,11 @@ impl PayrollService {
             total_net_pay_cents: total_net_cents,
         };
         if let Err(e) = self.bus.publish("hcm.payroll.run.completed", event).await {
-            tracing::error!("CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.", "hcm.payroll.run.completed", e);
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "hcm.payroll.run.completed",
+                e
+            );
         }
 
         Ok(pay_run)
@@ -121,13 +149,18 @@ impl PayrollService {
 
     // --- Deductions ---
 
-    pub async fn list_deductions_by_employee(&self, employee_id: &str) -> AppResult<Vec<Deduction>> {
+    pub async fn list_deductions_by_employee(
+        &self,
+        employee_id: &str,
+    ) -> AppResult<Vec<Deduction>> {
         self.repo.list_deductions_by_employee(employee_id).await
     }
 
     pub async fn create_deduction(&self, input: CreateDeductionRequest) -> AppResult<Deduction> {
         if input.amount_cents < 0 {
-            return Err(AppError::Validation("amount_cents must be non-negative".into()));
+            return Err(AppError::Validation(
+                "amount_cents must be non-negative".into(),
+            ));
         }
         self.repo.create_deduction(&input).await
     }

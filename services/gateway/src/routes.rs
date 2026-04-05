@@ -1,11 +1,14 @@
-use axum::{routing::get, Router, extract::State, http::Request, body::Body, response::Response, extract::ConnectInfo};
+use crate::proxy;
+use crate::rate_limit;
+use axum::{
+    body::Body, extract::ConnectInfo, extract::State, http::Request, response::Response,
+    routing::get, Router,
+};
 use reqwest::Client;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use crate::proxy;
-use crate::rate_limit;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -38,13 +41,16 @@ async fn proxy_handler(
 
     {
         let mut limiters = state.rate_limiter.write().await;
-        let bucket = limiters.entry(ip.clone())
+        let bucket = limiters
+            .entry(ip.clone())
             .or_insert_with(rate_limit::TokenBucket::new);
         if !bucket.try_consume() {
-            return axum::response::IntoResponse::into_response(
-                (axum::http::StatusCode::TOO_MANY_REQUESTS,
-                 axum::Json(serde_json::json!({"error": {"code": "RATE_LIMITED", "message": "Too many requests"}})))
-            );
+            return axum::response::IntoResponse::into_response((
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                axum::Json(
+                    serde_json::json!({"error": {"code": "RATE_LIMITED", "message": "Too many requests"}}),
+                ),
+            ));
         }
     }
 
@@ -54,29 +60,48 @@ async fn proxy_handler(
     if let Some(backend_url) = state.service_map.get(&service_key) {
         proxy::forward_request(req, backend_url, &state.http_client, &ip).await
     } else {
-        axum::response::IntoResponse::into_response(
-            (axum::http::StatusCode::NOT_FOUND,
-             axum::Json(serde_json::json!({"error": {"code": "NOT_FOUND", "message": "No service found for path"}})))
-        )
+        axum::response::IntoResponse::into_response((
+            axum::http::StatusCode::NOT_FOUND,
+            axum::Json(
+                serde_json::json!({"error": {"code": "NOT_FOUND", "message": "No service found for path"}}),
+            ),
+        ))
     }
 }
 
 fn resolve_service(path: &str) -> String {
     // Map path prefixes to service keys
-    if path.starts_with("/api/v1/auth") || path.starts_with("/api/v1/users") || path.starts_with("/api/v1/roles") || path.starts_with("/api/v1/permissions") {
+    if path.starts_with("/api/v1/auth")
+        || path.starts_with("/api/v1/users")
+        || path.starts_with("/api/v1/roles")
+        || path.starts_with("/api/v1/permissions")
+    {
         return "iam".to_string();
     }
     if path.starts_with("/api/v1/config") {
         return "config".to_string();
     }
-    if path.starts_with("/api/v1/employees") || path.starts_with("/api/v1/departments") || path.starts_with("/api/v1/org-chart") {
+    if path.starts_with("/api/v1/employees")
+        || path.starts_with("/api/v1/departments")
+        || path.starts_with("/api/v1/org-chart")
+    {
         return "employee".to_string();
     }
-    if path.starts_with("/api/v1/compensation") || path.starts_with("/api/v1/pay-runs") || path.starts_with("/api/v1/deductions") {
+    if path.starts_with("/api/v1/compensation")
+        || path.starts_with("/api/v1/pay-runs")
+        || path.starts_with("/api/v1/deductions")
+    {
         return "payroll".to_string();
     }
     if path.starts_with("/api/v1/benefits") {
         return "benefits".to_string();
+    }
+    if path.starts_with("/api/v1/review-cycles")
+        || path.starts_with("/api/v1/goals")
+        || path.starts_with("/api/v1/review-assignments")
+        || path.starts_with("/api/v1/feedback")
+    {
+        return "performance".to_string();
     }
     if path.starts_with("/api/v1/timesheets") || path.starts_with("/api/v1/leave") {
         return "time-labor".to_string();
@@ -84,31 +109,62 @@ fn resolve_service(path: &str) -> String {
     if path.starts_with("/api/v1/jobs") || path.starts_with("/api/v1/applications") {
         return "recruiting".to_string();
     }
-    if path.starts_with("/api/v1/accounts") || path.starts_with("/api/v1/periods") || path.starts_with("/api/v1/journal-entries") || path.starts_with("/api/v1/trial-balance") || path.starts_with("/api/v1/balance-sheet") {
+    if path.starts_with("/api/v1/accounts")
+        || path.starts_with("/api/v1/periods")
+        || path.starts_with("/api/v1/journal-entries")
+        || path.starts_with("/api/v1/trial-balance")
+        || path.starts_with("/api/v1/balance-sheet")
+        || path.starts_with("/api/v1/income-statement")
+        || path.starts_with("/api/v1/budgets")
+    {
         return "gl".to_string();
     }
-    if path.starts_with("/api/v1/vendors") || path.starts_with("/api/v1/ap-invoices") {
+    if path.starts_with("/api/v1/vendors")
+        || path.starts_with("/api/v1/ap-invoices")
+        || path.starts_with("/api/v1/ap-payments")
+        || path.starts_with("/api/v1/tax-codes")
+    {
         return "ap".to_string();
     }
-    if path.starts_with("/api/v1/ap-payments") {
-        return "ap".to_string();
-    }
-    if path.starts_with("/api/v1/customers") || path.starts_with("/api/v1/ar-invoices") || path.starts_with("/api/v1/receipts") {
+    if path.starts_with("/api/v1/customers")
+        || path.starts_with("/api/v1/ar-invoices")
+        || path.starts_with("/api/v1/receipts")
+        || path.starts_with("/api/v1/credit-memos")
+    {
         return "ar".to_string();
     }
     if path.starts_with("/api/v1/assets") || path.starts_with("/api/v1/depreciation") {
         return "assets".to_string();
     }
-    if path.starts_with("/api/v1/bank-accounts") || path.starts_with("/api/v1/reconciliations") {
+    if path.starts_with("/api/v1/bank-accounts")
+        || path.starts_with("/api/v1/reconciliations")
+        || path.starts_with("/api/v1/bank-transactions")
+        || path.starts_with("/api/v1/cash-flow-statement")
+    {
         return "cash".to_string();
     }
-    if path.starts_with("/api/v1/warehouses") || path.starts_with("/api/v1/items") || path.starts_with("/api/v1/stock-movements") || path.starts_with("/api/v1/reservations") {
+    if path.starts_with("/api/v1/expense-categories")
+        || path.starts_with("/api/v1/expense-reports")
+        || path.starts_with("/api/v1/per-diems")
+        || path.starts_with("/api/v1/mileage")
+    {
+        return "expense-mgmt".to_string();
+    }
+    if path.starts_with("/api/v1/warehouses")
+        || path.starts_with("/api/v1/items")
+        || path.starts_with("/api/v1/stock-movements")
+        || path.starts_with("/api/v1/reservations")
+        || path.starts_with("/api/v1/cycle-counts")
+    {
         return "inventory".to_string();
     }
     if path.starts_with("/api/v1/suppliers") || path.starts_with("/api/v1/purchase-orders") {
         return "procurement".to_string();
     }
-    if path.starts_with("/api/v1/sales-orders") || path.starts_with("/api/v1/fulfillments") || path.starts_with("/api/v1/returns") {
+    if path.starts_with("/api/v1/sales-orders")
+        || path.starts_with("/api/v1/fulfillments")
+        || path.starts_with("/api/v1/returns")
+    {
         return "orders".to_string();
     }
     if path.starts_with("/api/v1/work-orders") || path.starts_with("/api/v1/bom") {

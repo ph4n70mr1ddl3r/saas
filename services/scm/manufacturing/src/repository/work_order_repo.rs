@@ -1,12 +1,16 @@
-use sqlx::SqlitePool;
+use crate::models::work_order::{CreateWorkOrder, WorkOrderResponse};
 use saas_common::error::{AppError, AppResult};
-use crate::models::work_order::{WorkOrderResponse, CreateWorkOrder};
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
-pub struct WorkOrderRepo { pool: SqlitePool }
+pub struct WorkOrderRepo {
+    pool: SqlitePool,
+}
 
 impl WorkOrderRepo {
-    pub fn new(pool: SqlitePool) -> Self { Self { pool } }
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
 
     pub async fn list(&self) -> AppResult<Vec<WorkOrderResponse>> {
         let rows = sqlx::query_as::<_, WorkOrderResponse>(
@@ -36,7 +40,13 @@ impl WorkOrderRepo {
         self.get_by_id(&id).await
     }
 
-    pub async fn update_status(&self, id: &str, status: &str, actual_start: Option<&str>, actual_end: Option<&str>) -> AppResult<()> {
+    pub async fn update_status(
+        &self,
+        id: &str,
+        status: &str,
+        actual_start: Option<&str>,
+        actual_end: Option<&str>,
+    ) -> AppResult<()> {
         let result = sqlx::query(
             "UPDATE work_orders SET status = ?, actual_start = COALESCE(?, actual_start), actual_end = COALESCE(?, actual_end) WHERE id = ?"
         )

@@ -1,7 +1,7 @@
-use sqlx::SqlitePool;
+use crate::models::user::{CreateUser, UserListRow, UserRow};
 use saas_common::error::{AppError, AppResult};
 use saas_common::pagination::PaginationParams;
-use crate::models::user::{UserRow, UserListRow, CreateUser};
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
 pub struct UserRepo {
@@ -88,7 +88,13 @@ impl UserRepo {
         self.get_by_id(&id).await
     }
 
-    pub async fn update(&self, id: &str, email: Option<&str>, display_name: Option<&str>, is_active: Option<bool>) -> AppResult<UserRow> {
+    pub async fn update(
+        &self,
+        id: &str,
+        email: Option<&str>,
+        display_name: Option<&str>,
+        is_active: Option<bool>,
+    ) -> AppResult<UserRow> {
         let now = chrono::Utc::now().to_rfc3339();
         // Use COALESCE for atomic single-statement update (no read-then-write race)
         sqlx::query("UPDATE users SET email = COALESCE(?, email), display_name = COALESCE(?, display_name), is_active = COALESCE(?, is_active), updated_at = ? WHERE id = ?")

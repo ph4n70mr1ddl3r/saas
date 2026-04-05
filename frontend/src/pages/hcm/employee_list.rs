@@ -1,8 +1,8 @@
+use crate::components::auth_guard::AuthGuard;
+use crate::state::auth::use_auth;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::components::A;
-use crate::components::auth_guard::AuthGuard;
-use crate::state::auth::use_auth;
 
 #[derive(Clone, Debug, serde::Deserialize)]
 struct Employee {
@@ -24,10 +24,16 @@ pub fn EmployeeListPage() -> impl IntoView {
     Effect::new(move |_| {
         spawn_local(async move {
             let client = reqwest::Client::new();
-            let mut req = client.get(&format!("{}/api/v1/employees",
-                std::env::var("API_BASE_URL").unwrap_or_else(|_| "http://localhost:8000".to_string())));
+            let mut req = client.get(&format!(
+                "{}/api/v1/employees",
+                std::env::var("API_BASE_URL")
+                    .unwrap_or_else(|_| "http://localhost:8000".to_string())
+            ));
             if let Some(auth_state) = auth.get() {
-                req = req.header("Authorization", format!("Bearer {}", auth_state.access_token));
+                req = req.header(
+                    "Authorization",
+                    format!("Bearer {}", auth_state.access_token),
+                );
             }
             let result = req.send().await;
             if let Ok(resp) = result {

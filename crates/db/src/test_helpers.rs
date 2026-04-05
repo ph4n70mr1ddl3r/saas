@@ -1,5 +1,5 @@
-use sqlx::SqlitePool;
 use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::SqlitePool;
 
 pub async fn create_test_pool() -> SqlitePool {
     let pool = SqlitePoolOptions::new()

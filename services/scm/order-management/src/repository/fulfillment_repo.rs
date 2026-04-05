@@ -1,14 +1,24 @@
-use sqlx::SqlitePool;
-use saas_common::error::AppResult;
 use crate::models::fulfillment::FulfillmentResponse;
+use saas_common::error::AppResult;
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
-pub struct FulfillmentRepo { pool: SqlitePool }
+pub struct FulfillmentRepo {
+    pool: SqlitePool,
+}
 
 impl FulfillmentRepo {
-    pub fn new(pool: SqlitePool) -> Self { Self { pool } }
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
 
-    pub async fn create(&self, order_id: &str, order_line_id: &str, quantity: i64, warehouse_id: &str) -> AppResult<FulfillmentResponse> {
+    pub async fn create(
+        &self,
+        order_id: &str,
+        order_line_id: &str,
+        quantity: i64,
+        warehouse_id: &str,
+    ) -> AppResult<FulfillmentResponse> {
         let id = uuid::Uuid::new_v4().to_string();
         sqlx::query(
             "INSERT INTO fulfillments (id, order_id, order_line_id, quantity, warehouse_id, status) VALUES (?, ?, ?, ?, ?, 'pending')"
@@ -26,8 +36,10 @@ impl FulfillmentRepo {
 
     pub async fn update_status(&self, id: &str, status: &str) -> AppResult<()> {
         sqlx::query("UPDATE fulfillments SET status = ? WHERE id = ?")
-            .bind(status).bind(id)
-            .execute(&self.pool).await?;
+            .bind(status)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 }

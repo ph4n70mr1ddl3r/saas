@@ -1,12 +1,16 @@
-use sqlx::SqlitePool;
+use crate::models::item::{CreateItem, ItemFilters, ItemResponse};
 use saas_common::error::{AppError, AppResult};
-use crate::models::item::{ItemResponse, CreateItem, ItemFilters};
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
-pub struct ItemRepo { pool: SqlitePool }
+pub struct ItemRepo {
+    pool: SqlitePool,
+}
 
 impl ItemRepo {
-    pub fn new(pool: SqlitePool) -> Self { Self { pool } }
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
 
     pub async fn list(&self, filters: &ItemFilters) -> AppResult<Vec<ItemResponse>> {
         let rows = sqlx::query_as::<_, ItemResponse>(
@@ -39,7 +43,15 @@ impl ItemRepo {
         self.get_by_id(&id).await
     }
 
-    pub async fn update(&self, id: &str, name: Option<&str>, description: Option<&str>, unit_of_measure: Option<&str>, item_type: Option<&str>, is_active: Option<bool>) -> AppResult<ItemResponse> {
+    pub async fn update(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        description: Option<&str>,
+        unit_of_measure: Option<&str>,
+        item_type: Option<&str>,
+        is_active: Option<bool>,
+    ) -> AppResult<ItemResponse> {
         let current = self.get_by_id(id).await?;
         sqlx::query(
             "UPDATE items SET name=?, description=?, unit_of_measure=?, item_type=?, is_active=? WHERE id=?"

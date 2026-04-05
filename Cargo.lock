@@ -3099,6 +3099,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "saas-erp-expense-mgmt"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum 0.8.8",
+ "chrono",
+ "saas-auth-core",
+ "saas-common",
+ "saas-db",
+ "saas-nats-bus",
+ "saas-proto",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tower-http",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "saas-erp-fixed-assets"
 version = "0.1.0"
 dependencies = [
@@ -3229,6 +3250,27 @@ dependencies = [
 
 [[package]]
 name = "saas-hcm-payroll"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum 0.8.8",
+ "chrono",
+ "saas-auth-core",
+ "saas-common",
+ "saas-db",
+ "saas-nats-bus",
+ "saas-proto",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tower-http",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "saas-hcm-performance"
 version = "0.1.0"
 dependencies = [
  "anyhow",

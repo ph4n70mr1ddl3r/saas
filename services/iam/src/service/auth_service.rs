@@ -1,9 +1,9 @@
-use sqlx::SqlitePool;
-use saas_nats_bus::NatsBus;
-use saas_common::error::{AppError, AppResult};
-use saas_auth_core::jwt;
-use crate::repository::user_repo::UserRepo;
 use crate::models::user::{LoginRequest, LoginResponse, UserResponse};
+use crate::repository::user_repo::UserRepo;
+use saas_auth_core::jwt;
+use saas_common::error::{AppError, AppResult};
+use saas_nats_bus::NatsBus;
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
 pub struct AuthService {
@@ -13,7 +13,10 @@ pub struct AuthService {
 
 impl AuthService {
     pub fn new(pool: SqlitePool, bus: NatsBus) -> Self {
-        Self { repo: UserRepo::new(pool), bus }
+        Self {
+            repo: UserRepo::new(pool),
+            bus,
+        }
     }
 
     pub async fn login(&self, req: LoginRequest) -> AppResult<LoginResponse> {
@@ -24,7 +27,9 @@ impl AuthService {
                 let dummy_hash = "$argon2id$v=19$m=19456,t=2,p=1$dummypass$dummypass";
                 let _ = argon2::PasswordHash::new(dummy_hash).ok().map(|h| {
                     let _ = argon2::PasswordVerifier::verify_password(
-                        &argon2::Argon2::default(), req.password.as_bytes(), &h
+                        &argon2::Argon2::default(),
+                        req.password.as_bytes(),
+                        &h,
                     );
                 });
                 return Err(AppError::Unauthorized);
@@ -42,7 +47,9 @@ impl AuthService {
             &argon2::Argon2::default(),
             req.password.as_bytes(),
             &parsed_hash,
-        ).is_err() {
+        )
+        .is_err()
+        {
             return Err(AppError::Unauthorized);
         }
 

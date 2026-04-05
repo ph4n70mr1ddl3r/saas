@@ -1,14 +1,24 @@
-use sqlx::SqlitePool;
-use saas_common::error::AppResult;
 use crate::models::goods_receipt::GoodsReceiptResponse;
+use saas_common::error::AppResult;
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
-pub struct GoodsReceiptRepo { pool: SqlitePool }
+pub struct GoodsReceiptRepo {
+    pool: SqlitePool,
+}
 
 impl GoodsReceiptRepo {
-    pub fn new(pool: SqlitePool) -> Self { Self { pool } }
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
 
-    pub async fn create(&self, po_id: &str, po_line_id: &str, quantity_received: i64, received_date: &str) -> AppResult<GoodsReceiptResponse> {
+    pub async fn create(
+        &self,
+        po_id: &str,
+        po_line_id: &str,
+        quantity_received: i64,
+        received_date: &str,
+    ) -> AppResult<GoodsReceiptResponse> {
         let id = uuid::Uuid::new_v4().to_string();
         sqlx::query(
             "INSERT INTO goods_receipts (id, po_id, po_line_id, quantity_received, received_date) VALUES (?, ?, ?, ?, ?)"

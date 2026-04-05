@@ -1,6 +1,6 @@
-use sqlx::SqlitePool;
-use saas_common::error::{AppError, AppResult};
 use crate::models::*;
+use saas_common::error::{AppError, AppResult};
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
 pub struct TimeLaborRepo {
@@ -33,7 +33,10 @@ impl TimeLaborRepo {
         .ok_or_else(|| AppError::NotFound(format!("Timesheet '{}' not found", id)))
     }
 
-    pub async fn list_timesheets_by_employee(&self, employee_id: &str) -> AppResult<Vec<Timesheet>> {
+    pub async fn list_timesheets_by_employee(
+        &self,
+        employee_id: &str,
+    ) -> AppResult<Vec<Timesheet>> {
         let rows = sqlx::query_as::<_, Timesheet>(
             "SELECT id, employee_id, week_start, status, total_hours, submitted_at, approved_at, created_at FROM timesheets WHERE employee_id = ? ORDER BY week_start DESC"
         )
@@ -45,38 +48,32 @@ impl TimeLaborRepo {
 
     pub async fn create_timesheet(&self, input: &CreateTimesheetRequest) -> AppResult<Timesheet> {
         let id = uuid::Uuid::new_v4().to_string();
-        sqlx::query(
-            "INSERT INTO timesheets (id, employee_id, week_start) VALUES (?, ?, ?)"
-        )
-        .bind(&id)
-        .bind(&input.employee_id)
-        .bind(&input.week_start)
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("INSERT INTO timesheets (id, employee_id, week_start) VALUES (?, ?, ?)")
+            .bind(&id)
+            .bind(&input.employee_id)
+            .bind(&input.week_start)
+            .execute(&self.pool)
+            .await?;
         self.get_timesheet(&id).await
     }
 
     pub async fn submit_timesheet(&self, id: &str) -> AppResult<Timesheet> {
         let now = chrono::Utc::now().to_rfc3339();
-        sqlx::query(
-            "UPDATE timesheets SET status = 'submitted', submitted_at = ? WHERE id = ?"
-        )
-        .bind(&now)
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("UPDATE timesheets SET status = 'submitted', submitted_at = ? WHERE id = ?")
+            .bind(&now)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         self.get_timesheet(id).await
     }
 
     pub async fn approve_timesheet(&self, id: &str) -> AppResult<Timesheet> {
         let now = chrono::Utc::now().to_rfc3339();
-        sqlx::query(
-            "UPDATE timesheets SET status = 'approved', approved_at = ? WHERE id = ?"
-        )
-        .bind(&now)
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("UPDATE timesheets SET status = 'approved', approved_at = ? WHERE id = ?")
+            .bind(&now)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         self.get_timesheet(id).await
     }
 
@@ -145,7 +142,10 @@ impl TimeLaborRepo {
         .ok_or_else(|| AppError::NotFound(format!("Leave request '{}' not found", id)))
     }
 
-    pub async fn create_leave_request(&self, input: &CreateLeaveRequestRequest) -> AppResult<LeaveRequest> {
+    pub async fn create_leave_request(
+        &self,
+        input: &CreateLeaveRequestRequest,
+    ) -> AppResult<LeaveRequest> {
         let id = uuid::Uuid::new_v4().to_string();
         sqlx::query(
             "INSERT INTO leave_requests (id, employee_id, leave_type, start_date, end_date, reason) VALUES (?, ?, ?, ?, ?, ?)"
@@ -161,7 +161,11 @@ impl TimeLaborRepo {
         self.get_leave_request(&id).await
     }
 
-    pub async fn update_leave_request_status(&self, id: &str, status: &str) -> AppResult<LeaveRequest> {
+    pub async fn update_leave_request_status(
+        &self,
+        id: &str,
+        status: &str,
+    ) -> AppResult<LeaveRequest> {
         sqlx::query("UPDATE leave_requests SET status = ? WHERE id = ?")
             .bind(status)
             .bind(id)
@@ -172,7 +176,10 @@ impl TimeLaborRepo {
 
     // --- Leave Balances ---
 
-    pub async fn list_leave_balances_by_employee(&self, employee_id: &str) -> AppResult<Vec<LeaveBalance>> {
+    pub async fn list_leave_balances_by_employee(
+        &self,
+        employee_id: &str,
+    ) -> AppResult<Vec<LeaveBalance>> {
         let rows = sqlx::query_as::<_, LeaveBalance>(
             "SELECT id, employee_id, leave_type, entitled, used, remaining FROM leave_balances WHERE employee_id = ?"
         )
@@ -182,7 +189,11 @@ impl TimeLaborRepo {
         Ok(rows)
     }
 
-    pub async fn get_leave_balance(&self, employee_id: &str, leave_type: &str) -> AppResult<LeaveBalance> {
+    pub async fn get_leave_balance(
+        &self,
+        employee_id: &str,
+        leave_type: &str,
+    ) -> AppResult<LeaveBalance> {
         sqlx::query_as::<_, LeaveBalance>(
             "SELECT id, employee_id, leave_type, entitled, used, remaining FROM leave_balances WHERE employee_id = ? AND leave_type = ?"
         )
@@ -193,7 +204,12 @@ impl TimeLaborRepo {
         .ok_or_else(|| AppError::NotFound("Leave balance not found".into()))
     }
 
-    pub async fn create_leave_balance(&self, employee_id: &str, leave_type: &str, entitled: f64) -> AppResult<LeaveBalance> {
+    pub async fn create_leave_balance(
+        &self,
+        employee_id: &str,
+        leave_type: &str,
+        entitled: f64,
+    ) -> AppResult<LeaveBalance> {
         let id = uuid::Uuid::new_v4().to_string();
         sqlx::query(
             "INSERT INTO leave_balances (id, employee_id, leave_type, entitled, used, remaining) VALUES (?, ?, ?, ?, 0, ?)"
@@ -215,7 +231,12 @@ impl TimeLaborRepo {
         .ok_or_else(|| AppError::Internal("Failed to read created leave balance".into()))
     }
 
-    pub async fn deduct_leave_balance(&self, employee_id: &str, leave_type: &str, days: f64) -> AppResult<()> {
+    pub async fn deduct_leave_balance(
+        &self,
+        employee_id: &str,
+        leave_type: &str,
+        days: f64,
+    ) -> AppResult<()> {
         sqlx::query(
             "UPDATE leave_balances SET used = used + ?, remaining = remaining - ? WHERE employee_id = ? AND leave_type = ? AND remaining >= ?"
         )

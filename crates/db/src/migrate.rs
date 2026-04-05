@@ -1,5 +1,5 @@
-use sqlx::SqlitePool;
 use anyhow::Result;
+use sqlx::SqlitePool;
 
 /// Runs migrations from a directory of SQL files.
 /// Tracks applied migrations in a `_migrations` table to ensure idempotency.
@@ -27,19 +27,25 @@ pub async fn run_migrations(pool: &SqlitePool, migrations_dir: &str) -> Result<(
         // Validate the path stays within the migrations directory (prevent path traversal)
         let canonical = std::fs::canonicalize(&path)?;
         if !canonical.starts_with(&canonical_dir) {
-            anyhow::bail!("Migration file '{}' is outside of migrations directory", path.display());
+            anyhow::bail!(
+                "Migration file '{}' is outside of migrations directory",
+                path.display()
+            );
         }
 
-        let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let filename = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
 
         // Check if already applied
-        let already_applied: bool = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM _migrations WHERE filename = ?",
-        )
-        .bind(&filename)
-        .fetch_one(pool)
-        .await?
-        > 0;
+        let already_applied: bool =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM _migrations WHERE filename = ?")
+                .bind(&filename)
+                .fetch_one(pool)
+                .await?
+                > 0;
 
         if already_applied {
             tracing::debug!("Migration already applied, skipping: {}", filename);

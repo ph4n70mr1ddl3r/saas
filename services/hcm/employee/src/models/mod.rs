@@ -1,4 +1,4 @@
-pub mod employee;
 pub mod department;
-pub use employee::*;
+pub mod employee;
 pub use department::*;
+pub use employee::*;

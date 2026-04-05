@@ -1,6 +1,6 @@
+use crate::components::auth_guard::AuthGuard;
 use leptos::prelude::*;
 use leptos_router::hooks::use_params_map;
-use crate::components::auth_guard::AuthGuard;
 
 #[component]
 pub fn EmployeeDetailPage() -> impl IntoView {

@@ -1,23 +1,30 @@
-use sqlx::SqlitePool;
+use crate::models::department::{CreateDepartment, DepartmentResponse};
 use saas_common::error::{AppError, AppResult};
-use crate::models::department::{DepartmentResponse, CreateDepartment};
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
-pub struct DepartmentRepo { pool: SqlitePool }
+pub struct DepartmentRepo {
+    pool: SqlitePool,
+}
 
 impl DepartmentRepo {
-    pub fn new(pool: SqlitePool) -> Self { Self { pool } }
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
 
     pub async fn list(&self) -> AppResult<Vec<DepartmentResponse>> {
-        let rows = sqlx::query_as::<_, DepartmentResponse>(
-            "SELECT * FROM departments ORDER BY name"
-        ).fetch_all(&self.pool).await?;
+        let rows =
+            sqlx::query_as::<_, DepartmentResponse>("SELECT * FROM departments ORDER BY name")
+                .fetch_all(&self.pool)
+                .await?;
         Ok(rows)
     }
 
     pub async fn get_by_id(&self, id: &str) -> AppResult<DepartmentResponse> {
         sqlx::query_as::<_, DepartmentResponse>("SELECT * FROM departments WHERE id = ?")
-            .bind(id).fetch_optional(&self.pool).await?
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?
             .ok_or_else(|| AppError::NotFound(format!("Department {} not found", id)))
     }
 
@@ -32,7 +39,14 @@ impl DepartmentRepo {
         self.get_by_id(&id).await
     }
 
-    pub async fn update(&self, id: &str, name: Option<&str>, parent_id: Option<&str>, manager_id: Option<&str>, cost_center: Option<&str>) -> AppResult<DepartmentResponse> {
+    pub async fn update(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        parent_id: Option<&str>,
+        manager_id: Option<&str>,
+        cost_center: Option<&str>,
+    ) -> AppResult<DepartmentResponse> {
         let current = self.get_by_id(id).await?;
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query("UPDATE departments SET name=?, parent_id=?, manager_id=?, cost_center=?, updated_at=? WHERE id=?")

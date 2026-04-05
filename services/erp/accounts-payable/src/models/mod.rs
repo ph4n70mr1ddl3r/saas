@@ -92,3 +92,41 @@ pub struct ApInvoiceWithLines {
     pub invoice: ApInvoice,
     pub lines: Vec<ApInvoiceLine>,
 }
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct TaxCode {
+    pub id: String,
+    pub code: String,
+    pub rate: f64,
+    pub description: Option<String>,
+    pub is_active: i64,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateTaxCodeRequest {
+    pub code: String,
+    pub rate: f64,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ApAgingRow {
+    pub vendor_id: String,
+    pub vendor_name: String,
+    pub invoice_id: String,
+    pub invoice_number: String,
+    pub total_cents: i64,
+    pub due_date: String,
+    pub aging_bucket: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ApAgingReport {
+    pub current_total: i64,
+    pub bucket_1_30_total: i64,
+    pub bucket_31_60_total: i64,
+    pub bucket_61_90_total: i64,
+    pub bucket_90_plus_total: i64,
+    pub invoices: Vec<ApAgingRow>,
+}

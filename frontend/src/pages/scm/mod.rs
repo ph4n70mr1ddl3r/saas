@@ -1,9 +1,9 @@
 pub mod inventory;
-pub mod procurement;
-pub mod orders;
 pub mod manufacturing;
+pub mod orders;
+pub mod procurement;
 
 pub use inventory::InventoryPage;
-pub use procurement::ProcurementPage;
-pub use orders::OrdersPage;
 pub use manufacturing::ManufacturingPage;
+pub use orders::OrdersPage;
+pub use procurement::ProcurementPage;

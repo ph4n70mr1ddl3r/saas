@@ -1,12 +1,12 @@
-use sqlx::SqlitePool;
-use saas_nats_bus::NatsBus;
-use saas_common::error::AppResult;
-use crate::repository::work_order_repo::WorkOrderRepo;
-use crate::repository::bom_repo::BomRepo;
-use validator::Validate;
-use crate::repository::routing_step_repo::RoutingStepRepo;
-use crate::models::work_order::*;
 use crate::models::bom::*;
+use crate::models::work_order::*;
+use crate::repository::bom_repo::BomRepo;
+use crate::repository::routing_step_repo::RoutingStepRepo;
+use crate::repository::work_order_repo::WorkOrderRepo;
+use saas_common::error::AppResult;
+use saas_nats_bus::NatsBus;
+use sqlx::SqlitePool;
+use validator::Validate;
 
 #[derive(Clone)]
 pub struct ManufacturingService {
@@ -36,27 +36,37 @@ impl ManufacturingService {
     }
 
     pub async fn create_work_order(&self, input: CreateWorkOrder) -> AppResult<WorkOrderResponse> {
-        input.validate().map_err(|e| saas_common::error::AppError::Validation(e.to_string()))?;
+        input
+            .validate()
+            .map_err(|e| saas_common::error::AppError::Validation(e.to_string()))?;
         self.work_order_repo.create(&input).await
     }
 
     pub async fn start_work_order(&self, id: &str) -> AppResult<WorkOrderResponse> {
         let wo = self.work_order_repo.get_by_id(id).await?;
         if wo.status != "planned" {
-            return Err(saas_common::error::AppError::Validation("Only planned work orders can be started".into()));
+            return Err(saas_common::error::AppError::Validation(
+                "Only planned work orders can be started".into(),
+            ));
         }
         let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string();
-        self.work_order_repo.update_status(id, "in_progress", Some(&now), None).await?;
+        self.work_order_repo
+            .update_status(id, "in_progress", Some(&now), None)
+            .await?;
         self.work_order_repo.get_by_id(id).await
     }
 
     pub async fn complete_work_order(&self, id: &str) -> AppResult<WorkOrderResponse> {
         let wo = self.work_order_repo.get_by_id(id).await?;
         if wo.status != "in_progress" {
-            return Err(saas_common::error::AppError::Validation("Only in-progress work orders can be completed".into()));
+            return Err(saas_common::error::AppError::Validation(
+                "Only in-progress work orders can be completed".into(),
+            ));
         }
         let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string();
-        self.work_order_repo.update_status(id, "completed", None, Some(&now)).await?;
+        self.work_order_repo
+            .update_status(id, "completed", None, Some(&now))
+            .await?;
         self.work_order_repo.get_by_id(id).await
     }
 
@@ -72,7 +82,9 @@ impl ManufacturingService {
     }
 
     pub async fn create_bom(&self, input: CreateBom) -> AppResult<BomResponse> {
-        input.validate().map_err(|e| saas_common::error::AppError::Validation(e.to_string()))?;
+        input
+            .validate()
+            .map_err(|e| saas_common::error::AppError::Validation(e.to_string()))?;
         self.bom_repo.create(&input).await
     }
 }

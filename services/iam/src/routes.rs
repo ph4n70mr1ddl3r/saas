@@ -1,8 +1,11 @@
-use axum::{routing::{get, post, put}, Router};
-use sqlx::SqlitePool;
-use saas_nats_bus::NatsBus;
 use crate::handlers;
-use crate::service::{AuthService, UserService, RoleService};
+use crate::service::{AuthService, RoleService, UserService};
+use axum::{
+    routing::{get, post, put},
+    Router,
+};
+use saas_nats_bus::NatsBus;
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
 pub struct AuthState {
@@ -22,16 +25,49 @@ pub fn build_router(pool: SqlitePool, bus: NatsBus) -> Router {
         .route("/api/v1/auth/refresh", post(handlers::auth::refresh))
         .route("/api/v1/auth/logout", post(handlers::auth::logout))
         // User routes
-        .route("/api/v1/users", get(handlers::users::list_users).post(handlers::users::create_user))
-        .route("/api/v1/users/{id}", get(handlers::users::get_user).put(handlers::users::update_user).delete(handlers::users::delete_user))
-        .route("/api/v1/users/{id}/password", put(handlers::users::change_password))
-        .route("/api/v1/users/{id}/roles", put(handlers::users::assign_roles))
+        .route(
+            "/api/v1/users",
+            get(handlers::users::list_users).post(handlers::users::create_user),
+        )
+        .route(
+            "/api/v1/users/{id}",
+            get(handlers::users::get_user)
+                .put(handlers::users::update_user)
+                .delete(handlers::users::delete_user),
+        )
+        .route(
+            "/api/v1/users/{id}/password",
+            put(handlers::users::change_password),
+        )
+        .route(
+            "/api/v1/users/{id}/roles",
+            put(handlers::users::assign_roles),
+        )
         // Role routes
-        .route("/api/v1/roles", get(handlers::roles::list_roles).post(handlers::roles::create_role))
-        .route("/api/v1/roles/{id}", get(handlers::roles::get_role).put(handlers::roles::update_role))
-        .route("/api/v1/roles/{id}/permissions", put(handlers::roles::set_permissions))
-        .route("/api/v1/permissions", get(handlers::roles::list_permissions))
+        .route(
+            "/api/v1/roles",
+            get(handlers::roles::list_roles).post(handlers::roles::create_role),
+        )
+        .route(
+            "/api/v1/roles/{id}",
+            get(handlers::roles::get_role).put(handlers::roles::update_role),
+        )
+        .route(
+            "/api/v1/roles/{id}/permissions",
+            put(handlers::roles::set_permissions),
+        )
+        .route(
+            "/api/v1/permissions",
+            get(handlers::roles::list_permissions),
+        )
         // Health
-        .route("/health", get(|| async { axum::Json(serde_json::json!({"status": "ok"})) }))
-        .with_state(AuthState { auth_service, user_service, role_service })
+        .route(
+            "/health",
+            get(|| async { axum::Json(serde_json::json!({"status": "ok"})) }),
+        )
+        .with_state(AuthState {
+            auth_service,
+            user_service,
+            role_service,
+        })
 }

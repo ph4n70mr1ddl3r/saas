@@ -1,11 +1,12 @@
-use axum::extract::{Path, State};
+use crate::models::*;
+use crate::routes::AppState;
+use axum::extract::{Path, Query, State};
 use axum::Json;
 use saas_auth_core::extractor::AuthUser;
 use saas_auth_core::rbac;
 use saas_common::error::AppError;
 use saas_common::response::ApiResponse;
-use crate::models::*;
-use crate::routes::AppState;
+use serde::Deserialize;
 
 pub async fn list_bank_accounts(
     user: AuthUser,
@@ -72,4 +73,37 @@ pub async fn create_reconciliation(
     rbac::require_admin(&user.roles, "erp").map_err(|e| AppError::Forbidden(e))?;
     let reconciliation = state.service.create_reconciliation(&input).await?;
     Ok(Json(ApiResponse::new(reconciliation)))
+}
+
+// --- Cash Flow Statement ---
+
+#[derive(Debug, Deserialize)]
+pub struct CashFlowQuery {
+    pub period_start: String,
+    pub period_end: String,
+}
+
+pub async fn cash_flow_statement(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Query(params): Query<CashFlowQuery>,
+) -> Result<Json<ApiResponse<CashFlowStatement>>, AppError> {
+    let _ = &user;
+    let statement = state
+        .service
+        .cash_flow_statement(&params.period_start, &params.period_end)
+        .await?;
+    Ok(Json(ApiResponse::new(statement)))
+}
+
+// --- Transfers ---
+
+pub async fn transfer(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Json(input): Json<TransferRequest>,
+) -> Result<Json<ApiResponse<Vec<BankTransaction>>>, AppError> {
+    rbac::require_admin(&user.roles, "erp").map_err(|e| AppError::Forbidden(e))?;
+    let (withdrawal, deposit) = state.service.transfer(&input).await?;
+    Ok(Json(ApiResponse::new(vec![withdrawal, deposit])))
 }

@@ -1,9 +1,9 @@
 use async_nats::Client;
 use serde::{de::DeserializeOwned, Serialize};
 
+use crate::envelope::EventEnvelope;
 use anyhow::Result;
 use futures::StreamExt;
-use crate::envelope::EventEnvelope;
 
 #[derive(Clone)]
 pub struct NatsBus {
@@ -20,20 +20,33 @@ impl NatsBus {
             .retry_on_initial_connect()
             .connect(url)
             .await?;
-        Ok(Self { client, source: source.to_string() })
+        Ok(Self {
+            client,
+            source: source.to_string(),
+        })
     }
 
     pub async fn publish<T: Serialize>(&self, subject: &str, payload: T) -> Result<()> {
         let envelope = EventEnvelope::new(&self.source, subject, payload);
         let bytes = serde_json::to_vec(&envelope)?;
         if bytes.len() > MAX_MESSAGE_SIZE {
-            anyhow::bail!("Message size {} exceeds maximum {}", bytes.len(), MAX_MESSAGE_SIZE);
+            anyhow::bail!(
+                "Message size {} exceeds maximum {}",
+                bytes.len(),
+                MAX_MESSAGE_SIZE
+            );
         }
-        self.client.publish(subject.to_string(), bytes.into()).await?;
+        self.client
+            .publish(subject.to_string(), bytes.into())
+            .await?;
         Ok(())
     }
 
-    pub async fn subscribe<T, F, Fut>(&self, subject: &str, handler: F) -> Result<tokio::task::JoinHandle<()>>
+    pub async fn subscribe<T, F, Fut>(
+        &self,
+        subject: &str,
+        handler: F,
+    ) -> Result<tokio::task::JoinHandle<()>>
     where
         T: DeserializeOwned + Serialize + Send + 'static,
         F: Fn(EventEnvelope<T>) -> Fut + Send + Sync + 'static,

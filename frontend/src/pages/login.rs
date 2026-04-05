@@ -1,8 +1,8 @@
+use crate::state::auth::{use_auth, AuthState};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::hooks::use_navigate;
 use leptos_router::NavigateOptions;
-use crate::state::auth::{use_auth, AuthState};
 
 #[component]
 pub fn LoginPage() -> impl IntoView {
@@ -32,8 +32,12 @@ pub fn LoginPage() -> impl IntoView {
         let navigate = navigate.clone();
         spawn_local(async move {
             let client = reqwest::Client::new();
-            let result = client.post(&format!("{}/api/v1/auth/login",
-                std::env::var("API_BASE_URL").unwrap_or_else(|_| "http://localhost:8000".to_string())))
+            let result = client
+                .post(&format!(
+                    "{}/api/v1/auth/login",
+                    std::env::var("API_BASE_URL")
+                        .unwrap_or_else(|_| "http://localhost:8000".to_string())
+                ))
                 .json(&serde_json::json!({
                     "username": user,
                     "password": pass,
@@ -45,7 +49,8 @@ pub fn LoginPage() -> impl IntoView {
                 Ok(resp) if resp.status().is_success() => {
                     if let Ok(body) = resp.json::<serde_json::Value>().await {
                         if let Some(data) = body.get("data") {
-                            let access_token = data["access_token"].as_str().unwrap_or("").to_string();
+                            let access_token =
+                                data["access_token"].as_str().unwrap_or("").to_string();
                             let user_obj = data.get("user");
                             let user_id = user_obj
                                 .and_then(|u| u.get("id"))

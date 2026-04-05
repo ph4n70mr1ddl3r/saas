@@ -18,13 +18,10 @@ async fn main() -> anyhow::Result<()> {
     tracing_setup::init("saas-erp-accounts-payable");
     jwt::init_jwt_secret();
 
-    let database_url = env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "sqlite:./data/accounts-payable.db".into());
-    let nats_url = env::var("NATS_URL")
-        .unwrap_or_else(|_| "nats://localhost:4222".into());
-    let port: u16 = env::var("PORT")
-        .unwrap_or_else(|_| "8021".into())
-        .parse()?;
+    let database_url =
+        env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:./data/accounts-payable.db".into());
+    let nats_url = env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".into());
+    let port: u16 = env::var("PORT").unwrap_or_else(|_| "8021".into()).parse()?;
 
     std::fs::create_dir_all("./data")?;
 
@@ -37,12 +34,26 @@ async fn main() -> anyhow::Result<()> {
 
     events::register(&bus, &app_state).await?;
 
-    let cors_origin = env::var("CORS_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".to_string());
-    let cors_origin = std::env::var("CORS_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".to_string());
+    let cors_origin =
+        env::var("CORS_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".to_string());
+    let cors_origin =
+        std::env::var("CORS_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".to_string());
     let cors = CorsLayer::new()
-        .allow_origin(axum::http::HeaderValue::from_bytes(cors_origin.as_bytes()).expect("Invalid CORS origin"))
-        .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::PUT, axum::http::Method::DELETE, axum::http::Method::PATCH])
-        .allow_headers([axum::http::header::CONTENT_TYPE, axum::http::header::AUTHORIZATION]);
+        .allow_origin(
+            axum::http::HeaderValue::from_bytes(cors_origin.as_bytes())
+                .expect("Invalid CORS origin"),
+        )
+        .allow_methods([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::PUT,
+            axum::http::Method::DELETE,
+            axum::http::Method::PATCH,
+        ])
+        .allow_headers([
+            axum::http::header::CONTENT_TYPE,
+            axum::http::header::AUTHORIZATION,
+        ]);
 
     let app = routes::build_router(app_state).layer(cors);
 

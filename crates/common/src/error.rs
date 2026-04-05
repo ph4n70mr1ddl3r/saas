@@ -46,31 +46,69 @@ impl IntoResponse for AppError {
         let (status, code, message, details) = match self {
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, "NOT_FOUND", msg, None),
             AppError::Validation(msg) => (StatusCode::BAD_REQUEST, "VALIDATION_ERROR", msg, None),
-            AppError::DetailedValidation(errors) => (StatusCode::BAD_REQUEST, "VALIDATION_ERROR", "Validation failed".into(), Some(errors)),
-            AppError::Unauthorized => (StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "Authentication required".into(), None),
+            AppError::DetailedValidation(errors) => (
+                StatusCode::BAD_REQUEST,
+                "VALIDATION_ERROR",
+                "Validation failed".into(),
+                Some(errors),
+            ),
+            AppError::Unauthorized => (
+                StatusCode::UNAUTHORIZED,
+                "UNAUTHORIZED",
+                "Authentication required".into(),
+                None,
+            ),
             AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, "FORBIDDEN", msg, None),
             AppError::Conflict(msg) => (StatusCode::CONFLICT, "CONFLICT", msg, None),
             AppError::Internal(msg) => {
                 tracing::error!("Internal error: {}", msg);
-                (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Internal server error".into(), None)
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "INTERNAL_ERROR",
+                    "Internal server error".into(),
+                    None,
+                )
             }
             AppError::Database(e) => {
                 tracing::error!(error = %e, "Database error occurred");
-                (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Database error".into(), None)
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "INTERNAL_ERROR",
+                    "Database error".into(),
+                    None,
+                )
             }
             AppError::Nats(e) => {
                 tracing::error!(error = %e, "NATS error occurred");
-                (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Message bus error".into(), None)
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "INTERNAL_ERROR",
+                    "Message bus error".into(),
+                    None,
+                )
             }
             AppError::Anyhow(e) => {
                 tracing::error!(error = %e, "Unexpected error occurred");
-                (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Internal server error".into(), None)
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "INTERNAL_ERROR",
+                    "Internal server error".into(),
+                    None,
+                )
             }
         };
 
-        (status, Json(ErrorBody {
-            error: ErrorDetail { code: code.into(), message, details },
-        })).into_response()
+        (
+            status,
+            Json(ErrorBody {
+                error: ErrorDetail {
+                    code: code.into(),
+                    message,
+                    details,
+                },
+            }),
+        )
+            .into_response()
     }
 }
 

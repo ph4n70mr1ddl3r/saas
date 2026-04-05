@@ -1,14 +1,18 @@
-use sqlx::SqlitePool;
-use saas_common::error::{AppError, AppResult};
 use crate::models::purchase_order::{
-    PurchaseOrderResponse, PurchaseOrderLineResponse, CreatePurchaseOrder, CreatePurchaseOrderLine,
+    CreatePurchaseOrder, CreatePurchaseOrderLine, PurchaseOrderLineResponse, PurchaseOrderResponse,
 };
+use saas_common::error::{AppError, AppResult};
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
-pub struct PurchaseOrderRepo { pool: SqlitePool }
+pub struct PurchaseOrderRepo {
+    pool: SqlitePool,
+}
 
 impl PurchaseOrderRepo {
-    pub fn new(pool: SqlitePool) -> Self { Self { pool } }
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
 
     pub async fn list(&self) -> AppResult<Vec<PurchaseOrderResponse>> {
         let rows = sqlx::query_as::<_, PurchaseOrderResponse>(
@@ -38,7 +42,11 @@ impl PurchaseOrderRepo {
     pub async fn create(&self, input: &CreatePurchaseOrder) -> AppResult<PurchaseOrderResponse> {
         let id = uuid::Uuid::new_v4().to_string();
         let po_number = format!("PO-{}", chrono::Utc::now().format("%Y%m%d%H%M%S"));
-        let total_cents: i64 = input.lines.iter().map(|l| l.quantity * l.unit_price_cents).sum();
+        let total_cents: i64 = input
+            .lines
+            .iter()
+            .map(|l| l.quantity * l.unit_price_cents)
+            .sum();
 
         let mut tx = self.pool.begin().await?;
 
@@ -66,18 +74,25 @@ impl PurchaseOrderRepo {
 
     pub async fn update_status(&self, id: &str, status: &str) -> AppResult<()> {
         let result = sqlx::query("UPDATE purchase_orders SET status = ? WHERE id = ?")
-            .bind(status).bind(id)
-            .execute(&self.pool).await?;
+            .bind(status)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         if result.rows_affected() == 0 {
-            return Err(AppError::NotFound(format!("Purchase order {} not found", id)));
+            return Err(AppError::NotFound(format!(
+                "Purchase order {} not found",
+                id
+            )));
         }
         Ok(())
     }
 
     pub async fn update_line_received(&self, line_id: &str, quantity: i64) -> AppResult<()> {
         sqlx::query("UPDATE po_lines SET quantity_received = quantity_received + ? WHERE id = ?")
-            .bind(quantity).bind(line_id)
-            .execute(&self.pool).await?;
+            .bind(quantity)
+            .bind(line_id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 }

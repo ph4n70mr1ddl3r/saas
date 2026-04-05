@@ -1,3 +1,7 @@
+use crate::models::role::{
+    CreateRole, PermissionResponse, RoleResponse, SetPermissionsRequest, UpdateRole,
+};
+use crate::routes::AuthState;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
@@ -5,8 +9,6 @@ use saas_auth_core::extractor::AuthUser;
 use saas_auth_core::rbac::is_admin;
 use saas_common::error::AppError;
 use saas_common::response::ApiResponse;
-use crate::models::role::{CreateRole, UpdateRole, RoleResponse, PermissionResponse, SetPermissionsRequest};
-use crate::routes::AuthState;
 
 pub async fn list_roles(
     _user: AuthUser,
@@ -59,7 +61,10 @@ pub async fn set_permissions(
     if !is_admin(&user.roles) {
         return Err(AppError::Forbidden("Admin role required".into()));
     }
-    state.role_service.set_permissions(&id, input.permission_ids).await?;
+    state
+        .role_service
+        .set_permissions(&id, input.permission_ids)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

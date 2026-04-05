@@ -170,6 +170,27 @@ services:
     restart: unless-stopped
     <<: *default-healthcheck
 
+  # === HCM Performance Management ===
+  performance:
+    build:
+      context: ..
+      dockerfile: deployments/docker/Dockerfile.service
+      args:
+        SERVICE_PATH: services/hcm/performance
+        SERVICE_BINARY: saas-hcm-performance
+    environment:
+      NATS_URL: nats://nats:4222
+      SERVICE_NAME: saas-hcm-performance
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
+      PORT: "8015"
+    depends_on:
+      nats:
+        condition: service_healthy
+    networks:
+      - backend
+    restart: unless-stopped
+    <<: *default-healthcheck
+
   # === ERP Module ===
   general-ledger:
     build:
@@ -263,6 +284,27 @@ services:
       SERVICE_NAME: saas-erp-cash-management
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
       PORT: "8024"
+    depends_on:
+      nats:
+        condition: service_healthy
+    networks:
+      - backend
+    restart: unless-stopped
+    <<: *default-healthcheck
+
+  # === ERP Expense Management ===
+  expense-mgmt:
+    build:
+      context: ..
+      dockerfile: deployments/docker/Dockerfile.service
+      args:
+        SERVICE_PATH: services/erp/expense-mgmt
+        SERVICE_BINARY: saas-erp-expense-mgmt
+    environment:
+      NATS_URL: nats://nats:4222
+      SERVICE_NAME: saas-erp-expense-mgmt
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
+      PORT: "8025"
     depends_on:
       nats:
         condition: service_healthy
@@ -371,11 +413,13 @@ services:
       BENEFITS_URL: http://benefits:8012
       TIME_LABOR_URL: http://time-labor:8013
       RECRUITING_URL: http://recruiting:8014
+      PERFORMANCE_URL: http://performance:8015
       GL_URL: http://general-ledger:8020
       AP_URL: http://accounts-payable:8021
       AR_URL: http://accounts-receivable:8022
       ASSETS_URL: http://fixed-assets:8023
       CASH_URL: http://cash-management:8024
+      EXPENSE_MGMT_URL: http://expense-mgmt:8025
       INVENTORY_URL: http://inventory:8030
       PROCUREMENT_URL: http://procurement:8031
       ORDERS_URL: http://order-management:8032
@@ -397,6 +441,8 @@ services:
         condition: service_healthy
       recruiting:
         condition: service_healthy
+      performance:
+        condition: service_healthy
       general-ledger:
         condition: service_healthy
       accounts-payable:
@@ -406,6 +452,8 @@ services:
       fixed-assets:
         condition: service_healthy
       cash-management:
+        condition: service_healthy
+      expense-mgmt:
         condition: service_healthy
       inventory:
         condition: service_healthy

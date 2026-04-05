@@ -1,9 +1,9 @@
+use crate::jwt::decode_token;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use crate::jwt::decode_token;
 
 pub struct AuthUser {
     pub user_id: String,
@@ -26,7 +26,8 @@ impl IntoResponse for AuthError {
         (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({ "error": { "code": "UNAUTHORIZED", "message": message } })),
-        ).into_response()
+        )
+            .into_response()
     }
 }
 
@@ -34,7 +35,8 @@ impl<S: Send + Sync> FromRequestParts<S> for AuthUser {
     type Rejection = AuthError;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let auth_header = parts.headers
+        let auth_header = parts
+            .headers
             .get("Authorization")
             .and_then(|v| v.to_str().ok())
             .ok_or(AuthError::MissingToken)?;
@@ -50,8 +52,7 @@ impl<S: Send + Sync> FromRequestParts<S> for AuthUser {
 
         let secret = crate::jwt::read_jwt_secret();
 
-        let claims = decode_token(token, &secret)
-            .map_err(|_| AuthError::InvalidToken)?;
+        let claims = decode_token(token, &secret).map_err(|_| AuthError::InvalidToken)?;
 
         Ok(AuthUser {
             user_id: claims.sub,

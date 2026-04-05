@@ -1,12 +1,16 @@
-use sqlx::SqlitePool;
+use crate::models::return_model::{CreateReturn, ReturnResponse};
 use saas_common::error::{AppError, AppResult};
-use crate::models::return_model::{ReturnResponse, CreateReturn};
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
-pub struct ReturnRepo { pool: SqlitePool }
+pub struct ReturnRepo {
+    pool: SqlitePool,
+}
 
 impl ReturnRepo {
-    pub fn new(pool: SqlitePool) -> Self { Self { pool } }
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
 
     pub async fn list(&self) -> AppResult<Vec<ReturnResponse>> {
         let rows = sqlx::query_as::<_, ReturnResponse>(

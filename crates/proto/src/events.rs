@@ -122,3 +122,36 @@ pub struct PurchaseOrderLineReceived {
     pub warehouse_id: String,
     pub quantity_received: i64,
 }
+
+// HCM Performance Events
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewCycleActivated {
+    pub cycle_id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewSubmitted {
+    pub assignment_id: String,
+    pub cycle_id: String,
+    pub employee_id: String,
+    pub reviewer_id: String,
+    pub rating: i32,
+}
+
+// ERP Expense Events
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExpenseReportApproved {
+    pub report_id: String,
+    pub employee_id: String,
+    pub total_cents: i64,
+    pub gl_account_code: String,
+}
+
+// SCM Inventory Cycle Count Events
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CycleCountPosted {
+    pub session_id: String,
+    pub warehouse_id: String,
+    pub adjustment_count: u32,
+}

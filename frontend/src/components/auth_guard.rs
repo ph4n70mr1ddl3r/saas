@@ -1,7 +1,7 @@
-use leptos::prelude::*;
-use leptos::children::ChildrenFn;
-use leptos_router::components::Redirect;
 use crate::state::auth::use_auth;
+use leptos::children::ChildrenFn;
+use leptos::prelude::*;
+use leptos_router::components::Redirect;
 
 #[component]
 pub fn AuthGuard(children: ChildrenFn) -> impl IntoView {

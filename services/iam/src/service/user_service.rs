@@ -1,12 +1,12 @@
-use sqlx::SqlitePool;
-use saas_nats_bus::NatsBus;
+use crate::models::user::{ChangePassword, CreateUser, UpdateUser, UserResponse};
+use crate::repository::user_repo::UserRepo;
+use saas_auth_core::rbac::is_admin;
 use saas_common::error::{AppError, AppResult};
 use saas_common::pagination::PaginationParams;
 use saas_common::response::ApiListResponse;
-use saas_auth_core::rbac::is_admin;
+use saas_nats_bus::NatsBus;
+use sqlx::SqlitePool;
 use validator::Validate;
-use crate::repository::user_repo::UserRepo;
-use crate::models::user::{CreateUser, UpdateUser, ChangePassword, UserResponse};
 
 #[derive(Clone)]
 pub struct UserService {
@@ -16,7 +16,10 @@ pub struct UserService {
 
 impl UserService {
     pub fn new(pool: SqlitePool, bus: NatsBus) -> Self {
-        Self { repo: UserRepo::new(pool), bus }
+        Self {
+            repo: UserRepo::new(pool),
+            bus,
+        }
     }
 
     pub async fn list(&self, pag: &PaginationParams) -> AppResult<ApiListResponse<UserResponse>> {
@@ -35,27 +38,37 @@ impl UserService {
     }
 
     pub async fn create(&self, input: CreateUser) -> AppResult<UserResponse> {
-        input.validate().map_err(|e| AppError::Validation(e.to_string()))?;
+        input
+            .validate()
+            .map_err(|e| AppError::Validation(e.to_string()))?;
 
-        let salt = argon2::password_hash::SaltString::generate(&mut argon2::password_hash::rand_core::OsRng);
+        let salt = argon2::password_hash::SaltString::generate(
+            &mut argon2::password_hash::rand_core::OsRng,
+        );
         let hash = argon2::PasswordHasher::hash_password(
             &argon2::Argon2::default(),
             input.password.as_bytes(),
             &salt,
-        ).map_err(|e| AppError::Internal(e.to_string()))?;
+        )
+        .map_err(|e| AppError::Internal(e.to_string()))?;
 
         let user = self.repo.create(&input, &hash.to_string()).await?;
         Ok(UserResponse::from(user))
     }
 
     pub async fn update(&self, id: &str, input: UpdateUser) -> AppResult<UserResponse> {
-        input.validate().map_err(|e| AppError::Validation(e.to_string()))?;
-        let user = self.repo.update(
-            id,
-            input.email.as_deref(),
-            input.display_name.as_deref(),
-            input.is_active,
-        ).await?;
+        input
+            .validate()
+            .map_err(|e| AppError::Validation(e.to_string()))?;
+        let user = self
+            .repo
+            .update(
+                id,
+                input.email.as_deref(),
+                input.display_name.as_deref(),
+                input.is_active,
+            )
+            .await?;
         Ok(UserResponse::from(user))
     }
 
@@ -66,13 +79,17 @@ impl UserService {
         target_id: &str,
         input: ChangePassword,
     ) -> AppResult<()> {
-        input.validate().map_err(|e| AppError::Validation(e.to_string()))?;
+        input
+            .validate()
+            .map_err(|e| AppError::Validation(e.to_string()))?;
 
         let admin = is_admin(actor_roles);
 
         // Only admins can change other users' passwords
         if actor_id != target_id && !admin {
-            return Err(AppError::Forbidden("Cannot change another user's password".into()));
+            return Err(AppError::Forbidden(
+                "Cannot change another user's password".into(),
+            ));
         }
 
         // Non-admins must verify their current password
@@ -84,18 +101,25 @@ impl UserService {
                 &argon2::Argon2::default(),
                 input.current_password.as_bytes(),
                 &parsed_hash,
-            ).is_err() {
+            )
+            .is_err()
+            {
                 return Err(AppError::Unauthorized);
             }
         }
 
-        let salt = argon2::password_hash::SaltString::generate(&mut argon2::password_hash::rand_core::OsRng);
+        let salt = argon2::password_hash::SaltString::generate(
+            &mut argon2::password_hash::rand_core::OsRng,
+        );
         let hash = argon2::PasswordHasher::hash_password(
             &argon2::Argon2::default(),
             input.new_password.as_bytes(),
             &salt,
-        ).map_err(|e| AppError::Internal(e.to_string()))?;
-        self.repo.update_password(target_id, &hash.to_string()).await
+        )
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+        self.repo
+            .update_password(target_id, &hash.to_string())
+            .await
     }
 
     pub async fn delete(&self, id: &str) -> AppResult<()> {

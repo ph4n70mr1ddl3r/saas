@@ -1,14 +1,21 @@
-use sqlx::SqlitePool;
-use saas_common::error::AppResult;
 use crate::models::routing_step::RoutingStepResponse;
+use saas_common::error::AppResult;
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
-pub struct RoutingStepRepo { pool: SqlitePool }
+pub struct RoutingStepRepo {
+    pool: SqlitePool,
+}
 
 impl RoutingStepRepo {
-    pub fn new(pool: SqlitePool) -> Self { Self { pool } }
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
 
-    pub async fn list_by_work_order(&self, work_order_id: &str) -> AppResult<Vec<RoutingStepResponse>> {
+    pub async fn list_by_work_order(
+        &self,
+        work_order_id: &str,
+    ) -> AppResult<Vec<RoutingStepResponse>> {
         let rows = sqlx::query_as::<_, RoutingStepResponse>(
             "SELECT id, work_order_id, step_number, description, status FROM routing_steps WHERE work_order_id = ? ORDER BY step_number"
         )
@@ -17,7 +24,12 @@ impl RoutingStepRepo {
         Ok(rows)
     }
 
-    pub async fn create(&self, work_order_id: &str, step_number: i32, description: &str) -> AppResult<RoutingStepResponse> {
+    pub async fn create(
+        &self,
+        work_order_id: &str,
+        step_number: i32,
+        description: &str,
+    ) -> AppResult<RoutingStepResponse> {
         let id = uuid::Uuid::new_v4().to_string();
         sqlx::query(
             "INSERT INTO routing_steps (id, work_order_id, step_number, description, status) VALUES (?, ?, ?, ?, 'pending')"
@@ -35,8 +47,10 @@ impl RoutingStepRepo {
 
     pub async fn update_status(&self, id: &str, status: &str) -> AppResult<()> {
         sqlx::query("UPDATE routing_steps SET status = ? WHERE id = ?")
-            .bind(status).bind(id)
-            .execute(&self.pool).await?;
+            .bind(status)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 }

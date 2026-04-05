@@ -1,11 +1,11 @@
+use crate::models::*;
+use crate::routes::AppState;
 use axum::extract::{Path, State};
 use axum::Json;
 use saas_auth_core::extractor::AuthUser;
 use saas_auth_core::rbac;
 use saas_common::error::AppError;
 use saas_common::response::ApiResponse;
-use crate::models::*;
-use crate::routes::AppState;
 
 pub async fn list_plans(
     _user: AuthUser,
@@ -68,7 +68,10 @@ pub async fn list_enrollments_by_employee(
     State(state): State<AppState>,
     Path(employee_id): Path<String>,
 ) -> Result<Json<ApiResponse<Vec<Enrollment>>>, AppError> {
-    let list = state.service.list_enrollments_by_employee(&employee_id).await?;
+    let list = state
+        .service
+        .list_enrollments_by_employee(&employee_id)
+        .await?;
     Ok(Json(ApiResponse::new(list)))
 }
 

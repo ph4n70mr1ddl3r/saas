@@ -1,5 +1,5 @@
 use axum::body::Body;
-use axum::http::{Request, Response, Method};
+use axum::http::{Method, Request, Response};
 use axum::response::IntoResponse;
 use reqwest::Client;
 
@@ -32,7 +32,9 @@ fn sanitize_request_uri(uri: &axum::http::Uri) -> String {
     let normalized: String = decoded_path
         .split('/')
         .filter(|segment| {
-            if segment.is_empty() { return false; }
+            if segment.is_empty() {
+                return false;
+            }
             let seg = segment.replace("%2e", ".").replace("%2E", ".");
             seg != ".." && seg != "."
         })
@@ -107,7 +109,9 @@ pub async fn forward_request(
         }
     };
 
-    let request_id = parts.headers.get("x-request-id")
+    let request_id = parts
+        .headers
+        .get("x-request-id")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -131,11 +135,12 @@ pub async fn forward_request(
 
     match builder.send().await {
         Ok(resp) => {
-            let status = axum::http::StatusCode::from_u16(resp.status().as_u16())
-                .unwrap_or_else(|fallback| {
+            let status = axum::http::StatusCode::from_u16(resp.status().as_u16()).unwrap_or_else(
+                |fallback| {
                     tracing::warn!("Backend returned non-standard status code: {}", fallback);
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR
-                });
+                },
+            );
 
             let mut response_builder = Response::builder().status(status);
 
@@ -159,12 +164,14 @@ pub async fn forward_request(
                             axum::Json(serde_json::json!({"error": {"code": "BAD_GATEWAY", "message": "Backend response too large"}}))
                         ).into_response();
                     }
-                    response_builder.body(Body::from(body_bytes)).unwrap_or_else(|_| {
-                        Response::builder()
-                            .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
-                            .body(Body::from("Proxy error"))
-                            .unwrap()
-                    })
+                    response_builder
+                        .body(Body::from(body_bytes))
+                        .unwrap_or_else(|_| {
+                            Response::builder()
+                                .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+                                .body(Body::from("Proxy error"))
+                                .unwrap()
+                        })
                 }
                 Err(e) => {
                     tracing::error!("Failed to read backend response: {}", e);

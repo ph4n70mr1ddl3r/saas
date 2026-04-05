@@ -20,7 +20,10 @@ pub struct Permission {
 
 impl Permission {
     pub fn new(resource: &str, action: &str) -> Self {
-        Self { resource: resource.to_string(), action: action.to_string() }
+        Self {
+            resource: resource.to_string(),
+            action: action.to_string(),
+        }
     }
 
     pub fn code(&self) -> String {

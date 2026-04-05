@@ -1,11 +1,11 @@
-use axum::extract::{Path, State};
+use crate::models::*;
+use crate::routes::AppState;
+use axum::extract::{Path, Query, State};
 use axum::Json;
 use saas_auth_core::extractor::AuthUser;
 use saas_auth_core::rbac;
 use saas_common::error::AppError;
 use saas_common::response::ApiResponse;
-use crate::models::*;
-use crate::routes::AppState;
 
 pub async fn list_accounts(
     user: AuthUser,
@@ -90,7 +90,10 @@ pub async fn create_journal_entry(
     Json(input): Json<CreateJournalEntryRequest>,
 ) -> Result<Json<ApiResponse<JournalEntryWithLines>>, AppError> {
     rbac::require_admin(&user.roles, "erp").map_err(|e| AppError::Forbidden(e))?;
-    let entry = state.service.create_journal_entry(&input, &user.user_id).await?;
+    let entry = state
+        .service
+        .create_journal_entry(&input, &user.user_id)
+        .await?;
     Ok(Json(ApiResponse::new(entry)))
 }
 
@@ -130,4 +133,88 @@ pub async fn balance_sheet(
     let _ = &user;
     let rows = state.service.balance_sheet().await?;
     Ok(Json(ApiResponse::new(rows)))
+}
+
+pub async fn income_statement(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Query(query): Query<IncomeStatementQuery>,
+) -> Result<Json<ApiResponse<IncomeStatement>>, AppError> {
+    let _ = &user;
+    let report = state
+        .service
+        .income_statement(&query.period_start, &query.period_end)
+        .await?;
+    Ok(Json(ApiResponse::new(report)))
+}
+
+// --- Budgets ---
+
+pub async fn create_budget(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Json(input): Json<CreateBudgetRequest>,
+) -> Result<Json<ApiResponse<BudgetWithLines>>, AppError> {
+    rbac::require_admin(&user.roles, "erp").map_err(|e| AppError::Forbidden(e))?;
+    let budget = state.service.create_budget(&input, &user.user_id).await?;
+    Ok(Json(ApiResponse::new(budget)))
+}
+
+pub async fn list_budgets(
+    user: AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<ApiResponse<Vec<Budget>>>, AppError> {
+    let _ = &user;
+    let budgets = state.service.list_budgets().await?;
+    Ok(Json(ApiResponse::new(budgets)))
+}
+
+pub async fn get_budget(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<BudgetWithLines>>, AppError> {
+    let _ = &user;
+    let budget = state.service.get_budget(&id).await?;
+    Ok(Json(ApiResponse::new(budget)))
+}
+
+pub async fn approve_budget(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<Budget>>, AppError> {
+    rbac::require_admin(&user.roles, "erp").map_err(|e| AppError::Forbidden(e))?;
+    let budget = state.service.approve_budget(&id).await?;
+    Ok(Json(ApiResponse::new(budget)))
+}
+
+pub async fn activate_budget(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<Budget>>, AppError> {
+    rbac::require_admin(&user.roles, "erp").map_err(|e| AppError::Forbidden(e))?;
+    let budget = state.service.activate_budget(&id).await?;
+    Ok(Json(ApiResponse::new(budget)))
+}
+
+pub async fn close_budget(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<Budget>>, AppError> {
+    rbac::require_admin(&user.roles, "erp").map_err(|e| AppError::Forbidden(e))?;
+    let budget = state.service.close_budget(&id).await?;
+    Ok(Json(ApiResponse::new(budget)))
+}
+
+pub async fn budget_variance(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<BudgetVarianceReport>>, AppError> {
+    let _ = &user;
+    let report = state.service.budget_variance(&id).await?;
+    Ok(Json(ApiResponse::new(report)))
 }

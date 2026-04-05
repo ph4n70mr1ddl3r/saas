@@ -1,6 +1,6 @@
-use sqlx::SqlitePool;
-use saas_common::error::{AppError, AppResult};
 use crate::models::*;
+use saas_common::error::{AppError, AppResult};
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
 pub struct FixedAssetsRepo {
@@ -36,7 +36,10 @@ impl FixedAssetsRepo {
     pub async fn create_asset(&self, input: &CreateAssetRequest) -> AppResult<Asset> {
         let id = uuid::Uuid::new_v4().to_string();
         let salvage_value_cents = input.salvage_value_cents.unwrap_or(0);
-        let depreciation_method = input.depreciation_method.as_deref().unwrap_or("straight_line");
+        let depreciation_method = input
+            .depreciation_method
+            .as_deref()
+            .unwrap_or("straight_line");
 
         sqlx::query(
             "INSERT INTO assets (id, name, description, asset_number, category, purchase_date, purchase_cost_cents, salvage_value_cents, useful_life_months, depreciation_method) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -59,7 +62,10 @@ impl FixedAssetsRepo {
     pub async fn update_asset(&self, id: &str, input: &UpdateAssetRequest) -> AppResult<Asset> {
         let current = self.get_asset(id).await?;
         let name = input.name.as_deref().unwrap_or(&current.name);
-        let description = input.description.as_deref().or(current.description.as_deref());
+        let description = input
+            .description
+            .as_deref()
+            .or(current.description.as_deref());
         let category = input.category.as_deref().unwrap_or(&current.category);
         let status = input.status.as_deref().unwrap_or(&current.status);
 
@@ -78,7 +84,10 @@ impl FixedAssetsRepo {
 
     // --- Depreciation ---
 
-    pub async fn get_depreciation_schedule(&self, asset_id: &str) -> AppResult<Vec<DepreciationSchedule>> {
+    pub async fn get_depreciation_schedule(
+        &self,
+        asset_id: &str,
+    ) -> AppResult<Vec<DepreciationSchedule>> {
         let rows = sqlx::query_as::<_, DepreciationSchedule>(
             "SELECT id, asset_id, period, depreciation_cents, accumulated_cents, net_book_value_cents FROM depreciation_schedule WHERE asset_id = ? ORDER BY period",
         )
@@ -88,7 +97,10 @@ impl FixedAssetsRepo {
         Ok(rows)
     }
 
-    pub async fn get_last_depreciation(&self, asset_id: &str) -> AppResult<Option<DepreciationSchedule>> {
+    pub async fn get_last_depreciation(
+        &self,
+        asset_id: &str,
+    ) -> AppResult<Option<DepreciationSchedule>> {
         let row = sqlx::query_as::<_, DepreciationSchedule>(
             "SELECT id, asset_id, period, depreciation_cents, accumulated_cents, net_book_value_cents FROM depreciation_schedule WHERE asset_id = ? ORDER BY period DESC LIMIT 1",
         )
@@ -98,7 +110,11 @@ impl FixedAssetsRepo {
         Ok(row)
     }
 
-    pub async fn has_depreciation_for_period(&self, asset_id: &str, period: &str) -> AppResult<bool> {
+    pub async fn has_depreciation_for_period(
+        &self,
+        asset_id: &str,
+        period: &str,
+    ) -> AppResult<bool> {
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM depreciation_schedule WHERE asset_id = ? AND period = ?",
         )

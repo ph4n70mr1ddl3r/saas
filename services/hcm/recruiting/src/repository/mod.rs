@@ -1,6 +1,6 @@
-use sqlx::SqlitePool;
-use saas_common::error::{AppError, AppResult};
 use crate::models::*;
+use saas_common::error::{AppError, AppResult};
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
 pub struct RecruitingRepo {
@@ -51,9 +51,15 @@ impl RecruitingRepo {
     pub async fn update_job(&self, id: &str, input: &UpdateJobRequest) -> AppResult<JobPosting> {
         let existing = self.get_job(id).await?;
         let title = input.title.as_deref().unwrap_or(&existing.title);
-        let department_id = input.department_id.as_deref().unwrap_or(&existing.department_id);
+        let department_id = input
+            .department_id
+            .as_deref()
+            .unwrap_or(&existing.department_id);
         let description = input.description.as_ref().or(existing.description.as_ref());
-        let requirements = input.requirements.as_ref().or(existing.requirements.as_ref());
+        let requirements = input
+            .requirements
+            .as_ref()
+            .or(existing.requirements.as_ref());
         let status = input.status.as_deref().unwrap_or(&existing.status);
         let closed_at: Option<String> = if status == "closed" || status == "filled" {
             Some(chrono::Utc::now().to_rfc3339())
@@ -107,7 +113,10 @@ impl RecruitingRepo {
         Ok(rows)
     }
 
-    pub async fn create_application(&self, input: &CreateApplicationRequest) -> AppResult<Application> {
+    pub async fn create_application(
+        &self,
+        input: &CreateApplicationRequest,
+    ) -> AppResult<Application> {
         let id = uuid::Uuid::new_v4().to_string();
         sqlx::query(
             "INSERT INTO applications (id, job_id, candidate_first_name, candidate_last_name, candidate_email, notes) VALUES (?, ?, ?, ?, ?, ?)"
@@ -123,15 +132,18 @@ impl RecruitingRepo {
         self.get_application(&id).await
     }
 
-    pub async fn update_application_status(&self, id: &str, status: &str, notes: Option<&str>) -> AppResult<Application> {
-        sqlx::query(
-            "UPDATE applications SET status = ?, notes = COALESCE(?, notes) WHERE id = ?"
-        )
-        .bind(status)
-        .bind(notes)
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+    pub async fn update_application_status(
+        &self,
+        id: &str,
+        status: &str,
+        notes: Option<&str>,
+    ) -> AppResult<Application> {
+        sqlx::query("UPDATE applications SET status = ?, notes = COALESCE(?, notes) WHERE id = ?")
+            .bind(status)
+            .bind(notes)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         self.get_application(id).await
     }
 }

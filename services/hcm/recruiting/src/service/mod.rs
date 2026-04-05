@@ -1,9 +1,9 @@
-use sqlx::SqlitePool;
-use saas_nats_bus::NatsBus;
-use saas_common::error::{AppError, AppResult};
-use saas_proto::events::ApplicationStatusChanged;
 use crate::models::*;
 use crate::repository::RecruitingRepo;
+use saas_common::error::{AppError, AppResult};
+use saas_nats_bus::NatsBus;
+use saas_proto::events::ApplicationStatusChanged;
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
 pub struct RecruitingService {
@@ -43,21 +43,32 @@ impl RecruitingService {
         self.repo.list_applications().await
     }
 
-    pub async fn create_application(&self, input: CreateApplicationRequest) -> AppResult<Application> {
+    pub async fn create_application(
+        &self,
+        input: CreateApplicationRequest,
+    ) -> AppResult<Application> {
         let job = self.repo.get_job(&input.job_id).await?;
         if job.status != "open" {
-            return Err(AppError::Validation(
-                format!("Job '{}' is not open for applications (status: {})", input.job_id, job.status)
-            ));
+            return Err(AppError::Validation(format!(
+                "Job '{}' is not open for applications (status: {})",
+                input.job_id, job.status
+            )));
         }
         self.repo.create_application(&input).await
     }
 
-    pub async fn update_application_status(&self, id: &str, input: UpdateApplicationStatusRequest) -> AppResult<Application> {
+    pub async fn update_application_status(
+        &self,
+        id: &str,
+        input: UpdateApplicationStatusRequest,
+    ) -> AppResult<Application> {
         let existing = self.repo.get_application(id).await?;
         let old_status = existing.status.clone();
 
-        let app = self.repo.update_application_status(id, &input.status, input.notes.as_deref()).await?;
+        let app = self
+            .repo
+            .update_application_status(id, &input.status, input.notes.as_deref())
+            .await?;
 
         if input.status == "hired" {
             let event = ApplicationStatusChanged {
@@ -67,8 +78,16 @@ impl RecruitingService {
                 old_status,
                 new_status: "hired".to_string(),
             };
-            if let Err(e) = self.bus.publish("hcm.recruiting.application.status_changed", event).await {
-                tracing::error!("CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.", "hcm.recruiting.application.status_changed", e);
+            if let Err(e) = self
+                .bus
+                .publish("hcm.recruiting.application.status_changed", event)
+                .await
+            {
+                tracing::error!(
+                    "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                    "hcm.recruiting.application.status_changed",
+                    e
+                );
             }
         }
 

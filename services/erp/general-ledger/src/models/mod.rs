@@ -97,3 +97,89 @@ pub struct BalanceSheetRow {
     pub account_type: String,
     pub balance_cents: i64,
 }
+
+// --- Income Statement ---
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct IncomeStatementRow {
+    pub account_code: String,
+    pub account_name: String,
+    pub account_type: String,
+    pub balance_cents: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IncomeStatement {
+    pub revenue: Vec<IncomeStatementRow>,
+    pub total_revenue_cents: i64,
+    pub expenses: Vec<IncomeStatementRow>,
+    pub total_expense_cents: i64,
+    pub net_income_cents: i64,
+}
+
+// --- Budget Management ---
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Budget {
+    pub id: String,
+    pub name: String,
+    pub period_id: String,
+    pub status: String,
+    pub total_budget_cents: i64,
+    pub created_by: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateBudgetRequest {
+    pub name: String,
+    pub period_id: String,
+    pub lines: Vec<CreateBudgetLineRequest>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateBudgetLineRequest {
+    pub account_id: String,
+    pub budgeted_cents: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct BudgetLine {
+    pub id: String,
+    pub budget_id: String,
+    pub account_id: String,
+    pub budgeted_cents: i64,
+    pub created_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct IncomeStatementQuery {
+    pub period_start: String,
+    pub period_end: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BudgetWithLines {
+    pub budget: Budget,
+    pub lines: Vec<BudgetLine>,
+}
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct BudgetVarianceRow {
+    pub account_code: String,
+    pub account_name: String,
+    pub budgeted_cents: i64,
+    pub actual_cents: i64,
+    pub variance_cents: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BudgetVarianceReport {
+    pub budget_id: String,
+    pub budget_name: String,
+    pub period_id: String,
+    pub lines: Vec<BudgetVarianceRow>,
+    pub total_budgeted_cents: i64,
+    pub total_actual_cents: i64,
+    pub total_variance_cents: i64,
+}

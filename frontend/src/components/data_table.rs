@@ -5,7 +5,8 @@ pub fn DataTable<T, F, V>(
     #[prop(into)] headers: Vec<String>,
     rows: Vec<T>,
     render_row: F,
-) -> impl IntoView where
+) -> impl IntoView
+where
     F: Fn(&T) -> V + 'static,
     V: IntoView + 'static,
     T: Clone + 'static,

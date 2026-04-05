@@ -1,5 +1,5 @@
-use leptos::prelude::*;
 use crate::components::auth_guard::AuthGuard;
+use leptos::prelude::*;
 
 #[component]
 pub fn PayablesPage() -> impl IntoView {

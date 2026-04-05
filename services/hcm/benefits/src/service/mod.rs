@@ -1,8 +1,8 @@
-use sqlx::SqlitePool;
-use saas_nats_bus::NatsBus;
-use saas_common::error::{AppError, AppResult};
 use crate::models::*;
 use crate::repository::BenefitsRepo;
+use saas_common::error::{AppError, AppResult};
+use saas_nats_bus::NatsBus;
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
 pub struct BenefitsService {
@@ -46,26 +46,39 @@ impl BenefitsService {
     pub async fn create_enrollment(&self, input: CreateEnrollmentRequest) -> AppResult<Enrollment> {
         let plan = self.repo.get_plan(&input.plan_id).await?;
         if !plan.is_active {
-            return Err(AppError::Validation(format!("Plan '{}' is not active", input.plan_id)));
+            return Err(AppError::Validation(format!(
+                "Plan '{}' is not active",
+                input.plan_id
+            )));
         }
         // Prevent duplicate active enrollment for same employee + plan
-        let existing = self.repo.find_active_enrollment(&input.employee_id, &input.plan_id).await?;
+        let existing = self
+            .repo
+            .find_active_enrollment(&input.employee_id, &input.plan_id)
+            .await?;
         if existing.is_some() {
-            return Err(AppError::Conflict(
-                format!("Employee '{}' already has an active enrollment in plan '{}'", input.employee_id, input.plan_id)
-            ));
+            return Err(AppError::Conflict(format!(
+                "Employee '{}' already has an active enrollment in plan '{}'",
+                input.employee_id, input.plan_id
+            )));
         }
         self.repo.create_enrollment(&input).await
     }
 
-    pub async fn list_enrollments_by_employee(&self, employee_id: &str) -> AppResult<Vec<Enrollment>> {
+    pub async fn list_enrollments_by_employee(
+        &self,
+        employee_id: &str,
+    ) -> AppResult<Vec<Enrollment>> {
         self.repo.list_enrollments_by_employee(employee_id).await
     }
 
     pub async fn cancel_enrollment(&self, id: &str) -> AppResult<Enrollment> {
         let enrollment = self.repo.get_enrollment(id).await?;
         if enrollment.status == "cancelled" {
-            return Err(AppError::Validation(format!("Enrollment '{}' is already cancelled", id)));
+            return Err(AppError::Validation(format!(
+                "Enrollment '{}' is already cancelled",
+                id
+            )));
         }
         self.repo.cancel_enrollment(id).await
     }

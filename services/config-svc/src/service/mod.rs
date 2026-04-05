@@ -1,8 +1,8 @@
-use sqlx::SqlitePool;
-use saas_nats_bus::NatsBus;
-use saas_common::error::AppResult;
 use crate::models::ConfigEntry;
 use crate::repository::ConfigRepo;
+use saas_common::error::AppResult;
+use saas_nats_bus::NatsBus;
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
 pub struct ConfigService {
@@ -13,7 +13,10 @@ pub struct ConfigService {
 
 impl ConfigService {
     pub fn new(pool: SqlitePool, bus: NatsBus) -> Self {
-        Self { repo: ConfigRepo::new(pool), bus }
+        Self {
+            repo: ConfigRepo::new(pool),
+            bus,
+        }
     }
 
     pub async fn list(&self) -> AppResult<Vec<ConfigEntry>> {

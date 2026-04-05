@@ -1,5 +1,5 @@
-use leptos::prelude::*;
 use leptos::children::ChildrenFn;
+use leptos::prelude::*;
 
 #[component]
 pub fn Modal(

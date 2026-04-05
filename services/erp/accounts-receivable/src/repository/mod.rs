@@ -1,6 +1,6 @@
-use sqlx::SqlitePool;
-use saas_common::error::{AppError, AppResult};
 use crate::models::*;
+use saas_common::error::{AppError, AppResult};
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
 pub struct ArRepo {
@@ -48,13 +48,20 @@ impl ArRepo {
         self.get_customer(&id).await
     }
 
-    pub async fn update_customer(&self, id: &str, input: &UpdateCustomerRequest) -> AppResult<Customer> {
+    pub async fn update_customer(
+        &self,
+        id: &str,
+        input: &UpdateCustomerRequest,
+    ) -> AppResult<Customer> {
         let current = self.get_customer(id).await?;
         let name = input.name.as_deref().unwrap_or(&current.name);
         let email = input.email.as_deref().or(current.email.as_deref());
         let phone = input.phone.as_deref().or(current.phone.as_deref());
         let address = input.address.as_deref().or(current.address.as_deref());
-        let is_active = input.is_active.map(|b| if b { 1 } else { 0 }).unwrap_or(current.is_active);
+        let is_active = input
+            .is_active
+            .map(|b| if b { 1 } else { 0 })
+            .unwrap_or(current.is_active);
 
         sqlx::query(
             "UPDATE customers SET name = ?, email = ?, phone = ?, address = ?, is_active = ? WHERE id = ?",
@@ -228,5 +235,94 @@ impl ArRepo {
         .fetch_one(&self.pool)
         .await
         .map_err(|e| e.into())
+    }
+
+    // --- Credit Memos ---
+
+    pub async fn create_credit_memo(
+        &self,
+        input: &CreateCreditMemoRequest,
+    ) -> AppResult<CreditMemo> {
+        let id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO credit_memos (id, customer_id, amount_cents, reason) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(&input.customer_id)
+        .bind(input.amount_cents)
+        .bind(&input.reason)
+        .execute(&self.pool)
+        .await?;
+        self.get_credit_memo(&id).await
+    }
+
+    pub async fn list_credit_memos(&self) -> AppResult<Vec<CreditMemo>> {
+        let rows = sqlx::query_as::<_, CreditMemo>(
+            "SELECT id, customer_id, amount_cents, reason, status, applied_to_invoice_id, applied_amount_cents, created_at FROM credit_memos ORDER BY created_at DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn get_credit_memo(&self, id: &str) -> AppResult<CreditMemo> {
+        sqlx::query_as::<_, CreditMemo>(
+            "SELECT id, customer_id, amount_cents, reason, status, applied_to_invoice_id, applied_amount_cents, created_at FROM credit_memos WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Credit memo '{}' not found", id)))
+    }
+
+    pub async fn apply_credit_memo(
+        &self,
+        memo_id: &str,
+        invoice_id: &str,
+        amount: i64,
+    ) -> AppResult<CreditMemo> {
+        sqlx::query(
+            "UPDATE credit_memos SET status = 'applied', applied_to_invoice_id = ?, applied_amount_cents = ? WHERE id = ?",
+        )
+        .bind(invoice_id)
+        .bind(amount)
+        .bind(memo_id)
+        .execute(&self.pool)
+        .await?;
+        self.get_credit_memo(memo_id).await
+    }
+
+    // --- Aging Report ---
+
+    pub async fn aging_report(&self, as_of_date: &str) -> AppResult<Vec<ArAgingRow>> {
+        let rows = sqlx::query_as::<_, ArAgingRow>(
+            r#"
+            SELECT
+                c.id AS customer_id,
+                c.name AS customer_name,
+                i.id AS invoice_id,
+                i.invoice_number,
+                i.total_cents,
+                i.due_date,
+                CASE
+                    WHEN julianday(?) - julianday(i.due_date) <= 0 THEN 'current'
+                    WHEN julianday(?) - julianday(i.due_date) <= 30 THEN '1-30'
+                    WHEN julianday(?) - julianday(i.due_date) <= 60 THEN '31-60'
+                    WHEN julianday(?) - julianday(i.due_date) <= 90 THEN '61-90'
+                    ELSE '90+'
+                END AS aging_bucket
+            FROM ar_invoices i
+            JOIN customers c ON c.id = i.customer_id
+            WHERE i.status IN ('sent', 'partial')
+            ORDER BY c.name, i.due_date
+            "#,
+        )
+        .bind(as_of_date)
+        .bind(as_of_date)
+        .bind(as_of_date)
+        .bind(as_of_date)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
     }
 }

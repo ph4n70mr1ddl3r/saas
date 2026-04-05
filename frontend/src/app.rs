@@ -1,7 +1,7 @@
 use leptos::prelude::*;
 use leptos_meta::*;
 use leptos_router::components::*;
-use leptos_router::{StaticSegment, ParamSegment};
+use leptos_router::{ParamSegment, StaticSegment};
 
 use crate::components::layout::Layout;
 use crate::pages;

@@ -1,12 +1,16 @@
-use sqlx::SqlitePool;
+use crate::models::supplier::{CreateSupplier, SupplierResponse, UpdateSupplier};
 use saas_common::error::{AppError, AppResult};
-use crate::models::supplier::{SupplierResponse, CreateSupplier, UpdateSupplier};
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
-pub struct SupplierRepo { pool: SqlitePool }
+pub struct SupplierRepo {
+    pool: SqlitePool,
+}
 
 impl SupplierRepo {
-    pub fn new(pool: SqlitePool) -> Self { Self { pool } }
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
 
     pub async fn list(&self) -> AppResult<Vec<SupplierResponse>> {
         let rows = sqlx::query_as::<_, SupplierResponse>(
@@ -27,17 +31,22 @@ impl SupplierRepo {
     pub async fn create(&self, input: &CreateSupplier) -> AppResult<SupplierResponse> {
         let id = uuid::Uuid::new_v4().to_string();
         sqlx::query(
-            "INSERT INTO suppliers (id, name, email, phone, address) VALUES (?, ?, ?, ?, ?)"
+            "INSERT INTO suppliers (id, name, email, phone, address) VALUES (?, ?, ?, ?, ?)",
         )
-        .bind(&id).bind(&input.name).bind(&input.email).bind(&input.phone).bind(&input.address)
-        .execute(&self.pool).await?;
+        .bind(&id)
+        .bind(&input.name)
+        .bind(&input.email)
+        .bind(&input.phone)
+        .bind(&input.address)
+        .execute(&self.pool)
+        .await?;
         self.get_by_id(&id).await
     }
 
     pub async fn update(&self, id: &str, input: &UpdateSupplier) -> AppResult<SupplierResponse> {
         let current = self.get_by_id(id).await?;
         sqlx::query(
-            "UPDATE suppliers SET name=?, email=?, phone=?, address=?, is_active=? WHERE id=?"
+            "UPDATE suppliers SET name=?, email=?, phone=?, address=?, is_active=? WHERE id=?",
         )
         .bind(input.name.as_deref().unwrap_or(&current.name))
         .bind(input.email.as_deref().or(current.email.as_deref()))
@@ -45,7 +54,8 @@ impl SupplierRepo {
         .bind(input.address.as_deref().or(current.address.as_deref()))
         .bind(input.is_active.unwrap_or(current.is_active))
         .bind(id)
-        .execute(&self.pool).await?;
+        .execute(&self.pool)
+        .await?;
         self.get_by_id(id).await
     }
 }

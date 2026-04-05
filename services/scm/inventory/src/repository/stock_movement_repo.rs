@@ -1,12 +1,16 @@
-use sqlx::SqlitePool;
+use crate::models::stock_movement::{CreateStockMovement, StockMovementResponse};
 use saas_common::error::AppResult;
-use crate::models::stock_movement::{StockMovementResponse, CreateStockMovement};
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
-pub struct StockMovementRepo { pool: SqlitePool }
+pub struct StockMovementRepo {
+    pool: SqlitePool,
+}
 
 impl StockMovementRepo {
-    pub fn new(pool: SqlitePool) -> Self { Self { pool } }
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
 
     pub async fn list(&self) -> AppResult<Vec<StockMovementResponse>> {
         let rows = sqlx::query_as::<_, StockMovementResponse>(

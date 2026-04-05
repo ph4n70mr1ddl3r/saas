@@ -1,6 +1,6 @@
-use sqlx::SqlitePool;
-use saas_common::error::{AppError, AppResult};
 use crate::models::ConfigEntry;
+use saas_common::error::{AppError, AppResult};
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
 pub struct ConfigRepo {
@@ -14,7 +14,7 @@ impl ConfigRepo {
 
     pub async fn list(&self) -> AppResult<Vec<ConfigEntry>> {
         let entries = sqlx::query_as::<_, ConfigEntry>(
-            "SELECT key, value, updated_at FROM config ORDER BY key"
+            "SELECT key, value, updated_at FROM config ORDER BY key",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -22,13 +22,11 @@ impl ConfigRepo {
     }
 
     pub async fn get(&self, key: &str) -> AppResult<ConfigEntry> {
-        sqlx::query_as::<_, ConfigEntry>(
-            "SELECT key, value, updated_at FROM config WHERE key = ?"
-        )
-        .bind(key)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Config key not found".to_string()))
+        sqlx::query_as::<_, ConfigEntry>("SELECT key, value, updated_at FROM config WHERE key = ?")
+            .bind(key)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Config key not found".to_string()))
     }
 
     pub async fn set(&self, key: &str, value: &str) -> AppResult<ConfigEntry> {

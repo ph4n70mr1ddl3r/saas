@@ -1,12 +1,16 @@
-use sqlx::SqlitePool;
+use crate::models::reservation::{CreateReservation, ReservationResponse};
 use saas_common::error::{AppError, AppResult};
-use crate::models::reservation::{ReservationResponse, CreateReservation};
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
-pub struct ReservationRepo { pool: SqlitePool }
+pub struct ReservationRepo {
+    pool: SqlitePool,
+}
 
 impl ReservationRepo {
-    pub fn new(pool: SqlitePool) -> Self { Self { pool } }
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
 
     pub async fn list(&self) -> AppResult<Vec<ReservationResponse>> {
         let rows = sqlx::query_as::<_, ReservationResponse>(
@@ -38,14 +42,19 @@ impl ReservationRepo {
     pub async fn cancel(&self, id: &str) -> AppResult<ReservationResponse> {
         let reservation = self.get_by_id(id).await?;
         sqlx::query(
-            "UPDATE reservations SET status = 'cancelled' WHERE id = ? AND status = 'active'"
+            "UPDATE reservations SET status = 'cancelled' WHERE id = ? AND status = 'active'",
         )
         .bind(id)
-        .execute(&self.pool).await?;
+        .execute(&self.pool)
+        .await?;
         self.get_by_id(id).await
     }
 
-    pub async fn get_active_by_reference(&self, reference_type: &str, reference_id: &str) -> AppResult<Vec<ReservationResponse>> {
+    pub async fn get_active_by_reference(
+        &self,
+        reference_type: &str,
+        reference_id: &str,
+    ) -> AppResult<Vec<ReservationResponse>> {
         let rows = sqlx::query_as::<_, ReservationResponse>(
             "SELECT id, item_id, warehouse_id, quantity, reference_type, reference_id, status, created_at, fulfilled_at FROM reservations WHERE reference_type = ? AND reference_id = ? AND status = 'active'"
         )

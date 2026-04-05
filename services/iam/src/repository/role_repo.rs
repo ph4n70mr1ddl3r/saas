@@ -1,6 +1,6 @@
-use sqlx::SqlitePool;
+use crate::models::role::{PermissionResponse, RoleResponse};
 use saas_common::error::{AppError, AppResult};
-use crate::models::role::{RoleResponse, PermissionResponse};
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
 pub struct RoleRepo {
@@ -14,7 +14,7 @@ impl RoleRepo {
 
     pub async fn list_roles(&self) -> AppResult<Vec<RoleResponse>> {
         let roles = sqlx::query_as::<_, RoleResponse>(
-            "SELECT id, name, description, created_at FROM roles ORDER BY name"
+            "SELECT id, name, description, created_at FROM roles ORDER BY name",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -23,7 +23,7 @@ impl RoleRepo {
 
     pub async fn get_role(&self, id: &str) -> AppResult<RoleResponse> {
         sqlx::query_as::<_, RoleResponse>(
-            "SELECT id, name, description, created_at FROM roles WHERE id = ?"
+            "SELECT id, name, description, created_at FROM roles WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -31,7 +31,11 @@ impl RoleRepo {
         .ok_or_else(|| AppError::NotFound("Role not found".into()))
     }
 
-    pub async fn create_role(&self, name: &str, description: Option<&str>) -> AppResult<RoleResponse> {
+    pub async fn create_role(
+        &self,
+        name: &str,
+        description: Option<&str>,
+    ) -> AppResult<RoleResponse> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query("INSERT INTO roles (id, name, description, created_at) VALUES (?, ?, ?, ?)")
@@ -44,7 +48,12 @@ impl RoleRepo {
         self.get_role(&id).await
     }
 
-    pub async fn update_role(&self, id: &str, name: Option<&str>, description: Option<&str>) -> AppResult<RoleResponse> {
+    pub async fn update_role(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        description: Option<&str>,
+    ) -> AppResult<RoleResponse> {
         // Use COALESCE for atomic single-statement update
         sqlx::query("UPDATE roles SET name = COALESCE(?, name), description = COALESCE(?, description) WHERE id = ?")
             .bind(name)
@@ -65,7 +74,11 @@ impl RoleRepo {
     }
 
     /// Atomically replace all permission assignments for a role inside a transaction.
-    pub async fn set_role_permissions(&self, role_id: &str, permission_ids: &[String]) -> AppResult<()> {
+    pub async fn set_role_permissions(
+        &self,
+        role_id: &str,
+        permission_ids: &[String],
+    ) -> AppResult<()> {
         let mut tx = self.pool.begin().await?;
 
         sqlx::query("DELETE FROM role_permissions WHERE role_id = ?")

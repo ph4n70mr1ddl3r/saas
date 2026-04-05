@@ -1,15 +1,23 @@
-use sqlx::SqlitePool;
+use crate::models::employee::{CreateEmployee, EmployeeFilters, EmployeeResponse};
 use saas_common::error::{AppError, AppResult};
 use saas_common::pagination::PaginationParams;
-use crate::models::employee::{EmployeeResponse, CreateEmployee, EmployeeFilters};
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
-pub struct EmployeeRepo { pool: SqlitePool }
+pub struct EmployeeRepo {
+    pool: SqlitePool,
+}
 
 impl EmployeeRepo {
-    pub fn new(pool: SqlitePool) -> Self { Self { pool } }
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
 
-    pub async fn list(&self, pag: &PaginationParams, filters: &EmployeeFilters) -> AppResult<(Vec<EmployeeResponse>, u64)> {
+    pub async fn list(
+        &self,
+        pag: &PaginationParams,
+        filters: &EmployeeFilters,
+    ) -> AppResult<(Vec<EmployeeResponse>, u64)> {
         let offset = pag.offset();
         let limit = pag.per_page();
         let rows = sqlx::query_as::<_, EmployeeResponse>(
@@ -33,7 +41,8 @@ impl EmployeeRepo {
     pub async fn get_by_id(&self, id: &str) -> AppResult<EmployeeResponse> {
         sqlx::query_as::<_, EmployeeResponse>("SELECT * FROM employees WHERE id = ?")
             .bind(id)
-            .fetch_optional(&self.pool).await?
+            .fetch_optional(&self.pool)
+            .await?
             .ok_or_else(|| AppError::NotFound(format!("Employee {} not found", id)))
     }
 
@@ -51,7 +60,18 @@ impl EmployeeRepo {
         self.get_by_id(&id).await
     }
 
-    pub async fn update(&self, id: &str, first_name: Option<&str>, last_name: Option<&str>, email: Option<&str>, phone: Option<&str>, department_id: Option<&str>, reports_to: Option<&str>, job_title: Option<&str>, status: Option<&str>) -> AppResult<EmployeeResponse> {
+    pub async fn update(
+        &self,
+        id: &str,
+        first_name: Option<&str>,
+        last_name: Option<&str>,
+        email: Option<&str>,
+        phone: Option<&str>,
+        department_id: Option<&str>,
+        reports_to: Option<&str>,
+        job_title: Option<&str>,
+        status: Option<&str>,
+    ) -> AppResult<EmployeeResponse> {
         let current = self.get_by_id(id).await?;
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query(
@@ -72,16 +92,24 @@ impl EmployeeRepo {
 
     pub async fn terminate(&self, id: &str, termination_date: &str) -> AppResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
-        sqlx::query("UPDATE employees SET status='terminated', termination_date=?, updated_at=? WHERE id=?")
-            .bind(termination_date).bind(&now).bind(id)
-            .execute(&self.pool).await?;
+        sqlx::query(
+            "UPDATE employees SET status='terminated', termination_date=?, updated_at=? WHERE id=?",
+        )
+        .bind(termination_date)
+        .bind(&now)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
     pub async fn get_direct_reports(&self, manager_id: &str) -> AppResult<Vec<EmployeeResponse>> {
         let rows = sqlx::query_as::<_, EmployeeResponse>(
-            "SELECT * FROM employees WHERE reports_to = ? ORDER BY last_name, first_name"
-        ).bind(manager_id).fetch_all(&self.pool).await?;
+            "SELECT * FROM employees WHERE reports_to = ? ORDER BY last_name, first_name",
+        )
+        .bind(manager_id)
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows)
     }
 

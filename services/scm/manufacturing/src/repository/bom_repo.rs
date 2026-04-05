@@ -1,12 +1,16 @@
-use sqlx::SqlitePool;
+use crate::models::bom::{BomComponentResponse, BomResponse, CreateBom};
 use saas_common::error::{AppError, AppResult};
-use crate::models::bom::{BomResponse, BomComponentResponse, CreateBom};
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
-pub struct BomRepo { pool: SqlitePool }
+pub struct BomRepo {
+    pool: SqlitePool,
+}
 
 impl BomRepo {
-    pub fn new(pool: SqlitePool) -> Self { Self { pool } }
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
 
     pub async fn list(&self) -> AppResult<Vec<BomResponse>> {
         let rows = sqlx::query_as::<_, BomResponse>(

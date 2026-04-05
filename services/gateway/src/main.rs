@@ -1,14 +1,14 @@
 use saas_common::tracing_setup;
-use std::env;
 use std::collections::HashMap;
+use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::signal;
 use tokio::sync::RwLock;
 
 mod proxy;
-mod routes;
 mod rate_limit;
+mod routes;
 
 use routes::AppState;
 
@@ -28,27 +28,81 @@ async fn main() -> anyhow::Result<()> {
 
     saas_auth_core::jwt::init_jwt_secret();
 
-    let port: u16 = env::var("PORT")
-        .unwrap_or_else(|_| "8000".into())
-        .parse()?;
+    let port: u16 = env::var("PORT").unwrap_or_else(|_| "8000".into()).parse()?;
 
     let mut service_map: HashMap<String, String> = HashMap::new();
-    service_map.insert("iam".to_string(), env::var("IAM_URL").unwrap_or_else(|_| "http://localhost:8001".into()));
-    service_map.insert("config".to_string(), env::var("CONFIG_URL").unwrap_or_else(|_| "http://localhost:8002".into()));
-    service_map.insert("employee".to_string(), env::var("EMPLOYEE_URL").unwrap_or_else(|_| "http://localhost:8010".into()));
-    service_map.insert("payroll".to_string(), env::var("PAYROLL_URL").unwrap_or_else(|_| "http://localhost:8011".into()));
-    service_map.insert("benefits".to_string(), env::var("BENEFITS_URL").unwrap_or_else(|_| "http://localhost:8012".into()));
-    service_map.insert("time-labor".to_string(), env::var("TIME_LABOR_URL").unwrap_or_else(|_| "http://localhost:8013".into()));
-    service_map.insert("recruiting".to_string(), env::var("RECRUITING_URL").unwrap_or_else(|_| "http://localhost:8014".into()));
-    service_map.insert("gl".to_string(), env::var("GL_URL").unwrap_or_else(|_| "http://localhost:8020".into()));
-    service_map.insert("ap".to_string(), env::var("AP_URL").unwrap_or_else(|_| "http://localhost:8021".into()));
-    service_map.insert("ar".to_string(), env::var("AR_URL").unwrap_or_else(|_| "http://localhost:8022".into()));
-    service_map.insert("assets".to_string(), env::var("ASSETS_URL").unwrap_or_else(|_| "http://localhost:8023".into()));
-    service_map.insert("cash".to_string(), env::var("CASH_URL").unwrap_or_else(|_| "http://localhost:8024".into()));
-    service_map.insert("inventory".to_string(), env::var("INVENTORY_URL").unwrap_or_else(|_| "http://localhost:8030".into()));
-    service_map.insert("procurement".to_string(), env::var("PROCUREMENT_URL").unwrap_or_else(|_| "http://localhost:8031".into()));
-    service_map.insert("orders".to_string(), env::var("ORDERS_URL").unwrap_or_else(|_| "http://localhost:8032".into()));
-    service_map.insert("manufacturing".to_string(), env::var("MANUFACTURING_URL").unwrap_or_else(|_| "http://localhost:8033".into()));
+    service_map.insert(
+        "iam".to_string(),
+        env::var("IAM_URL").unwrap_or_else(|_| "http://localhost:8001".into()),
+    );
+    service_map.insert(
+        "config".to_string(),
+        env::var("CONFIG_URL").unwrap_or_else(|_| "http://localhost:8002".into()),
+    );
+    service_map.insert(
+        "employee".to_string(),
+        env::var("EMPLOYEE_URL").unwrap_or_else(|_| "http://localhost:8010".into()),
+    );
+    service_map.insert(
+        "payroll".to_string(),
+        env::var("PAYROLL_URL").unwrap_or_else(|_| "http://localhost:8011".into()),
+    );
+    service_map.insert(
+        "benefits".to_string(),
+        env::var("BENEFITS_URL").unwrap_or_else(|_| "http://localhost:8012".into()),
+    );
+    service_map.insert(
+        "time-labor".to_string(),
+        env::var("TIME_LABOR_URL").unwrap_or_else(|_| "http://localhost:8013".into()),
+    );
+    service_map.insert(
+        "recruiting".to_string(),
+        env::var("RECRUITING_URL").unwrap_or_else(|_| "http://localhost:8014".into()),
+    );
+    service_map.insert(
+        "performance".to_string(),
+        env::var("PERFORMANCE_URL").unwrap_or_else(|_| "http://localhost:8015".into()),
+    );
+    service_map.insert(
+        "gl".to_string(),
+        env::var("GL_URL").unwrap_or_else(|_| "http://localhost:8020".into()),
+    );
+    service_map.insert(
+        "ap".to_string(),
+        env::var("AP_URL").unwrap_or_else(|_| "http://localhost:8021".into()),
+    );
+    service_map.insert(
+        "ar".to_string(),
+        env::var("AR_URL").unwrap_or_else(|_| "http://localhost:8022".into()),
+    );
+    service_map.insert(
+        "assets".to_string(),
+        env::var("ASSETS_URL").unwrap_or_else(|_| "http://localhost:8023".into()),
+    );
+    service_map.insert(
+        "cash".to_string(),
+        env::var("CASH_URL").unwrap_or_else(|_| "http://localhost:8024".into()),
+    );
+    service_map.insert(
+        "expense-mgmt".to_string(),
+        env::var("EXPENSE_MGMT_URL").unwrap_or_else(|_| "http://localhost:8025".into()),
+    );
+    service_map.insert(
+        "inventory".to_string(),
+        env::var("INVENTORY_URL").unwrap_or_else(|_| "http://localhost:8030".into()),
+    );
+    service_map.insert(
+        "procurement".to_string(),
+        env::var("PROCUREMENT_URL").unwrap_or_else(|_| "http://localhost:8031".into()),
+    );
+    service_map.insert(
+        "orders".to_string(),
+        env::var("ORDERS_URL").unwrap_or_else(|_| "http://localhost:8032".into()),
+    );
+    service_map.insert(
+        "manufacturing".to_string(),
+        env::var("MANUFACTURING_URL").unwrap_or_else(|_| "http://localhost:8033".into()),
+    );
 
     let rate_limiter: Arc<RwLock<HashMap<String, rate_limit::TokenBucket>>> =
         Arc::new(RwLock::new(HashMap::new()));

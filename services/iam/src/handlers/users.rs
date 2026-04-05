@@ -1,14 +1,14 @@
+use crate::models::role::AssignRolesRequest;
+use crate::models::user::{ChangePassword, CreateUser, UpdateUser, UserResponse};
+use crate::routes::AuthState;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use saas_auth_core::extractor::AuthUser;
 use saas_auth_core::rbac::is_admin;
 use saas_common::error::AppError;
-use saas_common::response::{ApiResponse, ApiListResponse};
 use saas_common::pagination::PaginationParams;
-use crate::models::user::{CreateUser, UpdateUser, ChangePassword, UserResponse};
-use crate::models::role::AssignRolesRequest;
-use crate::routes::AuthState;
+use saas_common::response::{ApiListResponse, ApiResponse};
 
 pub async fn list_users(
     _user: AuthUser,
@@ -52,7 +52,9 @@ pub async fn update_user(
     }
     // Prevent admins from deactivating themselves
     if user.user_id == id && input.is_active == Some(false) {
-        return Err(AppError::Forbidden("Admins cannot deactivate themselves".into()));
+        return Err(AppError::Forbidden(
+            "Admins cannot deactivate themselves".into(),
+        ));
     }
     let user = state.user_service.update(&id, input).await?;
     Ok(Json(ApiResponse::new(user)))
@@ -67,7 +69,9 @@ pub async fn delete_user(
         return Err(AppError::Forbidden("Admin role required".into()));
     }
     if user.user_id == id {
-        return Err(AppError::Forbidden("Admins cannot delete themselves".into()));
+        return Err(AppError::Forbidden(
+            "Admins cannot delete themselves".into(),
+        ));
     }
     state.user_service.delete(&id).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -79,7 +83,10 @@ pub async fn change_password(
     Path(id): Path<String>,
     Json(input): Json<ChangePassword>,
 ) -> Result<StatusCode, AppError> {
-    state.user_service.change_password(&user.user_id, &user.roles, &id, input).await?;
+    state
+        .user_service
+        .change_password(&user.user_id, &user.roles, &id, input)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

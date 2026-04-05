@@ -1,14 +1,16 @@
-use sqlx::SqlitePool;
+use crate::models::sales_order::{CreateSalesOrder, SalesOrderLineResponse, SalesOrderResponse};
 use saas_common::error::{AppError, AppResult};
-use crate::models::sales_order::{
-    SalesOrderResponse, SalesOrderLineResponse, CreateSalesOrder,
-};
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
-pub struct SalesOrderRepo { pool: SqlitePool }
+pub struct SalesOrderRepo {
+    pool: SqlitePool,
+}
 
 impl SalesOrderRepo {
-    pub fn new(pool: SqlitePool) -> Self { Self { pool } }
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
 
     pub async fn list(&self) -> AppResult<Vec<SalesOrderResponse>> {
         let rows = sqlx::query_as::<_, SalesOrderResponse>(
@@ -38,7 +40,11 @@ impl SalesOrderRepo {
     pub async fn create(&self, input: &CreateSalesOrder) -> AppResult<SalesOrderResponse> {
         let id = uuid::Uuid::new_v4().to_string();
         let order_number = format!("SO-{}", chrono::Utc::now().format("%Y%m%d%H%M%S"));
-        let total_cents: i64 = input.lines.iter().map(|l| l.quantity * l.unit_price_cents).sum();
+        let total_cents: i64 = input
+            .lines
+            .iter()
+            .map(|l| l.quantity * l.unit_price_cents)
+            .sum();
         let now = chrono::Utc::now().to_rfc3339();
 
         let mut tx = self.pool.begin().await?;
@@ -70,8 +76,11 @@ impl SalesOrderRepo {
     pub async fn update_status(&self, id: &str, status: &str) -> AppResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
         let result = sqlx::query("UPDATE sales_orders SET status = ?, updated_at = ? WHERE id = ?")
-            .bind(status).bind(&now).bind(id)
-            .execute(&self.pool).await?;
+            .bind(status)
+            .bind(&now)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         if result.rows_affected() == 0 {
             return Err(AppError::NotFound(format!("Sales order {} not found", id)));
         }

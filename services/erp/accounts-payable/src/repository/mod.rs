@@ -1,6 +1,6 @@
-use sqlx::SqlitePool;
-use saas_common::error::{AppError, AppResult};
 use crate::models::*;
+use saas_common::error::{AppError, AppResult};
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
 pub struct ApRepo {
@@ -35,16 +35,14 @@ impl ApRepo {
 
     pub async fn create_vendor(&self, input: &CreateVendorRequest) -> AppResult<Vendor> {
         let id = uuid::Uuid::new_v4().to_string();
-        sqlx::query(
-            "INSERT INTO vendors (id, name, email, phone, address) VALUES (?, ?, ?, ?, ?)",
-        )
-        .bind(&id)
-        .bind(&input.name)
-        .bind(&input.email)
-        .bind(&input.phone)
-        .bind(&input.address)
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("INSERT INTO vendors (id, name, email, phone, address) VALUES (?, ?, ?, ?, ?)")
+            .bind(&id)
+            .bind(&input.name)
+            .bind(&input.email)
+            .bind(&input.phone)
+            .bind(&input.address)
+            .execute(&self.pool)
+            .await?;
         self.get_vendor(&id).await
     }
 
@@ -54,7 +52,10 @@ impl ApRepo {
         let email = input.email.as_deref().or(current.email.as_deref());
         let phone = input.phone.as_deref().or(current.phone.as_deref());
         let address = input.address.as_deref().or(current.address.as_deref());
-        let is_active = input.is_active.map(|b| if b { 1 } else { 0 }).unwrap_or(current.is_active);
+        let is_active = input
+            .is_active
+            .map(|b| if b { 1 } else { 0 })
+            .unwrap_or(current.is_active);
 
         sqlx::query(
             "UPDATE vendors SET name = ?, email = ?, phone = ?, address = ?, is_active = ? WHERE id = ?",
@@ -229,5 +230,72 @@ impl ApRepo {
         .fetch_one(&self.pool)
         .await
         .map_err(|e| e.into())
+    }
+
+    // --- Tax Codes ---
+
+    pub async fn create_tax_code(&self, input: &CreateTaxCodeRequest) -> AppResult<TaxCode> {
+        let id = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO tax_codes (id, code, rate, description) VALUES (?, ?, ?, ?)")
+            .bind(&id)
+            .bind(&input.code)
+            .bind(input.rate)
+            .bind(&input.description)
+            .execute(&self.pool)
+            .await?;
+        self.get_tax_code(&id).await
+    }
+
+    pub async fn list_tax_codes(&self) -> AppResult<Vec<TaxCode>> {
+        let rows = sqlx::query_as::<_, TaxCode>(
+            "SELECT id, code, rate, description, is_active, created_at FROM tax_codes ORDER BY code",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn get_tax_code(&self, id: &str) -> AppResult<TaxCode> {
+        sqlx::query_as::<_, TaxCode>(
+            "SELECT id, code, rate, description, is_active, created_at FROM tax_codes WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Tax code '{}' not found", id)))
+    }
+
+    // --- Aging Report ---
+
+    pub async fn aging_report(&self, as_of_date: &str) -> AppResult<Vec<ApAgingRow>> {
+        let rows = sqlx::query_as::<_, ApAgingRow>(
+            r#"
+            SELECT
+                v.id AS vendor_id,
+                v.name AS vendor_name,
+                i.id AS invoice_id,
+                i.invoice_number,
+                i.total_cents,
+                i.due_date,
+                CASE
+                    WHEN julianday(?) - julianday(i.due_date) <= 0 THEN 'current'
+                    WHEN julianday(?) - julianday(i.due_date) <= 30 THEN '1-30'
+                    WHEN julianday(?) - julianday(i.due_date) <= 60 THEN '31-60'
+                    WHEN julianday(?) - julianday(i.due_date) <= 90 THEN '61-90'
+                    ELSE '90+'
+                END AS aging_bucket
+            FROM ap_invoices i
+            JOIN vendors v ON v.id = i.vendor_id
+            WHERE i.status IN ('approved', 'partial')
+            ORDER BY v.name, i.due_date
+            "#,
+        )
+        .bind(as_of_date)
+        .bind(as_of_date)
+        .bind(as_of_date)
+        .bind(as_of_date)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
     }
 }

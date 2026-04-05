@@ -10,10 +10,9 @@ pub struct AuthState {
 }
 
 pub fn use_auth() -> RwSignal<Option<AuthState>> {
-    use_context::<RwSignal<Option<AuthState>>>()
-        .unwrap_or_else(|| {
-            let signal = RwSignal::new(None);
-            provide_context(signal);
-            signal
-        })
+    use_context::<RwSignal<Option<AuthState>>>().unwrap_or_else(|| {
+        let signal = RwSignal::new(None);
+        provide_context(signal);
+        signal
+    })
 }

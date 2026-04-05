@@ -1,6 +1,6 @@
-use sqlx::SqlitePool;
-use saas_common::error::{AppError, AppResult};
 use crate::models::*;
+use saas_common::error::{AppError, AppResult};
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
 pub struct LedgerRepo {
@@ -198,13 +198,11 @@ impl LedgerRepo {
         let mut tx = self.pool.begin().await?;
 
         let now = chrono::Utc::now().to_rfc3339();
-        sqlx::query(
-            "UPDATE journal_entries SET status = 'posted', posted_at = ? WHERE id = ?",
-        )
-        .bind(&now)
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
+        sqlx::query("UPDATE journal_entries SET status = 'posted', posted_at = ? WHERE id = ?")
+            .bind(&now)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
 
         tx.commit().await?;
         self.get_journal_entry(id).await
@@ -268,13 +266,11 @@ impl LedgerRepo {
 
         // Post the reversal entry immediately
         let now = chrono::Utc::now().to_rfc3339();
-        sqlx::query(
-            "UPDATE journal_entries SET status = 'posted', posted_at = ? WHERE id = ?",
-        )
-        .bind(&now)
-        .bind(&reversal_id)
-        .execute(&mut *tx)
-        .await?;
+        sqlx::query("UPDATE journal_entries SET status = 'posted', posted_at = ? WHERE id = ?")
+            .bind(&now)
+            .bind(&reversal_id)
+            .execute(&mut *tx)
+            .await?;
 
         tx.commit().await?;
         self.get_journal_entry(id).await
@@ -285,7 +281,7 @@ impl LedgerRepo {
     pub async fn next_entry_number(&self) -> AppResult<String> {
         // Try atomic counter first
         let result = sqlx::query_scalar::<_, i64>(
-            "UPDATE je_counter SET last_value = last_value + 1 RETURNING last_value"
+            "UPDATE je_counter SET last_value = last_value + 1 RETURNING last_value",
         )
         .fetch_one(&self.pool)
         .await;
@@ -336,6 +332,135 @@ impl LedgerRepo {
                GROUP BY a.id
                ORDER BY a.account_type, a.code"#,
         )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    // --- Income Statement ---
+
+    pub async fn income_statement(
+        &self,
+        period_start: &str,
+        period_end: &str,
+    ) -> AppResult<Vec<IncomeStatementRow>> {
+        let rows = sqlx::query_as::<_, IncomeStatementRow>(
+            r#"SELECT a.code AS account_code, a.name AS account_name, a.account_type,
+                      CASE
+                        WHEN a.account_type = 'revenue' THEN
+                          COALESCE(SUM(jl.credit_cents), 0) - COALESCE(SUM(jl.debit_cents), 0)
+                        ELSE
+                          COALESCE(SUM(jl.debit_cents), 0) - COALESCE(SUM(jl.credit_cents), 0)
+                      END AS balance_cents
+               FROM accounts a
+               JOIN journal_lines jl ON jl.account_id = a.id
+               JOIN journal_entries je ON je.id = jl.entry_id AND je.status = 'posted'
+               JOIN periods p ON p.id = je.period_id
+               WHERE a.account_type IN ('revenue', 'expense')
+                 AND p.start_date >= ? AND p.end_date <= ?
+               GROUP BY a.id
+               ORDER BY a.account_type, a.code"#,
+        )
+        .bind(period_start)
+        .bind(period_end)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    // --- Budgets ---
+
+    pub async fn create_budget(
+        &self,
+        input: &CreateBudgetRequest,
+        created_by: &str,
+    ) -> AppResult<Budget> {
+        let mut tx = self.pool.begin().await?;
+        let id = uuid::Uuid::new_v4().to_string();
+        let total: i64 = input.lines.iter().map(|l| l.budgeted_cents).sum();
+
+        sqlx::query(
+            "INSERT INTO budgets (id, name, period_id, status, total_budget_cents, created_by) VALUES (?, ?, ?, 'draft', ?, ?)",
+        )
+        .bind(&id)
+        .bind(&input.name)
+        .bind(&input.period_id)
+        .bind(total)
+        .bind(created_by)
+        .execute(&mut *tx)
+        .await?;
+
+        for line in &input.lines {
+            let line_id = uuid::Uuid::new_v4().to_string();
+            sqlx::query(
+                "INSERT INTO budget_lines (id, budget_id, account_id, budgeted_cents) VALUES (?, ?, ?, ?)",
+            )
+            .bind(&line_id)
+            .bind(&id)
+            .bind(&line.account_id)
+            .bind(line.budgeted_cents)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        tx.commit().await?;
+        self.get_budget(&id).await
+    }
+
+    pub async fn get_budget(&self, id: &str) -> AppResult<Budget> {
+        sqlx::query_as::<_, Budget>(
+            "SELECT id, name, period_id, status, total_budget_cents, created_by, created_at FROM budgets WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Budget '{}' not found", id)))
+    }
+
+    pub async fn list_budgets(&self) -> AppResult<Vec<Budget>> {
+        let rows = sqlx::query_as::<_, Budget>(
+            "SELECT id, name, period_id, status, total_budget_cents, created_by, created_at FROM budgets ORDER BY created_at DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn get_budget_lines(&self, budget_id: &str) -> AppResult<Vec<BudgetLine>> {
+        let rows = sqlx::query_as::<_, BudgetLine>(
+            "SELECT id, budget_id, account_id, budgeted_cents, created_at FROM budget_lines WHERE budget_id = ?",
+        )
+        .bind(budget_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn update_budget_status(&self, id: &str, status: &str) -> AppResult<Budget> {
+        sqlx::query("UPDATE budgets SET status = ? WHERE id = ?")
+            .bind(status)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        self.get_budget(id).await
+    }
+
+    pub async fn budget_variance(&self, budget_id: &str) -> AppResult<Vec<BudgetVarianceRow>> {
+        let rows = sqlx::query_as::<_, BudgetVarianceRow>(
+            r#"SELECT a.code AS account_code, a.name AS account_name,
+                      bl.budgeted_cents,
+                      COALESCE(SUM(jl.debit_cents - jl.credit_cents), 0) AS actual_cents,
+                      bl.budgeted_cents - COALESCE(SUM(jl.debit_cents - jl.credit_cents), 0) AS variance_cents
+               FROM budget_lines bl
+               JOIN accounts a ON a.id = bl.account_id
+               JOIN budgets b ON b.id = bl.budget_id
+               LEFT JOIN journal_lines jl ON jl.account_id = bl.account_id
+               LEFT JOIN journal_entries je ON je.id = jl.entry_id AND je.status = 'posted' AND je.period_id = b.period_id
+               WHERE bl.budget_id = ?
+               GROUP BY bl.id
+               ORDER BY a.code"#,
+        )
+        .bind(budget_id)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows)

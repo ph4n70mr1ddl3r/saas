@@ -1,6 +1,6 @@
-use sqlx::SqlitePool;
-use saas_common::error::{AppError, AppResult};
 use crate::models::*;
+use saas_common::error::{AppError, AppResult};
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
 pub struct PayrollRepo {
@@ -33,7 +33,10 @@ impl PayrollRepo {
         .ok_or_else(|| AppError::NotFound(format!("Compensation '{}' not found", id)))
     }
 
-    pub async fn list_compensation_by_employee(&self, employee_id: &str) -> AppResult<Vec<Compensation>> {
+    pub async fn list_compensation_by_employee(
+        &self,
+        employee_id: &str,
+    ) -> AppResult<Vec<Compensation>> {
         let rows = sqlx::query_as::<_, Compensation>(
             "SELECT id, employee_id, salary_type, amount_cents, currency, effective_date, end_date, created_at FROM compensation WHERE employee_id = ? ORDER BY effective_date DESC"
         )
@@ -43,7 +46,10 @@ impl PayrollRepo {
         Ok(rows)
     }
 
-    pub async fn create_compensation(&self, input: &CreateCompensationRequest) -> AppResult<Compensation> {
+    pub async fn create_compensation(
+        &self,
+        input: &CreateCompensationRequest,
+    ) -> AppResult<Compensation> {
         let id = uuid::Uuid::new_v4().to_string();
         let currency = input.currency.as_deref().unwrap_or("USD");
         sqlx::query(
@@ -61,12 +67,22 @@ impl PayrollRepo {
         self.get_compensation(&id).await
     }
 
-    pub async fn update_compensation(&self, id: &str, input: &UpdateCompensationRequest) -> AppResult<Compensation> {
+    pub async fn update_compensation(
+        &self,
+        id: &str,
+        input: &UpdateCompensationRequest,
+    ) -> AppResult<Compensation> {
         let existing = self.get_compensation(id).await?;
-        let salary_type = input.salary_type.as_deref().unwrap_or(&existing.salary_type);
+        let salary_type = input
+            .salary_type
+            .as_deref()
+            .unwrap_or(&existing.salary_type);
         let amount_cents = input.amount_cents.unwrap_or(existing.amount_cents);
         let currency = input.currency.as_deref().unwrap_or(&existing.currency);
-        let effective_date = input.effective_date.as_deref().unwrap_or(&existing.effective_date);
+        let effective_date = input
+            .effective_date
+            .as_deref()
+            .unwrap_or(&existing.effective_date);
         let end_date = input.end_date.as_ref().or(existing.end_date.as_ref());
 
         sqlx::query(
@@ -107,7 +123,7 @@ impl PayrollRepo {
     pub async fn create_pay_run(&self, input: &CreatePayRunRequest) -> AppResult<PayRun> {
         let id = uuid::Uuid::new_v4().to_string();
         sqlx::query(
-            "INSERT INTO pay_runs (id, period_start, period_end, pay_date) VALUES (?, ?, ?, ?)"
+            "INSERT INTO pay_runs (id, period_start, period_end, pay_date) VALUES (?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&input.period_start)
@@ -139,7 +155,15 @@ impl PayrollRepo {
         Ok(rows)
     }
 
-    pub async fn create_payslip(&self, pay_run_id: &str, employee_id: &str, gross_pay: i64, net_pay: i64, tax: i64, deductions: i64) -> AppResult<Payslip> {
+    pub async fn create_payslip(
+        &self,
+        pay_run_id: &str,
+        employee_id: &str,
+        gross_pay: i64,
+        net_pay: i64,
+        tax: i64,
+        deductions: i64,
+    ) -> AppResult<Payslip> {
         let id = uuid::Uuid::new_v4().to_string();
         sqlx::query(
             "INSERT INTO payslips (id, pay_run_id, employee_id, gross_pay, net_pay, tax, deductions) VALUES (?, ?, ?, ?, ?, ?, ?)"
@@ -164,7 +188,10 @@ impl PayrollRepo {
 
     // --- Deductions ---
 
-    pub async fn list_deductions_by_employee(&self, employee_id: &str) -> AppResult<Vec<Deduction>> {
+    pub async fn list_deductions_by_employee(
+        &self,
+        employee_id: &str,
+    ) -> AppResult<Vec<Deduction>> {
         let rows = sqlx::query_as::<_, Deduction>(
             "SELECT id, employee_id, code, amount_cents, recurring, start_date, end_date FROM deductions WHERE employee_id = ? ORDER BY start_date DESC"
         )

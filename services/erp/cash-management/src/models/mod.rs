@@ -64,3 +64,31 @@ pub struct CreateReconciliationRequest {
     pub period_end: String,
     pub statement_balance_cents: i64,
 }
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct CashFlowRow {
+    pub category: String,
+    pub description: Option<String>,
+    pub amount_cents: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CashFlowStatement {
+    pub operating: Vec<CashFlowRow>,
+    pub total_operating_cents: i64,
+    pub investing: Vec<CashFlowRow>,
+    pub total_investing_cents: i64,
+    pub financing: Vec<CashFlowRow>,
+    pub total_financing_cents: i64,
+    pub net_change_cents: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TransferRequest {
+    pub from_account_id: String,
+    pub to_account_id: String,
+    pub amount_cents: i64,
+    pub transfer_date: String,
+    pub description: Option<String>,
+    pub reference: Option<String>,
+}
