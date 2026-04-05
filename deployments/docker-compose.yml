@@ -23,7 +23,7 @@ services:
   # === Foundation ===
   iam:
     build:
-      context: ../..
+      context: ..
       dockerfile: deployments/docker/Dockerfile.service
       args:
         SERVICE_PATH: services/iam
@@ -44,7 +44,7 @@ services:
 
   config-svc:
     build:
-      context: ../..
+      context: ..
       dockerfile: deployments/docker/Dockerfile.service
       args:
         SERVICE_PATH: services/config-svc
@@ -66,7 +66,7 @@ services:
   # === HCM Module ===
   employee:
     build:
-      context: ../..
+      context: ..
       dockerfile: deployments/docker/Dockerfile.service
       args:
         SERVICE_PATH: services/hcm/employee
@@ -87,7 +87,7 @@ services:
 
   payroll:
     build:
-      context: ../..
+      context: ..
       dockerfile: deployments/docker/Dockerfile.service
       args:
         SERVICE_PATH: services/hcm/payroll
@@ -108,7 +108,7 @@ services:
 
   benefits:
     build:
-      context: ../..
+      context: ..
       dockerfile: deployments/docker/Dockerfile.service
       args:
         SERVICE_PATH: services/hcm/benefits
@@ -129,7 +129,7 @@ services:
 
   time-labor:
     build:
-      context: ../..
+      context: ..
       dockerfile: deployments/docker/Dockerfile.service
       args:
         SERVICE_PATH: services/hcm/time-labor
@@ -150,7 +150,7 @@ services:
 
   recruiting:
     build:
-      context: ../..
+      context: ..
       dockerfile: deployments/docker/Dockerfile.service
       args:
         SERVICE_PATH: services/hcm/recruiting
@@ -172,7 +172,7 @@ services:
   # === ERP Module ===
   general-ledger:
     build:
-      context: ../..
+      context: ..
       dockerfile: deployments/docker/Dockerfile.service
       args:
         SERVICE_PATH: services/erp/general-ledger
@@ -193,7 +193,7 @@ services:
 
   accounts-payable:
     build:
-      context: ../..
+      context: ..
       dockerfile: deployments/docker/Dockerfile.service
       args:
         SERVICE_PATH: services/erp/accounts-payable
@@ -214,7 +214,7 @@ services:
 
   accounts-receivable:
     build:
-      context: ../..
+      context: ..
       dockerfile: deployments/docker/Dockerfile.service
       args:
         SERVICE_PATH: services/erp/accounts-receivable
@@ -235,7 +235,7 @@ services:
 
   fixed-assets:
     build:
-      context: ../..
+      context: ..
       dockerfile: deployments/docker/Dockerfile.service
       args:
         SERVICE_PATH: services/erp/fixed-assets
@@ -256,7 +256,7 @@ services:
 
   cash-management:
     build:
-      context: ../..
+      context: ..
       dockerfile: deployments/docker/Dockerfile.service
       args:
         SERVICE_PATH: services/erp/cash-management
@@ -278,7 +278,7 @@ services:
   # === SCM Module ===
   inventory:
     build:
-      context: ../..
+      context: ..
       dockerfile: deployments/docker/Dockerfile.service
       args:
         SERVICE_PATH: services/scm/inventory
@@ -299,7 +299,7 @@ services:
 
   procurement:
     build:
-      context: ../..
+      context: ..
       dockerfile: deployments/docker/Dockerfile.service
       args:
         SERVICE_PATH: services/scm/procurement
@@ -320,7 +320,7 @@ services:
 
   order-management:
     build:
-      context: ../..
+      context: ..
       dockerfile: deployments/docker/Dockerfile.service
       args:
         SERVICE_PATH: services/scm/order-management
@@ -341,7 +341,7 @@ services:
 
   manufacturing:
     build:
-      context: ../..
+      context: ..
       dockerfile: deployments/docker/Dockerfile.service
       args:
         SERVICE_PATH: services/scm/manufacturing
@@ -363,7 +363,7 @@ services:
   # === Gateway (front door) ===
   gateway:
     build:
-      context: ../..
+      context: ..
       dockerfile: deployments/docker/Dockerfile.service
       args:
         SERVICE_PATH: services/gateway

@@ -1,7 +1,7 @@
 # Multi-stage Dockerfile for Rust microservices
 # Usage: docker build --build-arg SERVICE_PATH=services/iam -t saas-iam .
 
-FROM rust:1.82-bookworm AS builder
+FROM rust:1.85-bookworm AS builder
 
 ARG SERVICE_PATH
 
@@ -11,12 +11,19 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ ./crates/
 
+# Copy the specific service's manifest
+COPY ${SERVICE_PATH}/Cargo.toml ./${SERVICE_PATH}/Cargo.toml
+
+# Strip other members from Cargo.toml to avoid "manifest not found" errors
+RUN sed -i '/members = \[/,/\]/c\members = [\n    "crates/common",\n    "crates/auth-core",\n    "crates/db",\n    "crates/nats-bus",\n    "crates/proto",\n    "'"${SERVICE_PATH}"'"\n]' Cargo.toml
+
 # Create dummy main.rs files for all services so we can cache dependencies
 RUN mkdir -p ${SERVICE_PATH}/src && \
     echo "fn main() {}" > ${SERVICE_PATH}/src/main.rs
 
 # Build dependencies only (cached layer)
-RUN cargo build --release -p $(basename ${SERVICE_PATH} | tr '-' '_') 2>/dev/null || true
+RUN BINARY_NAME=saas-$(echo ${SERVICE_PATH} | sed 's|services/||' | tr '/' '-'); \
+    cargo build --release -p ${BINARY_NAME} 2>/dev/null || true
 
 # Copy actual service source and migrations
 COPY ${SERVICE_PATH}/ ./${SERVICE_PATH}/
@@ -25,7 +32,9 @@ COPY ${SERVICE_PATH}/ ./${SERVICE_PATH}/
 RUN find ./${SERVICE_PATH}/src -name "*.rs" -exec touch {} +
 
 # Build the actual service
-RUN cargo build --release -p $(basename ${SERVICE_PATH} | tr '-' '_')
+RUN BINARY_NAME=saas-$(echo ${SERVICE_PATH} | sed 's|services/||' | tr '/' '-'); \
+    cargo build --release -p ${BINARY_NAME} && \
+    cp /app/target/release/${BINARY_NAME} /app/service_binary
 
 # Runtime stage
 FROM debian:bookworm-slim
@@ -40,9 +49,8 @@ RUN groupadd -r appuser && useradd -r -g appuser -d /app -s /sbin/nologin appuse
 ARG SERVICE_PATH
 
 # Copy only the specific service binary
-RUN BINARY_NAME=$(echo ${SERVICE_PATH} | tr '-' '_' | xargs basename); \
-    echo "Building binary: ${BINARY_NAME}"
-COPY --from=builder /app/target/release/* /usr/local/bin/
+COPY --from=builder /app/service_binary /usr/local/bin/service_binary
+RUN chmod +x /usr/local/bin/service_binary
 
 WORKDIR /app
 

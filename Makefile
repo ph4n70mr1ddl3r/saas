@@ -23,13 +23,13 @@ clean:
 
 # Docker operations
 up:
-	docker-compose -f deployments/docker-compose.yml up -d
+	docker compose --env-file .env -f deployments/docker-compose.yml up -d
 
 down:
-	docker-compose -f deployments/docker-compose.yml down
+	docker compose --env-file .env -f deployments/docker-compose.yml down
 
 logs:
-	docker-compose -f deployments/docker-compose.yml logs -f
+	docker compose --env-file .env -f deployments/docker-compose.yml logs -f
 
 # Run migrations for all services
 migrate:
