@@ -31,6 +31,9 @@ async fn main() -> anyhow::Result<()> {
     let bus = NatsBus::connect(&nats_url, "saas-hcm-time-labor").await?;
 
     let service = service::TimeLaborService::new(pool, bus.clone());
+
+    events::subscribe(&bus, service.clone()).await?;
+
     let cors_origin =
         env::var("CORS_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".to_string());
     let cors_origin =
@@ -52,8 +55,6 @@ async fn main() -> anyhow::Result<()> {
             axum::http::header::AUTHORIZATION,
         ]);
     let app = routes::build_router(routes::AppState { service }).layer(cors);
-
-    events::subscribe(&bus).await?;
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
     tracing::info!("Time & Labor service listening on port {}", port);

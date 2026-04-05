@@ -60,10 +60,10 @@ impl StockLevelRepo {
     ) -> AppResult<StockLevelResponse> {
         let id = uuid::Uuid::new_v4().to_string();
         sqlx::query(
-            "INSERT INTO stock_levels (id, item_id, warehouse_id, quantity_on_hand, quantity_reserved, quantity_available) VALUES (?, ?, ?, 0, ?, -?) ON CONFLICT(item_id, warehouse_id) DO UPDATE SET quantity_reserved = quantity_reserved + ?, quantity_available = quantity_on_hand - quantity_reserved, updated_at = datetime('now')"
+            "INSERT INTO stock_levels (id, item_id, warehouse_id, quantity_on_hand, quantity_reserved, quantity_available) VALUES (?, ?, ?, 0, ?, -?) ON CONFLICT(item_id, warehouse_id) DO UPDATE SET quantity_reserved = quantity_reserved + ?, quantity_available = quantity_on_hand - (quantity_reserved + ?), updated_at = datetime('now')"
         )
         .bind(&id).bind(item_id).bind(warehouse_id).bind(quantity).bind(quantity)
-        .bind(quantity)
+        .bind(quantity).bind(quantity)
         .execute(&self.pool).await?;
         self.get_by_item_warehouse(item_id, warehouse_id)
             .await?

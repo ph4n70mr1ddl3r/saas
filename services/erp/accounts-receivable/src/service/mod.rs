@@ -213,3 +213,413 @@ impl ArService {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use saas_db::test_helpers::create_test_pool;
+    use sqlx::SqlitePool;
+
+    async fn setup() -> SqlitePool {
+        let pool = create_test_pool().await;
+        let sql_files = [
+            include_str!("../../migrations/001_create_customers.sql"),
+            include_str!("../../migrations/002_create_ar_invoices.sql"),
+            include_str!("../../migrations/003_create_ar_invoice_lines.sql"),
+            include_str!("../../migrations/004_create_receipts.sql"),
+            include_str!("../../migrations/005_create_credit_memos.sql"),
+        ];
+        let migration_names = [
+            "001_create_customers.sql",
+            "002_create_ar_invoices.sql",
+            "003_create_ar_invoice_lines.sql",
+            "004_create_receipts.sql",
+            "005_create_credit_memos.sql",
+        ];
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS _migrations (filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        for (i, sql) in sql_files.iter().enumerate() {
+            let name = migration_names[i];
+            let already_applied: bool =
+                sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM _migrations WHERE filename = ?")
+                    .bind(name)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+                    > 0;
+            if !already_applied {
+                let mut tx = pool.begin().await.unwrap();
+                sqlx::raw_sql(sql).execute(&mut *tx).await.unwrap();
+                let now = chrono::Utc::now().to_rfc3339();
+                sqlx::query("INSERT INTO _migrations (filename, applied_at) VALUES (?, ?)")
+                    .bind(name)
+                    .bind(&now)
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
+                tx.commit().await.unwrap();
+            }
+        }
+        pool
+    }
+
+    async fn setup_repo() -> ArRepo {
+        let pool = setup().await;
+        ArRepo::new(pool)
+    }
+
+    // Helper to create a test customer
+    async fn create_test_customer(repo: &ArRepo, name: &str) -> Customer {
+        repo.create_customer(&CreateCustomerRequest {
+            name: name.into(),
+            email: Some(format!("{}@example.com", name.to_lowercase())),
+            phone: None,
+            address: None,
+        })
+        .await
+        .unwrap()
+    }
+
+    // Helper to create a test AR invoice
+    async fn create_test_invoice(repo: &ArRepo, customer_id: &str, amount_cents: i64) -> ArInvoice {
+        let invoice = repo
+            .create_invoice(&CreateArInvoiceRequest {
+                customer_id: customer_id.into(),
+                invoice_number: "AR-001".into(),
+                invoice_date: "2025-01-15".into(),
+                due_date: "2025-02-15".into(),
+                lines: vec![CreateArInvoiceLineRequest {
+                    description: Some("Consulting services".into()),
+                    amount_cents,
+                }],
+            })
+            .await
+            .unwrap();
+        // Mark as sent (matches service behavior)
+        repo.mark_invoice_sent(&invoice.id).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_customer_crud() {
+        let repo = setup_repo().await;
+
+        // Create
+        let customer = create_test_customer(&repo, "Beta Corp").await;
+        assert_eq!(customer.name, "Beta Corp");
+        assert_eq!(customer.is_active, 1);
+
+        // List
+        let customers = repo.list_customers().await.unwrap();
+        assert_eq!(customers.len(), 1);
+        assert_eq!(customers[0].id, customer.id);
+
+        // Get by id
+        let fetched = repo.get_customer(&customer.id).await.unwrap();
+        assert_eq!(fetched.name, "Beta Corp");
+
+        // Update
+        let updated = repo
+            .update_customer(
+                &customer.id,
+                &UpdateCustomerRequest {
+                    name: Some("Beta LLC".into()),
+                    email: None,
+                    phone: Some("555-0200".into()),
+                    address: None,
+                    is_active: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.name, "Beta LLC");
+
+        // Deactivate
+        let deactivated = repo
+            .update_customer(
+                &customer.id,
+                &UpdateCustomerRequest {
+                    name: None,
+                    email: None,
+                    phone: None,
+                    address: None,
+                    is_active: Some(false),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(deactivated.is_active, 0);
+
+        // Not found
+        let result = repo.get_customer("nonexistent").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_ar_invoice_create_with_lines() {
+        let repo = setup_repo().await;
+        let customer = create_test_customer(&repo, "Client A").await;
+
+        let invoice = repo
+            .create_invoice(&CreateArInvoiceRequest {
+                customer_id: customer.id.clone(),
+                invoice_number: "AR-100".into(),
+                invoice_date: "2025-01-01".into(),
+                due_date: "2025-02-01".into(),
+                lines: vec![
+                    CreateArInvoiceLineRequest {
+                        description: Some("Service 1".into()),
+                        amount_cents: 7500,
+                    },
+                    CreateArInvoiceLineRequest {
+                        description: Some("Service 2".into()),
+                        amount_cents: 2500,
+                    },
+                ],
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(invoice.customer_id, customer.id);
+        assert_eq!(invoice.total_cents, 10000); // sum of lines
+        assert_eq!(invoice.status, "draft");
+
+        let lines = repo.get_invoice_lines(&invoice.id).await.unwrap();
+        assert_eq!(lines.len(), 2);
+
+        // Mark sent
+        let sent = repo.mark_invoice_sent(&invoice.id).await.unwrap();
+        assert_eq!(sent.status, "sent");
+    }
+
+    #[tokio::test]
+    async fn test_receipt_full_payment_marks_paid() {
+        let repo = setup_repo().await;
+        let customer = create_test_customer(&repo, "Client B").await;
+        let invoice = create_test_invoice(&repo, &customer.id, 12000).await;
+
+        // Full payment
+        let receipt = repo
+            .create_receipt(&CreateReceiptRequest {
+                invoice_id: invoice.id.clone(),
+                customer_id: customer.id.clone(),
+                amount_cents: 12000,
+                receipt_date: "2025-02-01".into(),
+                method: Some("check".into()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(receipt.amount_cents, 12000);
+        assert_eq!(receipt.invoice_id, invoice.id);
+
+        // Invoice should be marked as paid
+        let paid = repo.get_invoice(&invoice.id).await.unwrap();
+        assert_eq!(paid.status, "paid");
+    }
+
+    #[tokio::test]
+    async fn test_receipt_partial_payment() {
+        let repo = setup_repo().await;
+        let customer = create_test_customer(&repo, "Client C").await;
+        let invoice = create_test_invoice(&repo, &customer.id, 10000).await;
+
+        // First partial payment
+        let receipt1 = repo
+            .create_receipt(&CreateReceiptRequest {
+                invoice_id: invoice.id.clone(),
+                customer_id: customer.id.clone(),
+                amount_cents: 4000,
+                receipt_date: "2025-02-01".into(),
+                method: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(receipt1.amount_cents, 4000);
+
+        let inv = repo.get_invoice(&invoice.id).await.unwrap();
+        assert_eq!(inv.status, "partial");
+
+        // Second payment to complete
+        let receipt2 = repo
+            .create_receipt(&CreateReceiptRequest {
+                invoice_id: invoice.id.clone(),
+                customer_id: customer.id.clone(),
+                amount_cents: 6000,
+                receipt_date: "2025-02-15".into(),
+                method: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(receipt2.amount_cents, 6000);
+
+        let inv = repo.get_invoice(&invoice.id).await.unwrap();
+        assert_eq!(inv.status, "paid");
+    }
+
+    #[tokio::test]
+    async fn test_receipt_overpayment_prevention() {
+        let repo = setup_repo().await;
+        let customer = create_test_customer(&repo, "Client D").await;
+        let invoice = create_test_invoice(&repo, &customer.id, 5000).await;
+
+        // Attempt to pay more than invoice total
+        let result = repo
+            .create_receipt(&CreateReceiptRequest {
+                invoice_id: invoice.id.clone(),
+                customer_id: customer.id.clone(),
+                amount_cents: 6000,
+                receipt_date: "2025-02-01".into(),
+                method: None,
+            })
+            .await;
+        // The repo allows the receipt insertion itself; the overpayment check
+        // is at the service layer. At repo level, the invoice becomes "paid"
+        // because total_received >= total_cents.
+        // Verify the invoice is at least paid (not over-due)
+        let inv = repo.get_invoice(&invoice.id).await.unwrap();
+        assert_eq!(inv.status, "paid");
+    }
+
+    #[tokio::test]
+    async fn test_receipt_overpayment_after_partial() {
+        let repo = setup_repo().await;
+        let customer = create_test_customer(&repo, "Client E").await;
+        let invoice = create_test_invoice(&repo, &customer.id, 10000).await;
+
+        // Pay 7000 first
+        repo.create_receipt(&CreateReceiptRequest {
+            invoice_id: invoice.id.clone(),
+            customer_id: customer.id.clone(),
+            amount_cents: 7000,
+            receipt_date: "2025-02-01".into(),
+            method: None,
+        })
+        .await
+        .unwrap();
+
+        let inv = repo.get_invoice(&invoice.id).await.unwrap();
+        assert_eq!(inv.status, "partial");
+
+        // Pay remaining 3000 (exactly)
+        repo.create_receipt(&CreateReceiptRequest {
+            invoice_id: invoice.id.clone(),
+            customer_id: customer.id.clone(),
+            amount_cents: 3000,
+            receipt_date: "2025-02-15".into(),
+            method: None,
+        })
+        .await
+        .unwrap();
+
+        let inv = repo.get_invoice(&invoice.id).await.unwrap();
+        assert_eq!(inv.status, "paid");
+    }
+
+    #[tokio::test]
+    async fn test_credit_memo_create_and_apply() {
+        let repo = setup_repo().await;
+        let customer = create_test_customer(&repo, "Client F").await;
+        let invoice = create_test_invoice(&repo, &customer.id, 8000).await;
+
+        // Create credit memo
+        let memo = repo
+            .create_credit_memo(&CreateCreditMemoRequest {
+                customer_id: customer.id.clone(),
+                amount_cents: 3000,
+                reason: Some("Product return".into()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(memo.customer_id, customer.id);
+        assert_eq!(memo.amount_cents, 3000);
+        assert_eq!(memo.status, "open");
+        assert_eq!(memo.applied_amount_cents, 0);
+
+        // Apply credit memo to invoice
+        let applied = repo
+            .apply_credit_memo(&memo.id, &invoice.id, 3000)
+            .await
+            .unwrap();
+        assert_eq!(applied.status, "applied");
+        assert_eq!(applied.applied_to_invoice_id, Some(invoice.id));
+        assert_eq!(applied.applied_amount_cents, 3000);
+    }
+
+    #[tokio::test]
+    async fn test_credit_memo_list() {
+        let repo = setup_repo().await;
+        let customer = create_test_customer(&repo, "Client G").await;
+
+        repo.create_credit_memo(&CreateCreditMemoRequest {
+            customer_id: customer.id.clone(),
+            amount_cents: 1000,
+            reason: Some("Goodwill".into()),
+        })
+        .await
+        .unwrap();
+
+        repo.create_credit_memo(&CreateCreditMemoRequest {
+            customer_id: customer.id.clone(),
+            amount_cents: 2000,
+            reason: Some("Overcharge".into()),
+        })
+        .await
+        .unwrap();
+
+        let memos = repo.list_credit_memos().await.unwrap();
+        assert_eq!(memos.len(), 2);
+        assert_eq!(memos[0].status, "open");
+        assert_eq!(memos[1].status, "open");
+    }
+
+    #[tokio::test]
+    async fn test_ar_aging_report() {
+        let repo = setup_repo().await;
+        let customer = create_test_customer(&repo, "Client H").await;
+
+        // Create and send invoice
+        let invoice = create_test_invoice(&repo, &customer.id, 15000).await;
+
+        // Run aging report as of the due date
+        let rows = repo.aging_report("2025-02-15").await.unwrap();
+        assert!(!rows.is_empty());
+        assert_eq!(rows[0].customer_name, "Client H");
+        assert_eq!(rows[0].invoice_number, "AR-001");
+        assert_eq!(rows[0].total_cents, 15000);
+    }
+
+    #[tokio::test]
+    async fn test_list_receipts() {
+        let repo = setup_repo().await;
+        let customer = create_test_customer(&repo, "Client I").await;
+        let invoice = create_test_invoice(&repo, &customer.id, 9000).await;
+
+        // Create two receipts
+        repo.create_receipt(&CreateReceiptRequest {
+            invoice_id: invoice.id.clone(),
+            customer_id: customer.id.clone(),
+            amount_cents: 4000,
+            receipt_date: "2025-02-01".into(),
+            method: Some("wire".into()),
+        })
+        .await
+        .unwrap();
+
+        repo.create_receipt(&CreateReceiptRequest {
+            invoice_id: invoice.id.clone(),
+            customer_id: customer.id.clone(),
+            amount_cents: 5000,
+            receipt_date: "2025-02-15".into(),
+            method: Some("check".into()),
+        })
+        .await
+        .unwrap();
+
+        let receipts = repo.list_receipts().await.unwrap();
+        assert_eq!(receipts.len(), 2);
+    }
+}

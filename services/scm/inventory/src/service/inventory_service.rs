@@ -394,3 +394,498 @@ impl InventoryService {
             .await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use saas_db::test_helpers::create_test_pool;
+    use sqlx::SqlitePool;
+
+    async fn setup() -> SqlitePool {
+        let pool = create_test_pool().await;
+        let sql_files = [
+            include_str!("../../migrations/001_create_warehouses.sql"),
+            include_str!("../../migrations/002_create_items.sql"),
+            include_str!("../../migrations/003_create_stock_levels.sql"),
+            include_str!("../../migrations/004_create_stock_movements.sql"),
+            include_str!("../../migrations/005_create_reservations.sql"),
+            include_str!("../../migrations/006_create_cycle_count_sessions.sql"),
+            include_str!("../../migrations/007_create_cycle_count_lines.sql"),
+        ];
+        let migration_names = [
+            "001_create_warehouses.sql",
+            "002_create_items.sql",
+            "003_create_stock_levels.sql",
+            "004_create_stock_movements.sql",
+            "005_create_reservations.sql",
+            "006_create_cycle_count_sessions.sql",
+            "007_create_cycle_count_lines.sql",
+        ];
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS _migrations (filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        for (i, sql) in sql_files.iter().enumerate() {
+            let name = migration_names[i];
+            let already_applied: bool =
+                sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM _migrations WHERE filename = ?")
+                    .bind(name)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+                    > 0;
+            if !already_applied {
+                let mut tx = pool.begin().await.unwrap();
+                sqlx::raw_sql(sql).execute(&mut *tx).await.unwrap();
+                let now = chrono::Utc::now().to_rfc3339();
+                sqlx::query("INSERT INTO _migrations (filename, applied_at) VALUES (?, ?)")
+                    .bind(name)
+                    .bind(&now)
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
+                tx.commit().await.unwrap();
+            }
+        }
+        pool
+    }
+
+    async fn setup_repos() -> (
+        WarehouseRepo,
+        ItemRepo,
+        StockLevelRepo,
+        StockMovementRepo,
+        ReservationRepo,
+        CycleCountRepo,
+    ) {
+        let pool = setup().await;
+        (
+            WarehouseRepo::new(pool.clone()),
+            ItemRepo::new(pool.clone()),
+            StockLevelRepo::new(pool.clone()),
+            StockMovementRepo::new(pool.clone()),
+            ReservationRepo::new(pool.clone()),
+            CycleCountRepo::new(pool),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_warehouse_crud() {
+        let (wh_repo, _, _, _, _, _) = setup_repos().await;
+
+        // Create
+        let wh = wh_repo
+            .create(&CreateWarehouse {
+                name: "Main Warehouse".into(),
+                address: Some("123 Industrial Blvd".into()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(wh.name, "Main Warehouse");
+        assert!(wh.is_active);
+
+        // Read
+        let fetched = wh_repo.get_by_id(&wh.id).await.unwrap();
+        assert_eq!(fetched.name, "Main Warehouse");
+
+        // Update
+        let updated = wh_repo
+            .update(
+                &wh.id,
+                &UpdateWarehouse {
+                    name: Some("Warehouse A".into()),
+                    address: None,
+                    is_active: Some(false),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.name, "Warehouse A");
+        assert!(!updated.is_active);
+
+        // List
+        let warehouses = wh_repo.list().await.unwrap();
+        assert_eq!(warehouses.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_item_creation() {
+        let (_, item_repo, _, _, _, _) = setup_repos().await;
+
+        let item = item_repo
+            .create(&CreateItem {
+                sku: "SKU-001".into(),
+                name: "Widget".into(),
+                description: Some("A fine widget".into()),
+                unit_of_measure: Some("EA".into()),
+                item_type: "finished".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(item.sku, "SKU-001");
+        assert_eq!(item.item_type, "finished");
+        assert!(item.is_active);
+        assert_eq!(item.unit_of_measure, "EA");
+
+        // Get by id
+        let fetched = item_repo.get_by_id(&item.id).await.unwrap();
+        assert_eq!(fetched.name, "Widget");
+
+        // Default UOM
+        let item2 = item_repo
+            .create(&CreateItem {
+                sku: "SKU-002".into(),
+                name: "Gadget".into(),
+                description: None,
+                unit_of_measure: None,
+                item_type: "raw_material".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(item2.unit_of_measure, "EA");
+    }
+
+    #[tokio::test]
+    async fn test_stock_levels_and_receipt() {
+        let (wh_repo, item_repo, sl_repo, _, _, _) = setup_repos().await;
+
+        let wh = wh_repo
+            .create(&CreateWarehouse {
+                name: "WH-1".into(),
+                address: None,
+            })
+            .await
+            .unwrap();
+        let item = item_repo
+            .create(&CreateItem {
+                sku: "SKU-100".into(),
+                name: "Bolt".into(),
+                description: None,
+                unit_of_measure: None,
+                item_type: "component".into(),
+            })
+            .await
+            .unwrap();
+
+        // Initial stock should be empty
+        let levels = sl_repo.get_by_item(&item.id).await.unwrap();
+        assert!(levels.is_empty());
+
+        // Receive 100 units
+        let sl = sl_repo
+            .upsert_receipt(&item.id, &wh.id, 100)
+            .await
+            .unwrap();
+        assert_eq!(sl.quantity_on_hand, 100);
+        assert_eq!(sl.quantity_reserved, 0);
+        assert_eq!(sl.quantity_available, 100);
+
+        // Receive 50 more -- should add up
+        let sl = sl_repo
+            .upsert_receipt(&item.id, &wh.id, 50)
+            .await
+            .unwrap();
+        assert_eq!(sl.quantity_on_hand, 150);
+        assert_eq!(sl.quantity_available, 150);
+    }
+
+    #[tokio::test]
+    async fn test_stock_movements() {
+        let (wh_repo, item_repo, _, sm_repo, _, _) = setup_repos().await;
+
+        let wh = wh_repo
+            .create(&CreateWarehouse {
+                name: "WH-MV".into(),
+                address: None,
+            })
+            .await
+            .unwrap();
+        let item = item_repo
+            .create(&CreateItem {
+                sku: "SKU-MV".into(),
+                name: "Gear".into(),
+                description: None,
+                unit_of_measure: None,
+                item_type: "finished".into(),
+            })
+            .await
+            .unwrap();
+
+        let movement = sm_repo
+            .create(&CreateStockMovement {
+                item_id: item.id.clone(),
+                from_warehouse_id: None,
+                to_warehouse_id: wh.id.clone(),
+                quantity: 200,
+                movement_type: "receipt".into(),
+                reference_type: Some("purchase_order".into()),
+                reference_id: Some("PO-001".into()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(movement.quantity, 200);
+        assert_eq!(movement.movement_type, "receipt");
+        assert!(movement.from_warehouse_id.is_none());
+
+        let movements = sm_repo.list().await.unwrap();
+        assert_eq!(movements.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_reservation_create_and_cancel() {
+        let (wh_repo, item_repo, sl_repo, _, res_repo, _) = setup_repos().await;
+
+        let wh = wh_repo
+            .create(&CreateWarehouse {
+                name: "WH-RES".into(),
+                address: None,
+            })
+            .await
+            .unwrap();
+        let item = item_repo
+            .create(&CreateItem {
+                sku: "SKU-RES".into(),
+                name: "Spring".into(),
+                description: None,
+                unit_of_measure: None,
+                item_type: "component".into(),
+            })
+            .await
+            .unwrap();
+
+        // Put stock on hand first
+        sl_repo
+            .upsert_receipt(&item.id, &wh.id, 100)
+            .await
+            .unwrap();
+
+        // Create reservation
+        let reservation = res_repo
+            .create(&CreateReservation {
+                item_id: item.id.clone(),
+                warehouse_id: wh.id.clone(),
+                quantity: 30,
+                reference_type: "sales_order".into(),
+                reference_id: "SO-001".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(reservation.status, "active");
+        assert_eq!(reservation.quantity, 30);
+
+        // Cancel reservation
+        let cancelled = res_repo.cancel(&reservation.id).await.unwrap();
+        assert_eq!(cancelled.status, "cancelled");
+    }
+
+    #[tokio::test]
+    async fn test_reservation_release_updates_stock() {
+        let (wh_repo, item_repo, sl_repo, _, res_repo, _) = setup_repos().await;
+
+        let wh = wh_repo
+            .create(&CreateWarehouse {
+                name: "WH-REL".into(),
+                address: None,
+            })
+            .await
+            .unwrap();
+        let item = item_repo
+            .create(&CreateItem {
+                sku: "SKU-REL".into(),
+                name: "Nut".into(),
+                description: None,
+                unit_of_measure: None,
+                item_type: "raw_material".into(),
+            })
+            .await
+            .unwrap();
+
+        // Receipt: 100 units
+        sl_repo
+            .upsert_receipt(&item.id, &wh.id, 100)
+            .await
+            .unwrap();
+
+        // Reserve 40 units via stock level repo
+        let sl = sl_repo
+            .reserve(&item.id, &wh.id, 40)
+            .await
+            .unwrap();
+        assert_eq!(sl.quantity_on_hand, 100);
+        assert_eq!(sl.quantity_reserved, 40);
+        assert_eq!(sl.quantity_available, 60);
+
+        // Release reservation
+        sl_repo
+            .release_reservation(&item.id, &wh.id, 40)
+            .await
+            .unwrap();
+        let sl_after = sl_repo
+            .get_by_item_warehouse(&item.id, &wh.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(sl_after.quantity_reserved, 0);
+    }
+
+    #[tokio::test]
+    async fn test_cycle_count_lifecycle() {
+        let (wh_repo, item_repo, sl_repo, _, _, cc_repo) = setup_repos().await;
+
+        let wh = wh_repo
+            .create(&CreateWarehouse {
+                name: "WH-CC".into(),
+                address: None,
+            })
+            .await
+            .unwrap();
+        let item = item_repo
+            .create(&CreateItem {
+                sku: "SKU-CC".into(),
+                name: "Bearing".into(),
+                description: None,
+                unit_of_measure: None,
+                item_type: "component".into(),
+            })
+            .await
+            .unwrap();
+
+        // Put stock on hand: 50 units
+        sl_repo
+            .upsert_receipt(&item.id, &wh.id, 50)
+            .await
+            .unwrap();
+
+        // Create cycle count session (draft)
+        let session = cc_repo
+            .create_cycle_count_session(&wh.id, "2025-07-01", "counter-1")
+            .await
+            .unwrap();
+        assert_eq!(session.status, "draft");
+        assert_eq!(session.warehouse_id, wh.id);
+
+        // Add line with system_quantity = 50
+        let line = cc_repo
+            .add_cycle_count_line(&session.id, &item.id, 50, None)
+            .await
+            .unwrap();
+        assert_eq!(line.system_quantity, 50);
+        assert!(line.counted_quantity.is_none());
+
+        // Update counted quantity to 45 (variance = -5)
+        let updated_line = cc_repo
+            .update_counted_quantity(&line.id, 45, Some("Missing 5 units".into()))
+            .await
+            .unwrap();
+        assert_eq!(updated_line.counted_quantity, Some(45));
+        assert_eq!(updated_line.variance, Some(-5));
+
+        // Submit session (draft -> submitted)
+        let submitted = cc_repo
+            .update_session_status(&session.id, "submitted")
+            .await
+            .unwrap();
+        assert_eq!(submitted.status, "submitted");
+
+        // Approve (submitted -> approved)
+        let approved = cc_repo
+            .update_session_status(&session.id, "approved")
+            .await
+            .unwrap();
+        assert_eq!(approved.status, "approved");
+
+        // Post (approved -> posted) -- adjusts stock
+        let posted = cc_repo
+            .post_cycle_count(&session.id, "approver-1")
+            .await
+            .unwrap();
+        assert_eq!(posted.status, "posted");
+        assert_eq!(posted.approved_by, Some("approver-1".to_string()));
+
+        // Verify stock level adjusted by -5
+        let sl = sl_repo
+            .get_by_item_warehouse(&item.id, &wh.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(sl.quantity_on_hand, 45);
+    }
+
+    #[tokio::test]
+    async fn test_cycle_count_session_list() {
+        let (wh_repo, _, _, _, _, cc_repo) = setup_repos().await;
+
+        let wh = wh_repo
+            .create(&CreateWarehouse {
+                name: "WH-CL".into(),
+                address: None,
+            })
+            .await
+            .unwrap();
+
+        cc_repo
+            .create_cycle_count_session(&wh.id, "2025-08-01", "counter-a")
+            .await
+            .unwrap();
+        cc_repo
+            .create_cycle_count_session(&wh.id, "2025-08-15", "counter-b")
+            .await
+            .unwrap();
+
+        let sessions = cc_repo.list_cycle_count_sessions().await.unwrap();
+        assert_eq!(sessions.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_cycle_count_lines_by_session() {
+        let (wh_repo, item_repo, _, _, _, cc_repo) = setup_repos().await;
+
+        let wh = wh_repo
+            .create(&CreateWarehouse {
+                name: "WH-LN".into(),
+                address: None,
+            })
+            .await
+            .unwrap();
+        let item1 = item_repo
+            .create(&CreateItem {
+                sku: "SKU-LN1".into(),
+                name: "Item LN1".into(),
+                description: None,
+                unit_of_measure: None,
+                item_type: "finished".into(),
+            })
+            .await
+            .unwrap();
+        let item2 = item_repo
+            .create(&CreateItem {
+                sku: "SKU-LN2".into(),
+                name: "Item LN2".into(),
+                description: None,
+                unit_of_measure: None,
+                item_type: "finished".into(),
+            })
+            .await
+            .unwrap();
+
+        let session = cc_repo
+            .create_cycle_count_session(&wh.id, "2025-09-01", "counter-x")
+            .await
+            .unwrap();
+
+        cc_repo
+            .add_cycle_count_line(&session.id, &item1.id, 100, None)
+            .await
+            .unwrap();
+        cc_repo
+            .add_cycle_count_line(&session.id, &item2.id, 200, Some("Check this".into()))
+            .await
+            .unwrap();
+
+        let lines = cc_repo.get_cycle_count_lines(&session.id).await.unwrap();
+        assert_eq!(lines.len(), 2);
+    }
+}

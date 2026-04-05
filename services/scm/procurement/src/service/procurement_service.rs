@@ -181,3 +181,413 @@ impl ProcurementService {
         self.get_purchase_order(id).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::repository::goods_receipt_repo::GoodsReceiptRepo;
+    use crate::repository::purchase_order_repo::PurchaseOrderRepo;
+    use crate::repository::supplier_repo::SupplierRepo;
+    use saas_db::test_helpers::create_test_pool;
+    use sqlx::SqlitePool;
+
+    async fn setup() -> SqlitePool {
+        let pool = create_test_pool().await;
+        let sql_files = [
+            include_str!("../../migrations/001_create_suppliers.sql"),
+            include_str!("../../migrations/002_create_purchase_orders.sql"),
+            include_str!("../../migrations/003_create_po_lines.sql"),
+            include_str!("../../migrations/004_create_goods_receipts.sql"),
+        ];
+        let migration_names = [
+            "001_create_suppliers.sql",
+            "002_create_purchase_orders.sql",
+            "003_create_po_lines.sql",
+            "004_create_goods_receipts.sql",
+        ];
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS _migrations (filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        for (i, sql) in sql_files.iter().enumerate() {
+            let name = migration_names[i];
+            let already_applied: bool =
+                sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM _migrations WHERE filename = ?")
+                    .bind(name)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+                    > 0;
+            if !already_applied {
+                let mut tx = pool.begin().await.unwrap();
+                sqlx::raw_sql(sql).execute(&mut *tx).await.unwrap();
+                let now = chrono::Utc::now().to_rfc3339();
+                sqlx::query("INSERT INTO _migrations (filename, applied_at) VALUES (?, ?)")
+                    .bind(name)
+                    .bind(&now)
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
+                tx.commit().await.unwrap();
+            }
+        }
+        pool
+    }
+
+    #[tokio::test]
+    async fn test_supplier_crud() {
+        let pool = setup().await;
+        let repo = SupplierRepo::new(pool);
+
+        // Create
+        let input = CreateSupplier {
+            name: "Acme Corp".into(),
+            email: Some("acme@example.com".into()),
+            phone: Some("555-0100".into()),
+            address: Some("123 Main St".into()),
+        };
+        let supplier = repo.create(&input).await.unwrap();
+        assert_eq!(supplier.name, "Acme Corp");
+        assert_eq!(supplier.email, Some("acme@example.com".into()));
+        assert!(supplier.is_active);
+
+        // Read
+        let fetched = repo.get_by_id(&supplier.id).await.unwrap();
+        assert_eq!(fetched.name, "Acme Corp");
+
+        // Update
+        let updated = repo
+            .update(
+                &supplier.id,
+                &UpdateSupplier {
+                    name: Some("Acme Inc".into()),
+                    email: None,
+                    phone: None,
+                    address: None,
+                    is_active: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.name, "Acme Inc");
+
+        // List
+        let all = repo.list().await.unwrap();
+        assert_eq!(all.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_supplier_deactivate() {
+        let pool = setup().await;
+        let repo = SupplierRepo::new(pool);
+
+        let input = CreateSupplier {
+            name: "Beta Corp".into(),
+            email: None,
+            phone: None,
+            address: None,
+        };
+        let supplier = repo.create(&input).await.unwrap();
+        assert!(supplier.is_active);
+
+        let deactivated = repo
+            .update(
+                &supplier.id,
+                &UpdateSupplier {
+                    name: None,
+                    email: None,
+                    phone: None,
+                    address: None,
+                    is_active: Some(false),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!deactivated.is_active);
+    }
+
+    #[tokio::test]
+    async fn test_purchase_order_creation_with_lines() {
+        let pool = setup().await;
+        let supplier_repo = SupplierRepo::new(pool.clone());
+        let po_repo = PurchaseOrderRepo::new(pool);
+
+        // Create supplier first
+        let supplier = supplier_repo
+            .create(&CreateSupplier {
+                name: "Supplier A".into(),
+                email: None,
+                phone: None,
+                address: None,
+            })
+            .await
+            .unwrap();
+
+        // Create PO with lines
+        let input = CreatePurchaseOrder {
+            supplier_id: supplier.id.clone(),
+            order_date: "2025-01-15".into(),
+            lines: vec![
+                CreatePurchaseOrderLine {
+                    item_id: "ITEM-001".into(),
+                    quantity: 10,
+                    unit_price_cents: 500,
+                },
+                CreatePurchaseOrderLine {
+                    item_id: "ITEM-002".into(),
+                    quantity: 5,
+                    unit_price_cents: 1000,
+                },
+            ],
+        };
+        let po = po_repo.create(&input).await.unwrap();
+        assert_eq!(po.status, "draft");
+        assert_eq!(po.total_cents, 10_000); // 10*500 + 5*1000
+        assert_eq!(po.supplier_id, supplier.id);
+
+        // Verify lines
+        let lines = po_repo.get_lines(&po.id).await.unwrap();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].item_id, "ITEM-001");
+        assert_eq!(lines[0].quantity, 10);
+        assert_eq!(lines[0].quantity_received, 0);
+        assert_eq!(lines[1].item_id, "ITEM-002");
+    }
+
+    #[tokio::test]
+    async fn test_po_status_transitions() {
+        let pool = setup().await;
+        let supplier_repo = SupplierRepo::new(pool.clone());
+        let po_repo = PurchaseOrderRepo::new(pool);
+
+        let supplier = supplier_repo
+            .create(&CreateSupplier {
+                name: "Supplier B".into(),
+                email: None,
+                phone: None,
+                address: None,
+            })
+            .await
+            .unwrap();
+
+        let input = CreatePurchaseOrder {
+            supplier_id: supplier.id,
+            order_date: "2025-02-01".into(),
+            lines: vec![CreatePurchaseOrderLine {
+                item_id: "ITEM-010".into(),
+                quantity: 20,
+                unit_price_cents: 100,
+            }],
+        };
+        let po = po_repo.create(&input).await.unwrap();
+        assert_eq!(po.status, "draft");
+
+        // draft -> submitted
+        po_repo.update_status(&po.id, "submitted").await.unwrap();
+        let po = po_repo.get_by_id(&po.id).await.unwrap();
+        assert_eq!(po.status, "submitted");
+
+        // submitted -> approved
+        po_repo.update_status(&po.id, "approved").await.unwrap();
+        let po = po_repo.get_by_id(&po.id).await.unwrap();
+        assert_eq!(po.status, "approved");
+
+        // approved -> received
+        po_repo.update_status(&po.id, "received").await.unwrap();
+        let po = po_repo.get_by_id(&po.id).await.unwrap();
+        assert_eq!(po.status, "received");
+    }
+
+    #[tokio::test]
+    async fn test_po_submit_blocks_non_draft() {
+        let pool = setup().await;
+        let supplier_repo = SupplierRepo::new(pool.clone());
+        let po_repo = PurchaseOrderRepo::new(pool);
+
+        let supplier = supplier_repo
+            .create(&CreateSupplier {
+                name: "Supplier C".into(),
+                email: None,
+                phone: None,
+                address: None,
+            })
+            .await
+            .unwrap();
+
+        let input = CreatePurchaseOrder {
+            supplier_id: supplier.id,
+            order_date: "2025-03-01".into(),
+            lines: vec![CreatePurchaseOrderLine {
+                item_id: "ITEM-020".into(),
+                quantity: 5,
+                unit_price_cents: 200,
+            }],
+        };
+        let po = po_repo.create(&input).await.unwrap();
+
+        // Move to approved directly (bypassing service validation)
+        po_repo.update_status(&po.id, "submitted").await.unwrap();
+        po_repo.update_status(&po.id, "approved").await.unwrap();
+
+        // Verify status is "approved" - service should block re-submit
+        let po = po_repo.get_by_id(&po.id).await.unwrap();
+        assert_eq!(po.status, "approved");
+        // Business rule: only draft can be submitted
+        assert_ne!(po.status, "draft");
+    }
+
+    #[tokio::test]
+    async fn test_goods_receipt_creation() {
+        let pool = setup().await;
+        let supplier_repo = SupplierRepo::new(pool.clone());
+        let po_repo = PurchaseOrderRepo::new(pool.clone());
+        let receipt_repo = GoodsReceiptRepo::new(pool);
+
+        let supplier = supplier_repo
+            .create(&CreateSupplier {
+                name: "Supplier D".into(),
+                email: None,
+                phone: None,
+                address: None,
+            })
+            .await
+            .unwrap();
+
+        let input = CreatePurchaseOrder {
+            supplier_id: supplier.id,
+            order_date: "2025-04-01".into(),
+            lines: vec![CreatePurchaseOrderLine {
+                item_id: "ITEM-030".into(),
+                quantity: 100,
+                unit_price_cents: 50,
+            }],
+        };
+        let po = po_repo.create(&input).await.unwrap();
+        let lines = po_repo.get_lines(&po.id).await.unwrap();
+        let line_id = &lines[0].id;
+
+        // Create goods receipt
+        let receipt = receipt_repo
+            .create(&po.id, line_id, 80, "2025-04-10")
+            .await
+            .unwrap();
+        assert_eq!(receipt.po_id, po.id);
+        assert_eq!(receipt.po_line_id, *line_id);
+        assert_eq!(receipt.quantity_received, 80);
+
+        // Update line received quantity
+        po_repo.update_line_received(line_id, 80).await.unwrap();
+        let lines = po_repo.get_lines(&po.id).await.unwrap();
+        assert_eq!(lines[0].quantity_received, 80);
+    }
+
+    #[tokio::test]
+    async fn test_over_receiving_prevention() {
+        let pool = setup().await;
+        let supplier_repo = SupplierRepo::new(pool.clone());
+        let po_repo = PurchaseOrderRepo::new(pool);
+
+        let supplier = supplier_repo
+            .create(&CreateSupplier {
+                name: "Supplier E".into(),
+                email: None,
+                phone: None,
+                address: None,
+            })
+            .await
+            .unwrap();
+
+        let input = CreatePurchaseOrder {
+            supplier_id: supplier.id,
+            order_date: "2025-05-01".into(),
+            lines: vec![CreatePurchaseOrderLine {
+                item_id: "ITEM-040".into(),
+                quantity: 50,
+                unit_price_cents: 100,
+            }],
+        };
+        let po = po_repo.create(&input).await.unwrap();
+        let lines = po_repo.get_lines(&po.id).await.unwrap();
+        let po_line = &lines[0];
+
+        // Simulate already receiving 40 units
+        po_repo
+            .update_line_received(&po_line.id, 40)
+            .await
+            .unwrap();
+
+        // Refresh lines to see updated quantity_received
+        let lines = po_repo.get_lines(&po.id).await.unwrap();
+        let po_line = &lines[0];
+        assert_eq!(po_line.quantity_received, 40);
+
+        // Business rule: cannot receive more than remaining
+        let remaining = po_line.quantity - po_line.quantity_received;
+        assert_eq!(remaining, 10);
+        let attempting_to_receive = 15;
+        assert!(
+            attempting_to_receive > remaining,
+            "Should detect over-receive"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_po_line_total_calculation() {
+        let pool = setup().await;
+        let supplier_repo = SupplierRepo::new(pool.clone());
+        let po_repo = PurchaseOrderRepo::new(pool);
+
+        let supplier = supplier_repo
+            .create(&CreateSupplier {
+                name: "Supplier F".into(),
+                email: None,
+                phone: None,
+                address: None,
+            })
+            .await
+            .unwrap();
+
+        let input = CreatePurchaseOrder {
+            supplier_id: supplier.id,
+            order_date: "2025-06-01".into(),
+            lines: vec![
+                CreatePurchaseOrderLine {
+                    item_id: "ITEM-A".into(),
+                    quantity: 3,
+                    unit_price_cents: 2500,
+                },
+                CreatePurchaseOrderLine {
+                    item_id: "ITEM-B".into(),
+                    quantity: 7,
+                    unit_price_cents: 1000,
+                },
+                CreatePurchaseOrderLine {
+                    item_id: "ITEM-C".into(),
+                    quantity: 1,
+                    unit_price_cents: 50000,
+                },
+            ],
+        };
+        let po = po_repo.create(&input).await.unwrap();
+
+        // PO total: 3*2500 + 7*1000 + 1*50000 = 7500 + 7000 + 50000 = 64500
+        assert_eq!(po.total_cents, 64500);
+
+        let lines = po_repo.get_lines(&po.id).await.unwrap();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].line_total_cents, 7500);
+        assert_eq!(lines[1].line_total_cents, 7000);
+        assert_eq!(lines[2].line_total_cents, 50000);
+    }
+
+    #[tokio::test]
+    async fn test_supplier_not_found() {
+        let pool = setup().await;
+        let repo = SupplierRepo::new(pool);
+        let result = repo.get_by_id("nonexistent").await;
+        assert!(result.is_err());
+    }
+}

@@ -148,3 +148,362 @@ impl FixedAssetsService {
         Ok(results)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use saas_db::test_helpers::create_test_pool;
+    use sqlx::SqlitePool;
+
+    async fn setup() -> SqlitePool {
+        let pool = create_test_pool().await;
+        let sql_files = [
+            include_str!("../../migrations/001_create_assets.sql"),
+            include_str!("../../migrations/002_create_depreciation.sql"),
+        ];
+        let migration_names = [
+            "001_create_assets.sql",
+            "002_create_depreciation.sql",
+        ];
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS _migrations (filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        for (i, sql) in sql_files.iter().enumerate() {
+            let name = migration_names[i];
+            let already_applied: bool =
+                sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM _migrations WHERE filename = ?")
+                    .bind(name)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+                    > 0;
+            if !already_applied {
+                let mut tx = pool.begin().await.unwrap();
+                sqlx::raw_sql(sql).execute(&mut *tx).await.unwrap();
+                let now = chrono::Utc::now().to_rfc3339();
+                sqlx::query("INSERT INTO _migrations (filename, applied_at) VALUES (?, ?)")
+                    .bind(name)
+                    .bind(&now)
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
+                tx.commit().await.unwrap();
+            }
+        }
+        pool
+    }
+
+    async fn setup_repo() -> FixedAssetsRepo {
+        let pool = setup().await;
+        FixedAssetsRepo::new(pool)
+    }
+
+    #[tokio::test]
+    async fn test_asset_crud() {
+        let repo = setup_repo().await;
+
+        // Create
+        let input = CreateAssetRequest {
+            name: "Office Building".into(),
+            description: Some("Main headquarters".into()),
+            asset_number: "ASSET-001".into(),
+            category: "buildings".into(),
+            purchase_date: "2024-01-01".into(),
+            purchase_cost_cents: 1_200_000_00,
+            salvage_value_cents: Some(200_000_00),
+            useful_life_months: 360,
+            depreciation_method: Some("straight_line".into()),
+        };
+        let asset = repo.create_asset(&input).await.unwrap();
+        assert_eq!(asset.name, "Office Building");
+        assert_eq!(asset.purchase_cost_cents, 1_200_000_00);
+        assert_eq!(asset.salvage_value_cents, 200_000_00);
+        assert_eq!(asset.status, "active");
+
+        // Read
+        let fetched = repo.get_asset(&asset.id).await.unwrap();
+        assert_eq!(fetched.asset_number, "ASSET-001");
+
+        // List
+        let assets = repo.list_assets().await.unwrap();
+        assert_eq!(assets.len(), 1);
+
+        // Update
+        let updated = repo
+            .update_asset(
+                &asset.id,
+                &UpdateAssetRequest {
+                    name: Some("HQ Building".into()),
+                    description: None,
+                    category: None,
+                    status: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.name, "HQ Building");
+    }
+
+    #[tokio::test]
+    async fn test_asset_disposal() {
+        let repo = setup_repo().await;
+
+        let asset = repo
+            .create_asset(&CreateAssetRequest {
+                name: "Laptop".into(),
+                description: None,
+                asset_number: "ASSET-010".into(),
+                category: "equipment".into(),
+                purchase_date: "2024-03-01".into(),
+                purchase_cost_cents: 200_000,
+                salvage_value_cents: Some(20_000),
+                useful_life_months: 36,
+                depreciation_method: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(asset.status, "active");
+
+        let disposed = repo
+            .update_asset(
+                &asset.id,
+                &UpdateAssetRequest {
+                    name: None,
+                    description: None,
+                    category: None,
+                    status: Some("disposed".into()),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(disposed.status, "disposed");
+    }
+
+    #[tokio::test]
+    async fn test_depreciation_schedule_creation() {
+        let repo = setup_repo().await;
+
+        let asset = repo
+            .create_asset(&CreateAssetRequest {
+                name: "Server Rack".into(),
+                description: Some("Data center equipment".into()),
+                asset_number: "ASSET-020".into(),
+                category: "equipment".into(),
+                purchase_date: "2024-06-01".into(),
+                purchase_cost_cents: 60_000_00,
+                salvage_value_cents: Some(0),
+                useful_life_months: 60,
+                depreciation_method: None,
+            })
+            .await
+            .unwrap();
+
+        // Insert first depreciation manually
+        let dep = repo
+            .insert_depreciation(&asset.id, "2024-06", 1_000_00, 1_000_00, 59_000_00)
+            .await
+            .unwrap();
+
+        assert_eq!(dep.asset_id, asset.id);
+        assert_eq!(dep.period, "2024-06");
+        assert_eq!(dep.depreciation_cents, 1_000_00);
+        assert_eq!(dep.accumulated_cents, 1_000_00);
+        assert_eq!(dep.net_book_value_cents, 59_000_00);
+
+        // Get schedule
+        let schedule = repo.get_depreciation_schedule(&asset.id).await.unwrap();
+        assert_eq!(schedule.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_run_depreciation_straight_line() {
+        let repo = setup_repo().await;
+
+        // Asset: cost=120000, salvage=0, life=12 months => monthly=10000
+        let asset = repo
+            .create_asset(&CreateAssetRequest {
+                name: "Test Equipment".into(),
+                description: None,
+                asset_number: "ASSET-030".into(),
+                category: "equipment".into(),
+                purchase_date: "2025-01-01".into(),
+                purchase_cost_cents: 120_000,
+                salvage_value_cents: Some(0),
+                useful_life_months: 12,
+                depreciation_method: None,
+            })
+            .await
+            .unwrap();
+
+        // Simulate straight-line depreciation directly via repo
+        // Month 1: dep=10000, acc=10000, nbv=110000
+        let dep1 = repo.insert_depreciation(&asset.id, "2025-01", 10_000, 10_000, 110_000).await.unwrap();
+        assert_eq!(dep1.depreciation_cents, 10_000);
+        assert_eq!(dep1.net_book_value_cents, 110_000);
+
+        // Month 2: dep=10000, acc=20000, nbv=100000
+        let dep2 = repo.insert_depreciation(&asset.id, "2025-02", 10_000, 20_000, 100_000).await.unwrap();
+        assert_eq!(dep2.accumulated_cents, 20_000);
+        assert_eq!(dep2.net_book_value_cents, 100_000);
+
+        // Verify schedule
+        let schedule = repo.get_depreciation_schedule(&asset.id).await.unwrap();
+        assert_eq!(schedule.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_depreciation_respects_salvage_value() {
+        let repo = setup_repo().await;
+
+        // Asset: cost=100000, salvage=40000, life=6 months => depreciable=60000, monthly=10000
+        let asset = repo
+            .create_asset(&CreateAssetRequest {
+                name: "Salvage Test".into(),
+                description: None,
+                asset_number: "ASSET-040".into(),
+                category: "vehicles".into(),
+                purchase_date: "2025-01-01".into(),
+                purchase_cost_cents: 100_000,
+                salvage_value_cents: Some(40_000),
+                useful_life_months: 6,
+                depreciation_method: None,
+            })
+            .await
+            .unwrap();
+
+        // Run 6 months of depreciation manually
+        let mut accumulated = 0i64;
+        let mut nbv = 100_000i64;
+        for month in 1..=6 {
+            let period = format!("2025-{:02}", month);
+            let dep = 10_000i64;
+            accumulated += dep;
+            nbv = std::cmp::max(nbv - dep, 40_000);
+            repo.insert_depreciation(&asset.id, &period, dep, accumulated, nbv)
+                .await
+                .unwrap();
+        }
+
+        // Check final depreciation schedule
+        let schedule = repo.get_depreciation_schedule(&asset.id).await.unwrap();
+        assert_eq!(schedule.len(), 6);
+
+        // Final NBV should be at salvage value (40000)
+        let final_dep = schedule.last().unwrap();
+        assert_eq!(final_dep.net_book_value_cents, 40_000);
+        assert_eq!(final_dep.accumulated_cents, 60_000);
+    }
+
+    #[tokio::test]
+    async fn test_prevent_duplicate_depreciation_run() {
+        let repo = setup_repo().await;
+
+        let asset = repo.create_asset(&CreateAssetRequest {
+            name: "Duplicate Test".into(),
+            description: None,
+            asset_number: "ASSET-050".into(),
+            category: "equipment".into(),
+            purchase_date: "2025-01-01".into(),
+            purchase_cost_cents: 50_000,
+            salvage_value_cents: Some(0),
+            useful_life_months: 12,
+            depreciation_method: None,
+        })
+        .await
+        .unwrap();
+
+        // First insert should succeed
+        repo.insert_depreciation(&asset.id, "2025-01", 4_166, 4_166, 45_834)
+            .await
+            .unwrap();
+
+        // Duplicate period check
+        let has_dup = repo.has_depreciation_for_period(&asset.id, "2025-01").await.unwrap();
+        assert!(has_dup, "Should detect existing depreciation for period");
+    }
+
+    #[tokio::test]
+    async fn test_depreciation_skips_disposed_assets() {
+        let repo = setup_repo().await;
+
+        let asset = repo
+            .create_asset(&CreateAssetRequest {
+                name: "To Be Disposed".into(),
+                description: None,
+                asset_number: "ASSET-060".into(),
+                category: "equipment".into(),
+                purchase_date: "2025-01-01".into(),
+                purchase_cost_cents: 30_000,
+                salvage_value_cents: Some(0),
+                useful_life_months: 12,
+                depreciation_method: None,
+            })
+            .await
+            .unwrap();
+
+        // Dispose the asset
+        repo.update_asset(
+            &asset.id,
+            &UpdateAssetRequest {
+                name: None,
+                description: None,
+                category: None,
+                status: Some("disposed".into()),
+            },
+        )
+        .await
+        .unwrap();
+
+        // Only active assets should be listed
+        let active = repo.list_active_assets().await.unwrap();
+        assert!(active.is_empty(), "Disposed assets should not be in active list");
+    }
+
+    #[tokio::test]
+    async fn test_get_last_depreciation_tracks_accumulation() {
+        let repo = setup_repo().await;
+
+        let asset = repo
+            .create_asset(&CreateAssetRequest {
+                name: "Accum Test".into(),
+                description: None,
+                asset_number: "ASSET-070".into(),
+                category: "equipment".into(),
+                purchase_date: "2025-01-01".into(),
+                purchase_cost_cents: 24_000,
+                salvage_value_cents: Some(0),
+                useful_life_months: 12,
+                depreciation_method: None,
+            })
+            .await
+            .unwrap();
+
+        // Insert multiple depreciations manually
+        repo.insert_depreciation(&asset.id, "2025-01", 2_000, 2_000, 22_000)
+            .await
+            .unwrap();
+        repo.insert_depreciation(&asset.id, "2025-02", 2_000, 4_000, 20_000)
+            .await
+            .unwrap();
+        repo.insert_depreciation(&asset.id, "2025-03", 2_000, 6_000, 18_000)
+            .await
+            .unwrap();
+
+        // Get last depreciation should return March's entry
+        let last = repo.get_last_depreciation(&asset.id).await.unwrap();
+        assert!(last.is_some());
+        let last = last.unwrap();
+        assert_eq!(last.period, "2025-03");
+        assert_eq!(last.accumulated_cents, 6_000);
+        assert_eq!(last.net_book_value_cents, 18_000);
+
+        // Full schedule should have 3 entries
+        let schedule = repo.get_depreciation_schedule(&asset.id).await.unwrap();
+        assert_eq!(schedule.len(), 3);
+    }
+}

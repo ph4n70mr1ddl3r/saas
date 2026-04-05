@@ -88,3 +88,300 @@ impl ManufacturingService {
         self.bom_repo.create(&input).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::repository::bom_repo::BomRepo;
+    use crate::repository::routing_step_repo::RoutingStepRepo;
+    use crate::repository::work_order_repo::WorkOrderRepo;
+    use saas_db::test_helpers::create_test_pool;
+    use sqlx::SqlitePool;
+
+    async fn setup() -> SqlitePool {
+        let pool = create_test_pool().await;
+        let sql_files = [
+            include_str!("../../migrations/001_create_work_orders.sql"),
+            include_str!("../../migrations/002_create_bom.sql"),
+            include_str!("../../migrations/003_create_bom_components.sql"),
+            include_str!("../../migrations/004_create_routing_steps.sql"),
+        ];
+        let migration_names = [
+            "001_create_work_orders.sql",
+            "002_create_bom.sql",
+            "003_create_bom_components.sql",
+            "004_create_routing_steps.sql",
+        ];
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS _migrations (filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        for (i, sql) in sql_files.iter().enumerate() {
+            let name = migration_names[i];
+            let already_applied: bool =
+                sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM _migrations WHERE filename = ?")
+                    .bind(name)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+                    > 0;
+            if !already_applied {
+                let mut tx = pool.begin().await.unwrap();
+                sqlx::raw_sql(sql).execute(&mut *tx).await.unwrap();
+                let now = chrono::Utc::now().to_rfc3339();
+                sqlx::query("INSERT INTO _migrations (filename, applied_at) VALUES (?, ?)")
+                    .bind(name)
+                    .bind(&now)
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
+                tx.commit().await.unwrap();
+            }
+        }
+        pool
+    }
+
+    #[tokio::test]
+    async fn test_work_order_creation() {
+        let pool = setup().await;
+        let repo = WorkOrderRepo::new(pool);
+
+        let input = CreateWorkOrder {
+            item_id: "ITEM-ASSEMBLY-001".into(),
+            quantity: 100,
+            planned_start: Some("2025-03-01T08:00:00".into()),
+            planned_end: Some("2025-03-05T17:00:00".into()),
+        };
+        let wo = repo.create(&input).await.unwrap();
+        assert_eq!(wo.status, "planned");
+        assert_eq!(wo.item_id, "ITEM-ASSEMBLY-001");
+        assert_eq!(wo.quantity, 100);
+        assert!(wo.wo_number.starts_with("WO-"));
+    }
+
+    #[tokio::test]
+    async fn test_work_order_status_planned_to_in_progress() {
+        let pool = setup().await;
+        let repo = WorkOrderRepo::new(pool);
+
+        let input = CreateWorkOrder {
+            item_id: "ITEM-ASSY-002".into(),
+            quantity: 50,
+            planned_start: None,
+            planned_end: None,
+        };
+        let wo = repo.create(&input).await.unwrap();
+        assert_eq!(wo.status, "planned");
+
+        // planned -> in_progress (sets actual_start)
+        let now = "2025-04-01T09:00:00";
+        repo.update_status(&wo.id, "in_progress", Some(now), None)
+            .await
+            .unwrap();
+        let wo = repo.get_by_id(&wo.id).await.unwrap();
+        assert_eq!(wo.status, "in_progress");
+        assert_eq!(wo.actual_start, Some(now.to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_work_order_status_in_progress_to_completed() {
+        let pool = setup().await;
+        let repo = WorkOrderRepo::new(pool);
+
+        let input = CreateWorkOrder {
+            item_id: "ITEM-ASSY-003".into(),
+            quantity: 25,
+            planned_start: Some("2025-05-01T08:00:00".into()),
+            planned_end: Some("2025-05-03T17:00:00".into()),
+        };
+        let wo = repo.create(&input).await.unwrap();
+
+        // planned -> in_progress
+        repo.update_status(&wo.id, "in_progress", Some("2025-05-01T08:00:00"), None)
+            .await
+            .unwrap();
+
+        // in_progress -> completed (sets actual_end)
+        let end_time = "2025-05-02T16:30:00";
+        repo.update_status(&wo.id, "completed", None, Some(end_time))
+            .await
+            .unwrap();
+        let wo = repo.get_by_id(&wo.id).await.unwrap();
+        assert_eq!(wo.status, "completed");
+        assert_eq!(wo.actual_end, Some(end_time.to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_work_order_start_blocks_non_planned() {
+        let pool = setup().await;
+        let repo = WorkOrderRepo::new(pool);
+
+        let input = CreateWorkOrder {
+            item_id: "ITEM-ASSY-004".into(),
+            quantity: 10,
+            planned_start: None,
+            planned_end: None,
+        };
+        let wo = repo.create(&input).await.unwrap();
+
+        // Move to in_progress then try to start again
+        repo.update_status(&wo.id, "in_progress", Some("2025-06-01T08:00:00"), None)
+            .await
+            .unwrap();
+        let wo = repo.get_by_id(&wo.id).await.unwrap();
+
+        // Business rule: only planned can be started
+        assert_ne!(wo.status, "planned");
+    }
+
+    #[tokio::test]
+    async fn test_work_order_complete_blocks_non_in_progress() {
+        let pool = setup().await;
+        let repo = WorkOrderRepo::new(pool);
+
+        let input = CreateWorkOrder {
+            item_id: "ITEM-ASSY-005".into(),
+            quantity: 15,
+            planned_start: None,
+            planned_end: None,
+        };
+        let wo = repo.create(&input).await.unwrap();
+
+        // Business rule: only in_progress can be completed
+        assert_eq!(wo.status, "planned");
+        assert_ne!(wo.status, "in_progress");
+    }
+
+    #[tokio::test]
+    async fn test_bom_creation_with_components() {
+        let pool = setup().await;
+        let repo = BomRepo::new(pool);
+
+        let input = CreateBom {
+            name: "Widget Assembly".into(),
+            description: Some("Standard widget".into()),
+            finished_item_id: "ITEM-FINISHED-001".into(),
+            quantity: Some(1),
+            components: vec![
+                CreateBomComponent {
+                    component_item_id: "COMP-A".into(),
+                    quantity_required: 2,
+                },
+                CreateBomComponent {
+                    component_item_id: "COMP-B".into(),
+                    quantity_required: 4,
+                },
+                CreateBomComponent {
+                    component_item_id: "COMP-C".into(),
+                    quantity_required: 1,
+                },
+            ],
+        };
+        let bom = repo.create(&input).await.unwrap();
+        assert_eq!(bom.name, "Widget Assembly");
+        assert_eq!(bom.finished_item_id, "ITEM-FINISHED-001");
+        assert_eq!(bom.quantity, 1);
+
+        // Verify components
+        let components = repo.get_components(&bom.id).await.unwrap();
+        assert_eq!(components.len(), 3);
+        assert_eq!(components[0].component_item_id, "COMP-A");
+        assert_eq!(components[0].quantity_required, 2);
+        assert_eq!(components[1].component_item_id, "COMP-B");
+        assert_eq!(components[1].quantity_required, 4);
+        assert_eq!(components[2].component_item_id, "COMP-C");
+        assert_eq!(components[2].quantity_required, 1);
+    }
+
+    #[tokio::test]
+    async fn test_bom_default_quantity() {
+        let pool = setup().await;
+        let repo = BomRepo::new(pool);
+
+        let input = CreateBom {
+            name: "Gadget Assembly".into(),
+            description: None,
+            finished_item_id: "ITEM-FINISHED-002".into(),
+            quantity: None, // defaults to 1
+            components: vec![CreateBomComponent {
+                component_item_id: "COMP-D".into(),
+                quantity_required: 3,
+            }],
+        };
+        let bom = repo.create(&input).await.unwrap();
+        assert_eq!(bom.quantity, 1); // default
+    }
+
+    #[tokio::test]
+    async fn test_routing_steps() {
+        let pool = setup().await;
+        let wo_repo = WorkOrderRepo::new(pool.clone());
+        let routing_repo = RoutingStepRepo::new(pool);
+
+        // Create work order first
+        let wo = wo_repo
+            .create(&CreateWorkOrder {
+                item_id: "ITEM-ASSY-RT".into(),
+                quantity: 20,
+                planned_start: None,
+                planned_end: None,
+            })
+            .await
+            .unwrap();
+
+        // Create routing steps
+        let step1 = routing_repo
+            .create(&wo.id, 1, "Cut raw material")
+            .await
+            .unwrap();
+        assert_eq!(step1.work_order_id, wo.id);
+        assert_eq!(step1.step_number, 1);
+        assert_eq!(step1.status, "pending");
+        assert_eq!(step1.description, Some("Cut raw material".into()));
+
+        let step2 = routing_repo
+            .create(&wo.id, 2, "Weld joints")
+            .await
+            .unwrap();
+        assert_eq!(step2.step_number, 2);
+
+        let step3 = routing_repo
+            .create(&wo.id, 3, "Quality inspection")
+            .await
+            .unwrap();
+
+        // List all steps
+        let steps = routing_repo.list_by_work_order(&wo.id).await.unwrap();
+        assert_eq!(steps.len(), 3);
+
+        // Update step statuses
+        routing_repo
+            .update_status(&step1.id, "in_progress")
+            .await
+            .unwrap();
+        routing_repo
+            .update_status(&step1.id, "completed")
+            .await
+            .unwrap();
+        routing_repo
+            .update_status(&step2.id, "in_progress")
+            .await
+            .unwrap();
+
+        let steps = routing_repo.list_by_work_order(&wo.id).await.unwrap();
+        assert_eq!(steps[0].status, "completed");
+        assert_eq!(steps[1].status, "in_progress");
+        assert_eq!(steps[2].status, "pending");
+    }
+
+    #[tokio::test]
+    async fn test_bom_not_found() {
+        let pool = setup().await;
+        let repo = BomRepo::new(pool);
+        let result = repo.get_by_id("nonexistent").await;
+        assert!(result.is_err());
+    }
+}

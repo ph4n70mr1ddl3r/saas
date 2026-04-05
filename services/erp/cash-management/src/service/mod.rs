@@ -186,3 +186,450 @@ impl CashManagementService {
             .await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use saas_db::test_helpers::create_test_pool;
+    use sqlx::SqlitePool;
+
+    async fn setup() -> SqlitePool {
+        let pool = create_test_pool().await;
+        let sql_files = [
+            include_str!("../../migrations/001_create_bank_accounts.sql"),
+            include_str!("../../migrations/002_create_bank_transactions.sql"),
+            include_str!("../../migrations/003_create_reconciliations.sql"),
+            include_str!("../../migrations/004_add_flow_category.sql"),
+        ];
+        let migration_names = [
+            "001_create_bank_accounts.sql",
+            "002_create_bank_transactions.sql",
+            "003_create_reconciliations.sql",
+            "004_add_flow_category.sql",
+        ];
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS _migrations (filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        for (i, sql) in sql_files.iter().enumerate() {
+            let name = migration_names[i];
+            let already_applied: bool =
+                sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM _migrations WHERE filename = ?")
+                    .bind(name)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+                    > 0;
+            if !already_applied {
+                let mut tx = pool.begin().await.unwrap();
+                sqlx::raw_sql(sql).execute(&mut *tx).await.unwrap();
+                let now = chrono::Utc::now().to_rfc3339();
+                sqlx::query("INSERT INTO _migrations (filename, applied_at) VALUES (?, ?)")
+                    .bind(name)
+                    .bind(&now)
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
+                tx.commit().await.unwrap();
+            }
+        }
+        pool
+    }
+
+    async fn setup_repo() -> CashManagementRepo {
+        let pool = setup().await;
+        CashManagementRepo::new(pool)
+    }
+
+    #[tokio::test]
+    async fn test_bank_account_crud() {
+        let repo = setup_repo().await;
+
+        // Create
+        let input = CreateBankAccountRequest {
+            name: "Operating Account".into(),
+            bank_name: "First Bank".into(),
+            account_number: "1234567890".into(),
+            routing_number: Some("021000021".into()),
+            balance_cents: Some(100_000),
+            currency: Some("USD".into()),
+        };
+        let account = repo.create_bank_account(&input).await.unwrap();
+        assert_eq!(account.name, "Operating Account");
+        assert_eq!(account.balance_cents, 100_000);
+        assert_eq!(account.currency, "USD");
+
+        // Read
+        let fetched = repo.get_bank_account(&account.id).await.unwrap();
+        assert_eq!(fetched.id, account.id);
+        assert_eq!(fetched.bank_name, "First Bank");
+
+        // List
+        let accounts = repo.list_bank_accounts().await.unwrap();
+        assert_eq!(accounts.len(), 1);
+
+        // Update balance
+        let updated = repo.update_balance(&account.id, 250_000).await.unwrap();
+        assert_eq!(updated.balance_cents, 250_000);
+    }
+
+    #[tokio::test]
+    async fn test_deposit_increases_balance() {
+        let repo = setup_repo().await;
+
+        let acct = repo
+            .create_bank_account(&CreateBankAccountRequest {
+                name: "Savings".into(),
+                bank_name: "Bank A".into(),
+                account_number: "1111111111".into(),
+                routing_number: None,
+                balance_cents: Some(50_000),
+                currency: Some("USD".into()),
+            })
+            .await
+            .unwrap();
+
+        let tx = repo
+            .create_bank_transaction(&CreateBankTransactionRequest {
+                bank_account_id: acct.id.clone(),
+                amount_cents: 25_000,
+                transaction_date: "2025-06-01".into(),
+                description: Some("Cash deposit".into()),
+                r#type: "deposit".into(),
+                reference: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(tx.r#type, "deposit");
+        assert_eq!(tx.amount_cents, 25_000);
+
+        let updated_acct = repo.get_bank_account(&acct.id).await.unwrap();
+        assert_eq!(updated_acct.balance_cents, 75_000);
+    }
+
+    #[tokio::test]
+    async fn test_withdrawal_decreases_balance() {
+        let repo = setup_repo().await;
+
+        let acct = repo
+            .create_bank_account(&CreateBankAccountRequest {
+                name: "Checking".into(),
+                bank_name: "Bank B".into(),
+                account_number: "2222222222".into(),
+                routing_number: None,
+                balance_cents: Some(100_000),
+                currency: Some("USD".into()),
+            })
+            .await
+            .unwrap();
+
+        let tx = repo
+            .create_bank_transaction(&CreateBankTransactionRequest {
+                bank_account_id: acct.id.clone(),
+                amount_cents: 30_000,
+                transaction_date: "2025-06-02".into(),
+                description: Some("ATM withdrawal".into()),
+                r#type: "withdrawal".into(),
+                reference: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(tx.r#type, "withdrawal");
+
+        let updated_acct = repo.get_bank_account(&acct.id).await.unwrap();
+        assert_eq!(updated_acct.balance_cents, 70_000);
+    }
+
+    #[tokio::test]
+    async fn test_withdrawal_prevents_negative_balance() {
+        let repo = setup_repo().await;
+
+        let acct = repo
+            .create_bank_account(&CreateBankAccountRequest {
+                name: "Low Balance".into(),
+                bank_name: "Bank C".into(),
+                account_number: "3333333333".into(),
+                routing_number: None,
+                balance_cents: Some(10_000),
+                currency: Some("USD".into()),
+            })
+            .await
+            .unwrap();
+
+        let result = repo
+            .create_bank_transaction(&CreateBankTransactionRequest {
+                bank_account_id: acct.id.clone(),
+                amount_cents: 20_000,
+                transaction_date: "2025-06-03".into(),
+                description: None,
+                r#type: "withdrawal".into(),
+                reference: None,
+            })
+            .await;
+
+        assert!(result.is_err());
+        // Balance should remain unchanged after rollback
+        let acct_after = repo.get_bank_account(&acct.id).await.unwrap();
+        assert_eq!(acct_after.balance_cents, 10_000);
+    }
+
+    #[tokio::test]
+    async fn test_transfer_between_accounts() {
+        let repo = setup_repo().await;
+
+        let from_acct = repo
+            .create_bank_account(&CreateBankAccountRequest {
+                name: "Source".into(),
+                bank_name: "Bank A".into(),
+                account_number: "4444444444".into(),
+                routing_number: None,
+                balance_cents: Some(100_000),
+                currency: Some("USD".into()),
+            })
+            .await
+            .unwrap();
+
+        let to_acct = repo
+            .create_bank_account(&CreateBankAccountRequest {
+                name: "Destination".into(),
+                bank_name: "Bank A".into(),
+                account_number: "5555555555".into(),
+                routing_number: None,
+                balance_cents: Some(0),
+                currency: Some("USD".into()),
+            })
+            .await
+            .unwrap();
+
+        let (withdrawal, deposit) = repo
+            .transfer_between_accounts(
+                &from_acct.id,
+                &to_acct.id,
+                40_000,
+                "2025-06-10",
+                Some("Inter-account transfer"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(withdrawal.r#type, "withdrawal");
+        assert_eq!(deposit.r#type, "deposit");
+        assert_eq!(withdrawal.amount_cents, 40_000);
+        assert_eq!(deposit.amount_cents, 40_000);
+
+        let from_after = repo.get_bank_account(&from_acct.id).await.unwrap();
+        let to_after = repo.get_bank_account(&to_acct.id).await.unwrap();
+        assert_eq!(from_after.balance_cents, 60_000);
+        assert_eq!(to_after.balance_cents, 40_000);
+    }
+
+    #[tokio::test]
+    async fn test_reconciliation_balanced() {
+        let repo = setup_repo().await;
+
+        let acct = repo
+            .create_bank_account(&CreateBankAccountRequest {
+                name: "Recon Account".into(),
+                bank_name: "Bank D".into(),
+                account_number: "6666666666".into(),
+                routing_number: None,
+                balance_cents: Some(50_000),
+                currency: Some("USD".into()),
+            })
+            .await
+            .unwrap();
+
+        // Reconcile with matching statement balance
+        let recon = repo
+            .create_reconciliation(&CreateReconciliationRequest {
+                bank_account_id: acct.id.clone(),
+                period_start: "2025-06-01".into(),
+                period_end: "2025-06-30".into(),
+                statement_balance_cents: 50_000,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(recon.status, "completed");
+        assert_eq!(recon.difference_cents, 0);
+        assert_eq!(recon.book_balance_cents, 50_000);
+    }
+
+    #[tokio::test]
+    async fn test_reconciliation_unbalanced() {
+        let repo = setup_repo().await;
+
+        let acct = repo
+            .create_bank_account(&CreateBankAccountRequest {
+                name: "Unbalanced Acct".into(),
+                bank_name: "Bank E".into(),
+                account_number: "7777777777".into(),
+                routing_number: None,
+                balance_cents: Some(50_000),
+                currency: Some("USD".into()),
+            })
+            .await
+            .unwrap();
+
+        // Reconcile with mismatched statement balance
+        let recon = repo
+            .create_reconciliation(&CreateReconciliationRequest {
+                bank_account_id: acct.id.clone(),
+                period_start: "2025-06-01".into(),
+                period_end: "2025-06-30".into(),
+                statement_balance_cents: 45_000,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(recon.status, "open");
+        assert_eq!(recon.difference_cents, -5_000);
+    }
+
+    #[tokio::test]
+    async fn test_transfer_insufficient_balance_rejected() {
+        let repo = setup_repo().await;
+
+        let from_acct = repo
+            .create_bank_account(&CreateBankAccountRequest {
+                name: "Empty Source".into(),
+                bank_name: "Bank F".into(),
+                account_number: "8888888888".into(),
+                routing_number: None,
+                balance_cents: Some(5_000),
+                currency: Some("USD".into()),
+            })
+            .await
+            .unwrap();
+
+        let to_acct = repo
+            .create_bank_account(&CreateBankAccountRequest {
+                name: "Target".into(),
+                bank_name: "Bank F".into(),
+                account_number: "9999999999".into(),
+                routing_number: None,
+                balance_cents: Some(0),
+                currency: Some("USD".into()),
+            })
+            .await
+            .unwrap();
+
+        let result = repo
+            .transfer_between_accounts(
+                &from_acct.id,
+                &to_acct.id,
+                10_000,
+                "2025-06-15",
+                None,
+                None,
+            )
+            .await;
+
+        assert!(result.is_err());
+        // Balances unchanged
+        let from_after = repo.get_bank_account(&from_acct.id).await.unwrap();
+        let to_after = repo.get_bank_account(&to_acct.id).await.unwrap();
+        assert_eq!(from_after.balance_cents, 5_000);
+        assert_eq!(to_after.balance_cents, 0);
+    }
+
+    #[tokio::test]
+    async fn test_transaction_listing_by_period() {
+        let repo = setup_repo().await;
+
+        let acct = repo
+            .create_bank_account(&CreateBankAccountRequest {
+                name: "Period Acct".into(),
+                bank_name: "Bank G".into(),
+                account_number: "1010101010".into(),
+                routing_number: None,
+                balance_cents: Some(100_000),
+                currency: Some("USD".into()),
+            })
+            .await
+            .unwrap();
+
+        repo.create_bank_transaction(&CreateBankTransactionRequest {
+            bank_account_id: acct.id.clone(),
+            amount_cents: 10_000,
+            transaction_date: "2025-06-15".into(),
+            description: None,
+            r#type: "deposit".into(),
+            reference: None,
+        })
+        .await
+        .unwrap();
+
+        repo.create_bank_transaction(&CreateBankTransactionRequest {
+            bank_account_id: acct.id.clone(),
+            amount_cents: 5_000,
+            transaction_date: "2025-07-10".into(),
+            description: None,
+            r#type: "withdrawal".into(),
+            reference: None,
+        })
+        .await
+        .unwrap();
+
+        // Query June only
+        let june_txns = repo
+            .get_transactions_for_period(&acct.id, "2025-06-01", "2025-06-30")
+            .await
+            .unwrap();
+        assert_eq!(june_txns.len(), 1);
+        assert_eq!(june_txns[0].amount_cents, 10_000);
+
+        // Query full range
+        let all_txns = repo
+            .get_transactions_for_period(&acct.id, "2025-06-01", "2025-07-31")
+            .await
+            .unwrap();
+        assert_eq!(all_txns.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_reconciliations_for_account() {
+        let repo = setup_repo().await;
+
+        let acct = repo
+            .create_bank_account(&CreateBankAccountRequest {
+                name: "Multi Recon".into(),
+                bank_name: "Bank H".into(),
+                account_number: "1212121212".into(),
+                routing_number: None,
+                balance_cents: Some(75_000),
+                currency: Some("USD".into()),
+            })
+            .await
+            .unwrap();
+
+        // First reconciliation
+        repo.create_reconciliation(&CreateReconciliationRequest {
+            bank_account_id: acct.id.clone(),
+            period_start: "2025-05-01".into(),
+            period_end: "2025-05-31".into(),
+            statement_balance_cents: 75_000,
+        })
+        .await
+        .unwrap();
+
+        // Second reconciliation for different period
+        repo.create_reconciliation(&CreateReconciliationRequest {
+            bank_account_id: acct.id.clone(),
+            period_start: "2025-06-01".into(),
+            period_end: "2025-06-30".into(),
+            statement_balance_cents: 75_000,
+        })
+        .await
+        .unwrap();
+
+        let recons = repo.list_reconciliations().await.unwrap();
+        assert_eq!(recons.len(), 2);
+    }
+}

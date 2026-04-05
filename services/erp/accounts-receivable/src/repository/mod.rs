@@ -218,8 +218,8 @@ impl ArRepo {
                 .bind(&input.invoice_id)
                 .execute(&mut *tx)
                 .await?;
-        } else if invoice.status != "sent" && invoice.status != "partial" {
-            // Mark as partial if not already sent/partial
+        } else if invoice.status == "sent" {
+            // Mark as partial when still in sent status
             sqlx::query("UPDATE ar_invoices SET status = 'partial' WHERE id = ?")
                 .bind(&input.invoice_id)
                 .execute(&mut *tx)

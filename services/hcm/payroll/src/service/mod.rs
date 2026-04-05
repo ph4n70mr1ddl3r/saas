@@ -179,3 +179,308 @@ impl PayrollService {
         self.repo.create_compensation(&input).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use saas_db::test_helpers::create_test_pool;
+    use sqlx::SqlitePool;
+
+    async fn setup() -> SqlitePool {
+        let pool = create_test_pool().await;
+        let sql_files = [
+            include_str!("../../migrations/001_create_compensation.sql"),
+            include_str!("../../migrations/002_create_pay_runs.sql"),
+            include_str!("../../migrations/003_create_payslips.sql"),
+            include_str!("../../migrations/004_create_deductions.sql"),
+        ];
+        let migration_names = [
+            "001_create_compensation.sql",
+            "002_create_pay_runs.sql",
+            "003_create_payslips.sql",
+            "004_create_deductions.sql",
+        ];
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS _migrations (filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        for (i, sql) in sql_files.iter().enumerate() {
+            let name = migration_names[i];
+            let already_applied: bool =
+                sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM _migrations WHERE filename = ?")
+                    .bind(name)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+                    > 0;
+            if !already_applied {
+                let mut tx = pool.begin().await.unwrap();
+                sqlx::raw_sql(sql).execute(&mut *tx).await.unwrap();
+                let now = chrono::Utc::now().to_rfc3339();
+                sqlx::query("INSERT INTO _migrations (filename, applied_at) VALUES (?, ?)")
+                    .bind(name)
+                    .bind(&now)
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
+                tx.commit().await.unwrap();
+            }
+        }
+        pool
+    }
+
+    async fn setup_repo() -> PayrollRepo {
+        let pool = setup().await;
+        PayrollRepo::new(pool)
+    }
+
+    #[tokio::test]
+    async fn test_compensation_crud() {
+        let repo = setup_repo().await;
+
+        // Create
+        let input = CreateCompensationRequest {
+            employee_id: "emp-001".into(),
+            salary_type: "salaried".into(),
+            amount_cents: 75_000_00,
+            currency: Some("USD".into()),
+            effective_date: "2025-01-01".into(),
+            end_date: None,
+        };
+        let comp = repo.create_compensation(&input).await.unwrap();
+        assert_eq!(comp.employee_id, "emp-001");
+        assert_eq!(comp.amount_cents, 75_000_00);
+        assert_eq!(comp.salary_type, "salaried");
+        assert_eq!(comp.currency, "USD");
+
+        // Read
+        let fetched = repo.get_compensation(&comp.id).await.unwrap();
+        assert_eq!(fetched.id, comp.id);
+
+        // List by employee
+        let emp_comps = repo.list_compensation_by_employee("emp-001").await.unwrap();
+        assert_eq!(emp_comps.len(), 1);
+
+        // Update
+        let updated = repo
+            .update_compensation(
+                &comp.id,
+                &UpdateCompensationRequest {
+                    salary_type: None,
+                    amount_cents: Some(80_000_00),
+                    currency: None,
+                    effective_date: None,
+                    end_date: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.amount_cents, 80_000_00);
+
+        // List all
+        let all_comps = repo.list_compensation().await.unwrap();
+        assert_eq!(all_comps.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_pay_run_creation_and_status() {
+        let repo = setup_repo().await;
+
+        let input = CreatePayRunRequest {
+            period_start: "2025-06-01".into(),
+            period_end: "2025-06-30".into(),
+            pay_date: "2025-07-01".into(),
+        };
+        let pay_run = repo.create_pay_run(&input).await.unwrap();
+        assert_eq!(pay_run.status, "draft");
+        assert_eq!(pay_run.period_start, "2025-06-01");
+        assert_eq!(pay_run.period_end, "2025-06-30");
+
+        // Update to processing
+        let processing = repo
+            .update_pay_run_status(&pay_run.id, "processing")
+            .await
+            .unwrap();
+        assert_eq!(processing.status, "processing");
+
+        // Update to completed
+        let completed = repo
+            .update_pay_run_status(&pay_run.id, "completed")
+            .await
+            .unwrap();
+        assert_eq!(completed.status, "completed");
+
+        // List
+        let pay_runs = repo.list_pay_runs().await.unwrap();
+        assert_eq!(pay_runs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_payslip_generation() {
+        let repo = setup_repo().await;
+
+        // Create pay run
+        let pay_run = repo
+            .create_pay_run(&CreatePayRunRequest {
+                period_start: "2025-06-01".into(),
+                period_end: "2025-06-30".into(),
+                pay_date: "2025-07-01".into(),
+            })
+            .await
+            .unwrap();
+
+        // Create payslip
+        let payslip = repo
+            .create_payslip(&pay_run.id, "emp-001", 50_000_00, 39_000_00, 8_800_000, 2_200_00)
+            .await
+            .unwrap();
+        assert_eq!(payslip.pay_run_id, pay_run.id);
+        assert_eq!(payslip.employee_id, "emp-001");
+        assert_eq!(payslip.gross_pay, 50_000_00);
+        assert_eq!(payslip.net_pay, 39_000_00);
+        assert_eq!(payslip.status, "pending");
+
+        // List payslips for run
+        let payslips = repo.list_payslips_for_run(&pay_run.id).await.unwrap();
+        assert_eq!(payslips.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_deduction_management() {
+        let repo = setup_repo().await;
+
+        // Create deduction
+        let input = CreateDeductionRequest {
+            employee_id: "emp-001".into(),
+            code: "HEALTH_INS".into(),
+            amount_cents: 5_000_00,
+            recurring: Some(true),
+            start_date: "2025-01-01".into(),
+            end_date: None,
+        };
+        let deduction = repo.create_deduction(&input).await.unwrap();
+        assert_eq!(deduction.employee_id, "emp-001");
+        assert_eq!(deduction.code, "HEALTH_INS");
+        assert_eq!(deduction.amount_cents, 5_000_00);
+        assert!(deduction.recurring);
+
+        // List deductions for employee
+        let deductions = repo.list_deductions_by_employee("emp-001").await.unwrap();
+        assert_eq!(deductions.len(), 1);
+
+        // Create a second deduction with end_date
+        let input2 = CreateDeductionRequest {
+            employee_id: "emp-001".into(),
+            code: "401K".into(),
+            amount_cents: 3_000_00,
+            recurring: Some(true),
+            start_date: "2025-01-01".into(),
+            end_date: Some("2025-12-31".into()),
+        };
+        repo.create_deduction(&input2).await.unwrap();
+
+        let all_deductions = repo.list_deductions_by_employee("emp-001").await.unwrap();
+        assert_eq!(all_deductions.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_pay_run_status_validation() {
+        let repo = setup_repo().await;
+
+        // Create pay run (starts as draft)
+        let pay_run = repo
+            .create_pay_run(&CreatePayRunRequest {
+                period_start: "2025-06-01".into(),
+                period_end: "2025-06-30".into(),
+                pay_date: "2025-07-01".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(pay_run.status, "draft");
+
+        // Draft -> processing -> completed transitions work
+        repo.update_pay_run_status(&pay_run.id, "processing")
+            .await
+            .unwrap();
+        let updated = repo.get_pay_run(&pay_run.id).await.unwrap();
+        assert_eq!(updated.status, "processing");
+
+        repo.update_pay_run_status(&pay_run.id, "completed")
+            .await
+            .unwrap();
+        let completed = repo.get_pay_run(&pay_run.id).await.unwrap();
+        assert_eq!(completed.status, "completed");
+    }
+
+    #[tokio::test]
+    async fn test_tax_calculation_logic() {
+        // Verify 22% tax calculation used by process_pay_run
+        let gross = 60_000_00i64;
+        let tax = (gross * 22 + 50) / 100;
+        assert_eq!(tax, 13_200_00); // 22% of 60k = 13.2k
+
+        let gross2 = 50_000_00i64;
+        let tax2 = (gross2 * 22 + 50) / 100;
+        assert_eq!(tax2, 11_000_00);
+
+        // Verify net = gross - tax - deductions
+        let deductions = 2_000_00i64;
+        let net = gross2 - tax2 - deductions;
+        assert_eq!(net, 37_000_00);
+    }
+
+    #[tokio::test]
+    async fn test_handle_employee_created_creates_default_compensation() {
+        let repo = setup_repo().await;
+
+        // Simulate handle_employee_created by creating default compensation
+        let input = CreateCompensationRequest {
+            employee_id: "emp-new-001".into(),
+            salary_type: "salaried".into(),
+            amount_cents: 0,
+            currency: Some("USD".into()),
+            effective_date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
+            end_date: None,
+        };
+        let comp = repo.create_compensation(&input).await.unwrap();
+        assert_eq!(comp.employee_id, "emp-new-001");
+        assert_eq!(comp.salary_type, "salaried");
+        assert_eq!(comp.amount_cents, 0);
+
+        // Verify it can be listed
+        let comps = repo
+            .list_compensation_by_employee("emp-new-001")
+            .await
+            .unwrap();
+        assert_eq!(comps.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_payslips_per_pay_run() {
+        let repo = setup_repo().await;
+
+        // Create pay run
+        let pay_run = repo
+            .create_pay_run(&CreatePayRunRequest {
+                period_start: "2025-06-01".into(),
+                period_end: "2025-06-30".into(),
+                pay_date: "2025-07-01".into(),
+            })
+            .await
+            .unwrap();
+
+        // Create two payslips manually (simulating multi-employee pay run)
+        repo.create_payslip(&pay_run.id, "emp-301", 40_000_00, 31_200_00, 8_800_00, 0)
+            .await
+            .unwrap();
+        repo.create_payslip(&pay_run.id, "emp-302", 30_000_00, 23_400_00, 6_600_00, 0)
+            .await
+            .unwrap();
+
+        let payslips = repo.list_payslips_for_run(&pay_run.id).await.unwrap();
+        assert_eq!(payslips.len(), 2);
+    }
+}

@@ -465,4 +465,26 @@ impl LedgerRepo {
         .await?;
         Ok(rows)
     }
+
+    /// Find an account by its code. Used for auto-JE creation from cross-domain events.
+    pub async fn find_account_by_code(&self, code: &str) -> AppResult<Account> {
+        sqlx::query_as::<_, Account>(
+            "SELECT id, code, name, account_type, parent_id, is_active, created_at FROM accounts WHERE code = ? LIMIT 1",
+        )
+        .bind(code)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Account with code '{}' not found", code)))
+    }
+
+    /// Find the first active account of a given type (async).
+    pub async fn find_account_by_type_async(&self, account_type: &str) -> AppResult<Account> {
+        sqlx::query_as::<_, Account>(
+            "SELECT id, code, name, account_type, parent_id, is_active, created_at FROM accounts WHERE account_type = ? AND is_active = 1 ORDER BY code LIMIT 1",
+        )
+        .bind(account_type)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("No active '{}' account found", account_type)))
+    }
 }

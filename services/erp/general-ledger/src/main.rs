@@ -32,7 +32,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app_state = routes::AppState::new(pool.clone(), bus.clone());
 
-    events::register(&bus, &app_state).await?;
+    events::register(&bus, &app_state.service).await?;
 
     let cors_origin =
         env::var("CORS_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".to_string());
