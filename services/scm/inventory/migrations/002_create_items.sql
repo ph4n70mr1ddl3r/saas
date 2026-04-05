@@ -1,0 +1,1 @@
+CREATE TABLE items (id TEXT PRIMARY KEY, sku TEXT NOT NULL UNIQUE, name TEXT NOT NULL, description TEXT, unit_of_measure TEXT NOT NULL DEFAULT 'EA', item_type TEXT NOT NULL CHECK(item_type IN ('finished','raw_material','component')), is_active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT (datetime('now')));

@@ -1,0 +1,1 @@
+CREATE TABLE returns (id TEXT PRIMARY KEY, order_id TEXT NOT NULL REFERENCES sales_orders(id), order_line_id TEXT NOT NULL REFERENCES order_lines(id), quantity INTEGER NOT NULL, reason TEXT, status TEXT NOT NULL DEFAULT 'requested' CHECK(status IN ('requested','approved','received','rejected')), refund_amount_cents INTEGER, created_at TEXT NOT NULL DEFAULT (datetime('now')));

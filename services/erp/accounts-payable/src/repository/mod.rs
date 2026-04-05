@@ -1,0 +1,187 @@
+use sqlx::SqlitePool;
+use saas_common::error::{AppError, AppResult};
+use crate::models::*;
+
+#[derive(Clone)]
+pub struct ApRepo {
+    pool: SqlitePool,
+}
+
+impl ApRepo {
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+
+    // --- Vendors ---
+
+    pub async fn list_vendors(&self) -> AppResult<Vec<Vendor>> {
+        let rows = sqlx::query_as::<_, Vendor>(
+            "SELECT id, name, email, phone, address, is_active, created_at FROM vendors ORDER BY name",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn get_vendor(&self, id: &str) -> AppResult<Vendor> {
+        sqlx::query_as::<_, Vendor>(
+            "SELECT id, name, email, phone, address, is_active, created_at FROM vendors WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Vendor '{}' not found", id)))
+    }
+
+    pub async fn create_vendor(&self, input: &CreateVendorRequest) -> AppResult<Vendor> {
+        let id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO vendors (id, name, email, phone, address) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(&input.name)
+        .bind(&input.email)
+        .bind(&input.phone)
+        .bind(&input.address)
+        .execute(&self.pool)
+        .await?;
+        self.get_vendor(&id).await
+    }
+
+    pub async fn update_vendor(&self, id: &str, input: &UpdateVendorRequest) -> AppResult<Vendor> {
+        let current = self.get_vendor(id).await?;
+        let name = input.name.as_deref().unwrap_or(&current.name);
+        let email = input.email.as_deref().or(current.email.as_deref());
+        let phone = input.phone.as_deref().or(current.phone.as_deref());
+        let address = input.address.as_deref().or(current.address.as_deref());
+        let is_active = input.is_active.map(|b| if b { 1 } else { 0 }).unwrap_or(current.is_active);
+
+        sqlx::query(
+            "UPDATE vendors SET name = ?, email = ?, phone = ?, address = ?, is_active = ? WHERE id = ?",
+        )
+        .bind(name)
+        .bind(email)
+        .bind(phone)
+        .bind(address)
+        .bind(is_active)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        self.get_vendor(id).await
+    }
+
+    // --- AP Invoices ---
+
+    pub async fn list_invoices(&self) -> AppResult<Vec<ApInvoice>> {
+        let rows = sqlx::query_as::<_, ApInvoice>(
+            "SELECT id, vendor_id, invoice_number, invoice_date, due_date, total_cents, status, created_at FROM ap_invoices ORDER BY created_at DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn get_invoice(&self, id: &str) -> AppResult<ApInvoice> {
+        sqlx::query_as::<_, ApInvoice>(
+            "SELECT id, vendor_id, invoice_number, invoice_date, due_date, total_cents, status, created_at FROM ap_invoices WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("AP Invoice '{}' not found", id)))
+    }
+
+    pub async fn get_invoice_lines(&self, invoice_id: &str) -> AppResult<Vec<ApInvoiceLine>> {
+        let rows = sqlx::query_as::<_, ApInvoiceLine>(
+            "SELECT id, invoice_id, description, account_code, amount_cents FROM ap_invoice_lines WHERE invoice_id = ?",
+        )
+        .bind(invoice_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn create_invoice(&self, input: &CreateApInvoiceRequest) -> AppResult<ApInvoice> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let total_cents: i64 = input.lines.iter().map(|l| l.amount_cents).sum();
+
+        sqlx::query(
+            "INSERT INTO ap_invoices (id, vendor_id, invoice_number, invoice_date, due_date, total_cents) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(&input.vendor_id)
+        .bind(&input.invoice_number)
+        .bind(&input.invoice_date)
+        .bind(&input.due_date)
+        .bind(total_cents)
+        .execute(&self.pool)
+        .await?;
+
+        for line in &input.lines {
+            let line_id = uuid::Uuid::new_v4().to_string();
+            sqlx::query(
+                "INSERT INTO ap_invoice_lines (id, invoice_id, description, account_code, amount_cents) VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(&line_id)
+            .bind(&id)
+            .bind(&line.description)
+            .bind(&line.account_code)
+            .bind(line.amount_cents)
+            .execute(&self.pool)
+            .await?;
+        }
+
+        self.get_invoice(&id).await
+    }
+
+    pub async fn approve_invoice(&self, id: &str) -> AppResult<ApInvoice> {
+        sqlx::query("UPDATE ap_invoices SET status = 'approved' WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        self.get_invoice(id).await
+    }
+
+    // --- Payments ---
+
+    pub async fn list_payments(&self) -> AppResult<Vec<Payment>> {
+        let rows = sqlx::query_as::<_, Payment>(
+            "SELECT id, invoice_id, vendor_id, amount_cents, payment_date, method, reference, created_at FROM payments ORDER BY created_at DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn create_payment(&self, input: &CreatePaymentRequest) -> AppResult<Payment> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let method = input.method.as_deref().unwrap_or("wire");
+
+        sqlx::query(
+            "INSERT INTO payments (id, invoice_id, vendor_id, amount_cents, payment_date, method, reference) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(&input.invoice_id)
+        .bind(&input.vendor_id)
+        .bind(input.amount_cents)
+        .bind(&input.payment_date)
+        .bind(method)
+        .bind(&input.reference)
+        .execute(&self.pool)
+        .await?;
+
+        // Update invoice status to paid
+        sqlx::query("UPDATE ap_invoices SET status = 'paid' WHERE id = ?")
+            .bind(&input.invoice_id)
+            .execute(&self.pool)
+            .await?;
+
+        sqlx::query_as::<_, Payment>(
+            "SELECT id, invoice_id, vendor_id, amount_cents, payment_date, method, reference, created_at FROM payments WHERE id = ?",
+        )
+        .bind(&id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| e.into())
+    }
+}

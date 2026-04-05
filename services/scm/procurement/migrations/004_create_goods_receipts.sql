@@ -1,0 +1,1 @@
+CREATE TABLE goods_receipts (id TEXT PRIMARY KEY, po_id TEXT NOT NULL REFERENCES purchase_orders(id), po_line_id TEXT NOT NULL REFERENCES po_lines(id), quantity_received INTEGER NOT NULL, received_date TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')));

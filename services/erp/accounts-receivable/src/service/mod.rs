@@ -1,0 +1,89 @@
+use sqlx::SqlitePool;
+use saas_nats_bus::NatsBus;
+use saas_common::error::{AppError, AppResult};
+use crate::models::*;
+use crate::repository::ArRepo;
+
+#[derive(Clone)]
+pub struct ArService {
+    repo: ArRepo,
+    bus: NatsBus,
+}
+
+impl ArService {
+    pub fn new(pool: SqlitePool, bus: NatsBus) -> Self {
+        Self {
+            repo: ArRepo::new(pool),
+            bus,
+        }
+    }
+
+    // --- Customers ---
+
+    pub async fn list_customers(&self) -> AppResult<Vec<Customer>> {
+        self.repo.list_customers().await
+    }
+
+    pub async fn get_customer(&self, id: &str) -> AppResult<Customer> {
+        self.repo.get_customer(id).await
+    }
+
+    pub async fn create_customer(&self, input: &CreateCustomerRequest) -> AppResult<Customer> {
+        self.repo.create_customer(input).await
+    }
+
+    pub async fn update_customer(&self, id: &str, input: &UpdateCustomerRequest) -> AppResult<Customer> {
+        self.repo.get_customer(id).await?;
+        self.repo.update_customer(id, input).await
+    }
+
+    // --- Invoices ---
+
+    pub async fn list_invoices(&self) -> AppResult<Vec<ArInvoice>> {
+        self.repo.list_invoices().await
+    }
+
+    pub async fn get_invoice(&self, id: &str) -> AppResult<ArInvoiceWithLines> {
+        let invoice = self.repo.get_invoice(id).await?;
+        let lines = self.repo.get_invoice_lines(id).await?;
+        Ok(ArInvoiceWithLines { invoice, lines })
+    }
+
+    pub async fn create_invoice(&self, input: &CreateArInvoiceRequest) -> AppResult<ArInvoiceWithLines> {
+        // Validate customer exists
+        self.repo.get_customer(&input.customer_id).await?;
+
+        let invoice = self.repo.create_invoice(input).await?;
+
+        // Update status to sent (draft -> sent on creation)
+        let invoice = self.repo.mark_invoice_sent(&invoice.id).await?;
+        let lines = self.repo.get_invoice_lines(&invoice.id).await?;
+
+        // Publish erp.ar.invoice.created event
+        let event = saas_proto::events::CustomerInvoiceCreated {
+            invoice_id: invoice.id.clone(),
+            customer_id: invoice.customer_id.clone(),
+            total_cents: invoice.total_cents,
+        };
+        if let Err(e) = self.bus.publish("erp.ar.invoice.created", &event).await {
+            tracing::error!("Failed to publish AR invoice created event: {}", e);
+        }
+
+        Ok(ArInvoiceWithLines { invoice, lines })
+    }
+
+    // --- Receipts ---
+
+    pub async fn list_receipts(&self) -> AppResult<Vec<Receipt>> {
+        self.repo.list_receipts().await
+    }
+
+    pub async fn create_receipt(&self, input: &CreateReceiptRequest) -> AppResult<Receipt> {
+        // Validate invoice exists and is in sent status
+        let invoice = self.repo.get_invoice(&input.invoice_id).await?;
+        if invoice.status != "sent" {
+            return Err(AppError::Validation("Can only receipt against sent invoices".into()));
+        }
+        self.repo.create_receipt(input).await
+    }
+}

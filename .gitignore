@@ -1,0 +1,40 @@
+# Build
+/target/
+**/*.rs.bk
+
+# Runtime
+*.db
+*.db-shm
+*.db-wal
+
+# Data directory
+data/
+
+# Environment
+.env
+.env.local
+.env.production
+.env.staging
+
+# Secrets and certificates
+*.pem
+*.key
+*.crt
+*.p12
+*.jks
+
+# Docker overrides
+docker-compose.override.yml
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

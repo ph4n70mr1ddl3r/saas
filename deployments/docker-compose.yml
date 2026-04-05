@@ -1,0 +1,431 @@
+version: "3.9"
+
+networks:
+  frontend:
+  backend:
+
+services:
+  nats:
+    image: nats:2-alpine
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    command: ["--jetstream", "--store_dir", "/data"]
+    volumes:
+      - nats-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
+      interval: 5s
+      retries: 5
+    networks:
+      - backend
+
+  # === Foundation ===
+  iam:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.service
+      args:
+        SERVICE_PATH: services/iam
+    environment:
+      DATABASE_URL: sqlite:/data/iam.db
+      NATS_URL: nats://nats:4222
+      SERVICE_NAME: saas-iam
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
+      PORT: "8001"
+    volumes:
+      - iam-data:/data
+    depends_on:
+      nats:
+        condition: service_healthy
+    networks:
+      - backend
+    restart: unless-stopped
+
+  config-svc:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.service
+      args:
+        SERVICE_PATH: services/config-svc
+    environment:
+      DATABASE_URL: sqlite:/data/config.db
+      NATS_URL: nats://nats:4222
+      SERVICE_NAME: saas-config
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
+      PORT: "8002"
+    volumes:
+      - config-data:/data
+    depends_on:
+      nats:
+        condition: service_healthy
+    networks:
+      - backend
+    restart: unless-stopped
+
+  # === HCM Module ===
+  employee:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.service
+      args:
+        SERVICE_PATH: services/hcm/employee
+    environment:
+      DATABASE_URL: sqlite:/data/employee.db
+      NATS_URL: nats://nats:4222
+      SERVICE_NAME: saas-hcm-employee
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
+      PORT: "8010"
+    volumes:
+      - employee-data:/data
+    depends_on:
+      nats:
+        condition: service_healthy
+    networks:
+      - backend
+    restart: unless-stopped
+
+  payroll:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.service
+      args:
+        SERVICE_PATH: services/hcm/payroll
+    environment:
+      DATABASE_URL: sqlite:/data/payroll.db
+      NATS_URL: nats://nats:4222
+      SERVICE_NAME: saas-hcm-payroll
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
+      PORT: "8011"
+    volumes:
+      - payroll-data:/data
+    depends_on:
+      nats:
+        condition: service_healthy
+    networks:
+      - backend
+    restart: unless-stopped
+
+  benefits:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.service
+      args:
+        SERVICE_PATH: services/hcm/benefits
+    environment:
+      DATABASE_URL: sqlite:/data/benefits.db
+      NATS_URL: nats://nats:4222
+      SERVICE_NAME: saas-hcm-benefits
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
+      PORT: "8012"
+    volumes:
+      - benefits-data:/data
+    depends_on:
+      nats:
+        condition: service_healthy
+    networks:
+      - backend
+    restart: unless-stopped
+
+  time-labor:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.service
+      args:
+        SERVICE_PATH: services/hcm/time-labor
+    environment:
+      DATABASE_URL: sqlite:/data/time_labor.db
+      NATS_URL: nats://nats:4222
+      SERVICE_NAME: saas-hcm-time-labor
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
+      PORT: "8013"
+    volumes:
+      - time-labor-data:/data
+    depends_on:
+      nats:
+        condition: service_healthy
+    networks:
+      - backend
+    restart: unless-stopped
+
+  recruiting:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.service
+      args:
+        SERVICE_PATH: services/hcm/recruiting
+    environment:
+      DATABASE_URL: sqlite:/data/recruiting.db
+      NATS_URL: nats://nats:4222
+      SERVICE_NAME: saas-hcm-recruiting
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
+      PORT: "8014"
+    volumes:
+      - recruiting-data:/data
+    depends_on:
+      nats:
+        condition: service_healthy
+    networks:
+      - backend
+    restart: unless-stopped
+
+  # === ERP Module ===
+  general-ledger:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.service
+      args:
+        SERVICE_PATH: services/erp/general-ledger
+    environment:
+      DATABASE_URL: sqlite:/data/gl.db
+      NATS_URL: nats://nats:4222
+      SERVICE_NAME: saas-erp-general-ledger
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
+      PORT: "8020"
+    volumes:
+      - gl-data:/data
+    depends_on:
+      nats:
+        condition: service_healthy
+    networks:
+      - backend
+    restart: unless-stopped
+
+  accounts-payable:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.service
+      args:
+        SERVICE_PATH: services/erp/accounts-payable
+    environment:
+      DATABASE_URL: sqlite:/data/ap.db
+      NATS_URL: nats://nats:4222
+      SERVICE_NAME: saas-erp-accounts-payable
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
+      PORT: "8021"
+    volumes:
+      - ap-data:/data
+    depends_on:
+      nats:
+        condition: service_healthy
+    networks:
+      - backend
+    restart: unless-stopped
+
+  accounts-receivable:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.service
+      args:
+        SERVICE_PATH: services/erp/accounts-receivable
+    environment:
+      DATABASE_URL: sqlite:/data/ar.db
+      NATS_URL: nats://nats:4222
+      SERVICE_NAME: saas-erp-accounts-receivable
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
+      PORT: "8022"
+    volumes:
+      - ar-data:/data
+    depends_on:
+      nats:
+        condition: service_healthy
+    networks:
+      - backend
+    restart: unless-stopped
+
+  fixed-assets:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.service
+      args:
+        SERVICE_PATH: services/erp/fixed-assets
+    environment:
+      DATABASE_URL: sqlite:/data/assets.db
+      NATS_URL: nats://nats:4222
+      SERVICE_NAME: saas-erp-fixed-assets
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
+      PORT: "8023"
+    volumes:
+      - assets-data:/data
+    depends_on:
+      nats:
+        condition: service_healthy
+    networks:
+      - backend
+    restart: unless-stopped
+
+  cash-management:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.service
+      args:
+        SERVICE_PATH: services/erp/cash-management
+    environment:
+      DATABASE_URL: sqlite:/data/cash.db
+      NATS_URL: nats://nats:4222
+      SERVICE_NAME: saas-erp-cash-management
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
+      PORT: "8024"
+    volumes:
+      - cash-data:/data
+    depends_on:
+      nats:
+        condition: service_healthy
+    networks:
+      - backend
+    restart: unless-stopped
+
+  # === SCM Module ===
+  inventory:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.service
+      args:
+        SERVICE_PATH: services/scm/inventory
+    environment:
+      DATABASE_URL: sqlite:/data/inventory.db
+      NATS_URL: nats://nats:4222
+      SERVICE_NAME: saas-scm-inventory
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
+      PORT: "8030"
+    volumes:
+      - inventory-data:/data
+    depends_on:
+      nats:
+        condition: service_healthy
+    networks:
+      - backend
+    restart: unless-stopped
+
+  procurement:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.service
+      args:
+        SERVICE_PATH: services/scm/procurement
+    environment:
+      DATABASE_URL: sqlite:/data/procurement.db
+      NATS_URL: nats://nats:4222
+      SERVICE_NAME: saas-scm-procurement
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
+      PORT: "8031"
+    volumes:
+      - procurement-data:/data
+    depends_on:
+      nats:
+        condition: service_healthy
+    networks:
+      - backend
+    restart: unless-stopped
+
+  order-management:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.service
+      args:
+        SERVICE_PATH: services/scm/order-management
+    environment:
+      DATABASE_URL: sqlite:/data/orders.db
+      NATS_URL: nats://nats:4222
+      SERVICE_NAME: saas-scm-order-management
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
+      PORT: "8032"
+    volumes:
+      - orders-data:/data
+    depends_on:
+      nats:
+        condition: service_healthy
+    networks:
+      - backend
+    restart: unless-stopped
+
+  manufacturing:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.service
+      args:
+        SERVICE_PATH: services/scm/manufacturing
+    environment:
+      DATABASE_URL: sqlite:/data/manufacturing.db
+      NATS_URL: nats://nats:4222
+      SERVICE_NAME: saas-scm-manufacturing
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
+      PORT: "8033"
+    volumes:
+      - manufacturing-data:/data
+    depends_on:
+      nats:
+        condition: service_healthy
+    networks:
+      - backend
+    restart: unless-stopped
+
+  # === Gateway (front door) ===
+  gateway:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.service
+      args:
+        SERVICE_PATH: services/gateway
+    environment:
+      NATS_URL: nats://nats:4222
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
+      PORT: "8000"
+      IAM_URL: http://iam:8001
+      CONFIG_URL: http://config-svc:8002
+      EMPLOYEE_URL: http://employee:8010
+      PAYROLL_URL: http://payroll:8011
+      BENEFITS_URL: http://benefits:8012
+      TIME_LABOR_URL: http://time-labor:8013
+      RECRUITING_URL: http://recruiting:8014
+      GL_URL: http://general-ledger:8020
+      AP_URL: http://accounts-payable:8021
+      AR_URL: http://accounts-receivable:8022
+      ASSETS_URL: http://fixed-assets:8023
+      CASH_URL: http://cash-management:8024
+      INVENTORY_URL: http://inventory:8030
+      PROCUREMENT_URL: http://procurement:8031
+      ORDERS_URL: http://order-management:8032
+      MANUFACTURING_URL: http://manufacturing:8033
+    ports:
+      - "8000:8000"
+    depends_on:
+      - iam
+      - config-svc
+      - employee
+      - payroll
+      - benefits
+      - time-labor
+      - recruiting
+      - general-ledger
+      - accounts-payable
+      - accounts-receivable
+      - fixed-assets
+      - cash-management
+      - inventory
+      - procurement
+      - order-management
+      - manufacturing
+    networks:
+      - frontend
+      - backend
+    restart: unless-stopped
+
+volumes:
+  nats-data:
+  iam-data:
+  config-data:
+  employee-data:
+  payroll-data:
+  benefits-data:
+  time-labor-data:
+  recruiting-data:
+  gl-data:
+  ap-data:
+  ar-data:
+  assets-data:
+  cash-data:
+  inventory-data:
+  procurement-data:
+  orders-data:
+  manufacturing-data:

@@ -1,0 +1,1 @@
+CREATE TABLE work_orders (id TEXT PRIMARY KEY, wo_number TEXT NOT NULL UNIQUE, item_id TEXT NOT NULL, quantity INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'planned' CHECK(status IN ('planned','in_progress','completed','cancelled')), planned_start TEXT, planned_end TEXT, actual_start TEXT, actual_end TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')));

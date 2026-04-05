@@ -1,0 +1,1 @@
+CREATE TABLE fulfillments (id TEXT PRIMARY KEY, order_id TEXT NOT NULL REFERENCES sales_orders(id), order_line_id TEXT NOT NULL REFERENCES order_lines(id), quantity INTEGER NOT NULL, warehouse_id TEXT NOT NULL, shipped_date TEXT, tracking_number TEXT, status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','picked','packed','shipped','delivered')));

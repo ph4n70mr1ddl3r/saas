@@ -1,0 +1,17 @@
+[package]
+name = "saas-nats-bus"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+saas-common = { workspace = true }
+saas-proto = { workspace = true }
+async-nats = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+futures = "0.3"

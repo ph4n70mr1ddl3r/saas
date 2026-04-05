@@ -1,0 +1,1 @@
+CREATE TABLE routing_steps (id TEXT PRIMARY KEY, work_order_id TEXT NOT NULL REFERENCES work_orders(id), step_number INTEGER NOT NULL, description TEXT, status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','in_progress','completed')), UNIQUE(work_order_id, step_number));

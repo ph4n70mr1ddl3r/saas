@@ -1,0 +1,35 @@
+[package]
+name = "saas-frontend"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+ssr = ["leptos/ssr", "leptos_router/ssr", "leptos_meta/ssr"]
+hydrate = ["leptos/hydrate"]
+
+[dependencies]
+saas-proto = { workspace = true }
+leptos = { workspace = true }
+leptos_router = { workspace = true }
+leptos_meta = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+cfg-if = "1"
+console_error_panic_hook = "0.1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+gloo = "0.11"
+web-sys = { version = "0.3", features = ["Window", "Storage", "HtmlInputElement"] }
+wasm-bindgen = "0.2"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+leptos_axum = { workspace = true }
+reqwest = { workspace = true, features = ["json"] }
+simple_logger = "4"
+log = "0.4"

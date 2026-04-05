@@ -1,0 +1,24 @@
+[package]
+name = "saas-config"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "saas-config"
+path = "src/main.rs"
+
+[dependencies]
+saas-common = { workspace = true }
+saas-auth-core = { workspace = true }
+saas-db = { workspace = true }
+saas-nats-bus = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+sqlx = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }

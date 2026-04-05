@@ -1,0 +1,1 @@
+CREATE TABLE stock_levels (id TEXT PRIMARY KEY, item_id TEXT NOT NULL REFERENCES items(id), warehouse_id TEXT NOT NULL REFERENCES warehouses(id), quantity_on_hand INTEGER NOT NULL DEFAULT 0, quantity_reserved INTEGER NOT NULL DEFAULT 0, quantity_available INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL DEFAULT (datetime('now')), UNIQUE(item_id, warehouse_id));

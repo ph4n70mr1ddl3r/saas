@@ -1,0 +1,1 @@
+CREATE TABLE po_lines (id TEXT PRIMARY KEY, po_id TEXT NOT NULL REFERENCES purchase_orders(id), line_number INTEGER NOT NULL, item_id TEXT NOT NULL, quantity INTEGER NOT NULL, unit_price_cents INTEGER NOT NULL, line_total_cents INTEGER NOT NULL, quantity_received INTEGER NOT NULL DEFAULT 0, UNIQUE(po_id, line_number));

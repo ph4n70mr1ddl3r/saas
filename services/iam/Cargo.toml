@@ -1,0 +1,27 @@
+[package]
+name = "saas-iam"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "saas-iam"
+path = "src/main.rs"
+
+[dependencies]
+saas-common = { workspace = true }
+saas-auth-core = { workspace = true }
+saas-db = { workspace = true }
+saas-nats-bus = { workspace = true }
+saas-proto = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+sqlx = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+argon2 = { workspace = true }
+validator = { workspace = true }

@@ -1,0 +1,1 @@
+CREATE TABLE order_lines (id TEXT PRIMARY KEY, order_id TEXT NOT NULL REFERENCES sales_orders(id), line_number INTEGER NOT NULL, item_id TEXT NOT NULL, quantity INTEGER NOT NULL, unit_price_cents INTEGER NOT NULL, line_total_cents INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'open', UNIQUE(order_id, line_number));

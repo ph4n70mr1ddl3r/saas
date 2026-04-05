@@ -1,0 +1,59 @@
+# Multi-stage Dockerfile for Rust microservices
+# Usage: docker build --build-arg SERVICE_PATH=services/iam -t saas-iam .
+
+FROM rust:1.82-bookworm AS builder
+
+ARG SERVICE_PATH
+
+WORKDIR /app
+
+# Copy workspace files
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ ./crates/
+
+# Create dummy main.rs files for all services so we can cache dependencies
+RUN mkdir -p ${SERVICE_PATH}/src && \
+    echo "fn main() {}" > ${SERVICE_PATH}/src/main.rs
+
+# Build dependencies only (cached layer)
+RUN cargo build --release -p $(basename ${SERVICE_PATH} | tr '-' '_') 2>/dev/null || true
+
+# Copy actual service source and migrations
+COPY ${SERVICE_PATH}/ ./${SERVICE_PATH}/
+
+# Touch main.rs to force rebuild of service code
+RUN find ./${SERVICE_PATH}/src -name "*.rs" -exec touch {} +
+
+# Build the actual service
+RUN cargo build --release -p $(basename ${SERVICE_PATH} | tr '-' '_')
+
+# Runtime stage
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user for security
+RUN groupadd -r appuser && useradd -r -g appuser -d /app -s /sbin/nologin appuser
+
+ARG SERVICE_PATH
+
+# Copy only the specific service binary
+RUN BINARY_NAME=$(echo ${SERVICE_PATH} | tr '-' '_' | xargs basename); \
+    echo "Building binary: ${BINARY_NAME}"
+COPY --from=builder /app/target/release/* /usr/local/bin/
+
+WORKDIR /app
+
+# Copy migrations
+COPY --from=builder /app/${SERVICE_PATH}/migrations ./migrations
+
+# Create data directory for SQLite with proper ownership
+RUN mkdir -p /data && chown -R appuser:appuser /data /app
+
+USER appuser
+
+ENV RUST_LOG=info
+
+CMD ["sh", "-c", "exec $(ls /usr/local/bin/ | grep -v '\\.' | head -1)"]
