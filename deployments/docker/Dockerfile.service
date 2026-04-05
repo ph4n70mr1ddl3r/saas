@@ -1,9 +1,10 @@
 # Multi-stage Dockerfile for Rust microservices
 # Usage: docker build --build-arg SERVICE_PATH=services/iam -t saas-iam .
 
-FROM rust:1.85-bookworm AS builder
+FROM rust:bookworm AS builder
 
 ARG SERVICE_PATH
+ARG SERVICE_BINARY
 
 WORKDIR /app
 
@@ -22,8 +23,7 @@ RUN mkdir -p ${SERVICE_PATH}/src && \
     echo "fn main() {}" > ${SERVICE_PATH}/src/main.rs
 
 # Build dependencies only (cached layer)
-RUN BINARY_NAME=saas-$(echo ${SERVICE_PATH} | sed 's|services/||' | tr '/' '-'); \
-    cargo build --release -p ${BINARY_NAME} 2>/dev/null || true
+RUN cargo build --release -p ${SERVICE_BINARY} 2>/dev/null || true
 
 # Copy actual service source and migrations
 COPY ${SERVICE_PATH}/ ./${SERVICE_PATH}/
@@ -32,9 +32,8 @@ COPY ${SERVICE_PATH}/ ./${SERVICE_PATH}/
 RUN find ./${SERVICE_PATH}/src -name "*.rs" -exec touch {} +
 
 # Build the actual service
-RUN BINARY_NAME=saas-$(echo ${SERVICE_PATH} | sed 's|services/||' | tr '/' '-'); \
-    cargo build --release -p ${BINARY_NAME} && \
-    cp /app/target/release/${BINARY_NAME} /app/service_binary
+RUN cargo build --release -p ${SERVICE_BINARY} && \
+    cp /app/target/release/${SERVICE_BINARY} /app/service_binary
 
 # Runtime stage
 FROM debian:bookworm-slim
@@ -52,16 +51,25 @@ ARG SERVICE_PATH
 COPY --from=builder /app/service_binary /usr/local/bin/service_binary
 RUN chmod +x /usr/local/bin/service_binary
 
-WORKDIR /app
+WORKDIR /app/service
 
-# Copy migrations
-COPY --from=builder /app/${SERVICE_PATH}/migrations ./migrations
+# Copy migrations if they exist from the builder stage
+COPY --from=builder /app /tmp/app_root
+RUN if [ -d "/tmp/app_root/${SERVICE_PATH}/migrations" ]; then \
+        cp -r "/tmp/app_root/${SERVICE_PATH}/migrations" ./migrations; \
+    else \
+        mkdir ./migrations; \
+    fi && rm -rf /tmp/app_root
 
-# Create data directory for SQLite with proper ownership
-RUN mkdir -p /data && chown -R appuser:appuser /data /app
+# Ensure data directory exists and is writable by appuser
+RUN mkdir -p ./data && \
+    chown -R appuser:appuser /app && \
+    chmod 775 ./data
 
 USER appuser
 
 ENV RUST_LOG=info
+ENV DATABASE_URL=sqlite:./data/service.db
 
-CMD ["sh", "-c", "exec $(ls /usr/local/bin/ | grep -v '\\.' | head -1)"]
+# Add a small delay to ensure NATS is fully ready to accept connections
+CMD ["sh", "-c", "sleep 5 && exec /usr/local/bin/service_binary"]

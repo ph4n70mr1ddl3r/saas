@@ -14,7 +14,7 @@ services:
     volumes:
       - nats-data:/data
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
+      test: ["CMD", "nc", "-z", "localhost", "4222"]
       interval: 5s
       retries: 5
     networks:
@@ -27,14 +27,12 @@ services:
       dockerfile: deployments/docker/Dockerfile.service
       args:
         SERVICE_PATH: services/iam
+        SERVICE_BINARY: saas-iam
     environment:
-      DATABASE_URL: sqlite:/data/iam.db
       NATS_URL: nats://nats:4222
       SERVICE_NAME: saas-iam
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
       PORT: "8001"
-    volumes:
-      - iam-data:/data
     depends_on:
       nats:
         condition: service_healthy
@@ -48,14 +46,12 @@ services:
       dockerfile: deployments/docker/Dockerfile.service
       args:
         SERVICE_PATH: services/config-svc
+        SERVICE_BINARY: saas-config
     environment:
-      DATABASE_URL: sqlite:/data/config.db
       NATS_URL: nats://nats:4222
       SERVICE_NAME: saas-config
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
       PORT: "8002"
-    volumes:
-      - config-data:/data
     depends_on:
       nats:
         condition: service_healthy
@@ -70,14 +66,12 @@ services:
       dockerfile: deployments/docker/Dockerfile.service
       args:
         SERVICE_PATH: services/hcm/employee
+        SERVICE_BINARY: saas-hcm-employee
     environment:
-      DATABASE_URL: sqlite:/data/employee.db
       NATS_URL: nats://nats:4222
       SERVICE_NAME: saas-hcm-employee
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
       PORT: "8010"
-    volumes:
-      - employee-data:/data
     depends_on:
       nats:
         condition: service_healthy
@@ -91,14 +85,12 @@ services:
       dockerfile: deployments/docker/Dockerfile.service
       args:
         SERVICE_PATH: services/hcm/payroll
+        SERVICE_BINARY: saas-hcm-payroll
     environment:
-      DATABASE_URL: sqlite:/data/payroll.db
       NATS_URL: nats://nats:4222
       SERVICE_NAME: saas-hcm-payroll
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
       PORT: "8011"
-    volumes:
-      - payroll-data:/data
     depends_on:
       nats:
         condition: service_healthy
@@ -112,14 +104,12 @@ services:
       dockerfile: deployments/docker/Dockerfile.service
       args:
         SERVICE_PATH: services/hcm/benefits
+        SERVICE_BINARY: saas-hcm-benefits
     environment:
-      DATABASE_URL: sqlite:/data/benefits.db
       NATS_URL: nats://nats:4222
       SERVICE_NAME: saas-hcm-benefits
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
       PORT: "8012"
-    volumes:
-      - benefits-data:/data
     depends_on:
       nats:
         condition: service_healthy
@@ -133,14 +123,12 @@ services:
       dockerfile: deployments/docker/Dockerfile.service
       args:
         SERVICE_PATH: services/hcm/time-labor
+        SERVICE_BINARY: saas-hcm-time-labor
     environment:
-      DATABASE_URL: sqlite:/data/time_labor.db
       NATS_URL: nats://nats:4222
       SERVICE_NAME: saas-hcm-time-labor
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
       PORT: "8013"
-    volumes:
-      - time-labor-data:/data
     depends_on:
       nats:
         condition: service_healthy
@@ -154,14 +142,12 @@ services:
       dockerfile: deployments/docker/Dockerfile.service
       args:
         SERVICE_PATH: services/hcm/recruiting
+        SERVICE_BINARY: saas-hcm-recruiting
     environment:
-      DATABASE_URL: sqlite:/data/recruiting.db
       NATS_URL: nats://nats:4222
       SERVICE_NAME: saas-hcm-recruiting
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
       PORT: "8014"
-    volumes:
-      - recruiting-data:/data
     depends_on:
       nats:
         condition: service_healthy
@@ -176,14 +162,12 @@ services:
       dockerfile: deployments/docker/Dockerfile.service
       args:
         SERVICE_PATH: services/erp/general-ledger
+        SERVICE_BINARY: saas-erp-general-ledger
     environment:
-      DATABASE_URL: sqlite:/data/gl.db
       NATS_URL: nats://nats:4222
       SERVICE_NAME: saas-erp-general-ledger
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
       PORT: "8020"
-    volumes:
-      - gl-data:/data
     depends_on:
       nats:
         condition: service_healthy
@@ -197,14 +181,12 @@ services:
       dockerfile: deployments/docker/Dockerfile.service
       args:
         SERVICE_PATH: services/erp/accounts-payable
+        SERVICE_BINARY: saas-erp-accounts-payable
     environment:
-      DATABASE_URL: sqlite:/data/ap.db
       NATS_URL: nats://nats:4222
       SERVICE_NAME: saas-erp-accounts-payable
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
       PORT: "8021"
-    volumes:
-      - ap-data:/data
     depends_on:
       nats:
         condition: service_healthy
@@ -218,14 +200,12 @@ services:
       dockerfile: deployments/docker/Dockerfile.service
       args:
         SERVICE_PATH: services/erp/accounts-receivable
+        SERVICE_BINARY: saas-erp-accounts-receivable
     environment:
-      DATABASE_URL: sqlite:/data/ar.db
       NATS_URL: nats://nats:4222
       SERVICE_NAME: saas-erp-accounts-receivable
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
       PORT: "8022"
-    volumes:
-      - ar-data:/data
     depends_on:
       nats:
         condition: service_healthy
@@ -239,14 +219,12 @@ services:
       dockerfile: deployments/docker/Dockerfile.service
       args:
         SERVICE_PATH: services/erp/fixed-assets
+        SERVICE_BINARY: saas-erp-fixed-assets
     environment:
-      DATABASE_URL: sqlite:/data/assets.db
       NATS_URL: nats://nats:4222
       SERVICE_NAME: saas-erp-fixed-assets
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
       PORT: "8023"
-    volumes:
-      - assets-data:/data
     depends_on:
       nats:
         condition: service_healthy
@@ -260,14 +238,12 @@ services:
       dockerfile: deployments/docker/Dockerfile.service
       args:
         SERVICE_PATH: services/erp/cash-management
+        SERVICE_BINARY: saas-erp-cash-management
     environment:
-      DATABASE_URL: sqlite:/data/cash.db
       NATS_URL: nats://nats:4222
       SERVICE_NAME: saas-erp-cash-management
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
       PORT: "8024"
-    volumes:
-      - cash-data:/data
     depends_on:
       nats:
         condition: service_healthy
@@ -282,14 +258,12 @@ services:
       dockerfile: deployments/docker/Dockerfile.service
       args:
         SERVICE_PATH: services/scm/inventory
+        SERVICE_BINARY: saas-scm-inventory
     environment:
-      DATABASE_URL: sqlite:/data/inventory.db
       NATS_URL: nats://nats:4222
       SERVICE_NAME: saas-scm-inventory
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
       PORT: "8030"
-    volumes:
-      - inventory-data:/data
     depends_on:
       nats:
         condition: service_healthy
@@ -303,14 +277,12 @@ services:
       dockerfile: deployments/docker/Dockerfile.service
       args:
         SERVICE_PATH: services/scm/procurement
+        SERVICE_BINARY: saas-scm-procurement
     environment:
-      DATABASE_URL: sqlite:/data/procurement.db
       NATS_URL: nats://nats:4222
       SERVICE_NAME: saas-scm-procurement
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
       PORT: "8031"
-    volumes:
-      - procurement-data:/data
     depends_on:
       nats:
         condition: service_healthy
@@ -324,14 +296,12 @@ services:
       dockerfile: deployments/docker/Dockerfile.service
       args:
         SERVICE_PATH: services/scm/order-management
+        SERVICE_BINARY: saas-scm-order-management
     environment:
-      DATABASE_URL: sqlite:/data/orders.db
       NATS_URL: nats://nats:4222
       SERVICE_NAME: saas-scm-order-management
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
       PORT: "8032"
-    volumes:
-      - orders-data:/data
     depends_on:
       nats:
         condition: service_healthy
@@ -345,14 +315,12 @@ services:
       dockerfile: deployments/docker/Dockerfile.service
       args:
         SERVICE_PATH: services/scm/manufacturing
+        SERVICE_BINARY: saas-scm-manufacturing
     environment:
-      DATABASE_URL: sqlite:/data/manufacturing.db
       NATS_URL: nats://nats:4222
       SERVICE_NAME: saas-scm-manufacturing
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
       PORT: "8033"
-    volumes:
-      - manufacturing-data:/data
     depends_on:
       nats:
         condition: service_healthy
@@ -367,6 +335,7 @@ services:
       dockerfile: deployments/docker/Dockerfile.service
       args:
         SERVICE_PATH: services/gateway
+        SERVICE_BINARY: saas-gateway
     environment:
       NATS_URL: nats://nats:4222
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
@@ -413,19 +382,3 @@ services:
 
 volumes:
   nats-data:
-  iam-data:
-  config-data:
-  employee-data:
-  payroll-data:
-  benefits-data:
-  time-labor-data:
-  recruiting-data:
-  gl-data:
-  ap-data:
-  ar-data:
-  assets-data:
-  cash-data:
-  inventory-data:
-  procurement-data:
-  orders-data:
-  manufacturing-data:

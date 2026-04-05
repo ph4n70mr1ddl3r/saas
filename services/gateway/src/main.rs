@@ -4,8 +4,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
-use tower_http::cors::CorsLayer;
-use tower_http::trace::TraceLayer;
 
 mod proxy;
 mod routes;
@@ -59,19 +57,16 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState {
         service_map: Arc::new(RwLock::new(service_map)),
-        http_client: reqwest::Client::new(),
+        http_client: reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(5))
+            .build()?,
         rate_limiter,
     };
 
-    let cors_origin = env::var("CORS_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".to_string());
     let app = routes::build_router(state)
-        .layer(
-            CorsLayer::new()
-                .allow_origin(axum::http::HeaderValue::from_bytes(cors_origin.as_bytes()).expect("Invalid CORS origin"))
-                .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::PUT, axum::http::Method::DELETE, axum::http::Method::PATCH])
-                .allow_headers([axum::http::header::CONTENT_TYPE, axum::http::header::AUTHORIZATION])
-        )
-        .layer(TraceLayer::new_for_http())
+        .layer(saas_common::middleware::create_cors_layer())
+        .layer(saas_common::middleware::create_trace_layer())
         .into_make_service_with_connect_info::<std::net::SocketAddr>();
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;

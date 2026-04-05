@@ -3,7 +3,6 @@ use reqwest::Client;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::RwLock;
 use crate::proxy;
 use crate::rate_limit;

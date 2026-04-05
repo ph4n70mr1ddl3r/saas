@@ -3,7 +3,6 @@ use saas_common::tracing_setup;
 use saas_db::{pool::create_pool, migrate::run_migrations};
 use saas_nats_bus::NatsBus;
 use std::env;
-use tower_http::cors::CorsLayer;
 
 mod handlers;
 mod models;
@@ -34,24 +33,10 @@ async fn main() -> anyhow::Result<()> {
 
     let bus = NatsBus::connect(&nats_url, "saas-config").await?;
 
-    let cors_origin = env::var("CORS_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".to_string());
     let service = ConfigService::new(pool, bus);
     let app = routes::build_router(AppState { service })
-        .layer(
-            CorsLayer::new()
-                .allow_origin(axum::http::HeaderValue::from_bytes(cors_origin.as_bytes()).expect("Invalid CORS origin"))
-                .allow_methods([
-                    axum::http::Method::GET,
-                    axum::http::Method::POST,
-                    axum::http::Method::PUT,
-                    axum::http::Method::DELETE,
-                    axum::http::Method::PATCH,
-                ])
-                .allow_headers([
-                    axum::http::header::CONTENT_TYPE,
-                    axum::http::header::AUTHORIZATION,
-                ])
-        );
+        .layer(saas_common::middleware::create_cors_layer())
+        .layer(saas_common::middleware::create_trace_layer());
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
     tracing::info!("Config service listening on port {}", port);

@@ -3,7 +3,7 @@ use axum::http::request::Parts;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use crate::jwt::{Claims, decode_token};
+use crate::jwt::decode_token;
 
 pub struct AuthUser {
     pub user_id: String,

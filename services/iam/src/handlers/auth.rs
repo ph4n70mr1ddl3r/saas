@@ -26,7 +26,7 @@ pub async fn refresh(
 
 pub async fn logout(
     _user: AuthUser,
-    State(state): State<AuthState>,
+    State(_state): State<AuthState>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     Ok(Json(ApiResponse::new(serde_json::json!({"message": "Logged out"}))))
 }
