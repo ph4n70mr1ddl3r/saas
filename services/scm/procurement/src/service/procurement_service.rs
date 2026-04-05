@@ -1,27 +1,26 @@
 use sqlx::SqlitePool;
 use saas_nats_bus::NatsBus;
-use saas_common::error::AppResult;
+use saas_common::error::{AppResult, AppError};
 use crate::repository::supplier_repo::SupplierRepo;
 use crate::repository::purchase_order_repo::PurchaseOrderRepo;
-use crate::repository::goods_receipt_repo::GoodsReceiptRepo;
 use crate::models::supplier::*;
 use crate::models::purchase_order::*;
 use validator::Validate;
 
 #[derive(Clone)]
 pub struct ProcurementService {
+    pool: SqlitePool,
     supplier_repo: SupplierRepo,
     po_repo: PurchaseOrderRepo,
-    receipt_repo: GoodsReceiptRepo,
     bus: NatsBus,
 }
 
 impl ProcurementService {
     pub fn new(pool: SqlitePool, bus: NatsBus) -> Self {
         Self {
+            pool: pool.clone(),
             supplier_repo: SupplierRepo::new(pool.clone()),
-            po_repo: PurchaseOrderRepo::new(pool.clone()),
-            receipt_repo: GoodsReceiptRepo::new(pool),
+            po_repo: PurchaseOrderRepo::new(pool),
             bus,
         }
     }
@@ -63,7 +62,7 @@ impl ProcurementService {
     pub async fn submit_purchase_order(&self, id: &str) -> AppResult<PurchaseOrderResponse> {
         let po = self.po_repo.get_by_id(id).await?;
         if po.status != "draft" {
-            return Err(saas_common::error::AppError::Validation("Only draft orders can be submitted".into()));
+            return Err(AppError::Validation("Only draft orders can be submitted".into()));
         }
         self.po_repo.update_status(id, "submitted").await?;
         self.po_repo.get_by_id(id).await
@@ -72,7 +71,7 @@ impl ProcurementService {
     pub async fn approve_purchase_order(&self, id: &str) -> AppResult<PurchaseOrderResponse> {
         let po = self.po_repo.get_by_id(id).await?;
         if po.status != "submitted" {
-            return Err(saas_common::error::AppError::Validation("Only submitted orders can be approved".into()));
+            return Err(AppError::Validation("Only submitted orders can be approved".into()));
         }
         self.po_repo.update_status(id, "approved").await?;
         self.po_repo.get_by_id(id).await
@@ -81,16 +80,44 @@ impl ProcurementService {
     pub async fn receive_purchase_order(&self, id: &str, input: ReceivePurchaseOrder) -> AppResult<PurchaseOrderDetailResponse> {
         let po = self.po_repo.get_by_id(id).await?;
         if po.status != "approved" {
-            return Err(saas_common::error::AppError::Validation("Only approved orders can be received".into()));
+            return Err(AppError::Validation("Only approved orders can be received".into()));
         }
         let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+
+        // Validate no over-receiving: quantity_received must not exceed ordered quantity
+        let existing_lines = self.po_repo.get_lines(id).await?;
+        for line in &input.lines {
+            if let Some(po_line) = existing_lines.iter().find(|l| l.id == line.po_line_id) {
+                let already_received = po_line.quantity_received;
+                let remaining = po_line.quantity - already_received;
+                if line.quantity_received > remaining {
+                    return Err(AppError::Validation(format!(
+                        "Over-receiving not allowed: line {} ordered {}, already received {}, attempting to receive {}. Remaining: {}",
+                        line.po_line_id, po_line.quantity, already_received, line.quantity_received, remaining
+                    )));
+                }
+            }
+        }
+
+        let mut tx = self.pool.begin().await?;
+
         let mut proto_lines = Vec::new();
         for line in &input.lines {
-            self.receipt_repo.create(id, &line.po_line_id, line.quantity_received, &today).await?;
-            self.po_repo.update_line_received(&line.po_line_id, line.quantity_received).await?;
-            // Get line details for event
-            let lines = self.po_repo.get_lines(id).await?;
-            if let Some(po_line) = lines.iter().find(|l| l.id == line.po_line_id) {
+            // Create goods receipt
+            let receipt_id = uuid::Uuid::new_v4().to_string();
+            sqlx::query(
+                "INSERT INTO goods_receipts (id, po_id, po_line_id, quantity_received, received_date) VALUES (?, ?, ?, ?, ?)"
+            )
+            .bind(&receipt_id).bind(id).bind(&line.po_line_id).bind(line.quantity_received).bind(&today)
+            .execute(&mut *tx).await?;
+
+            // Update line received quantity
+            sqlx::query("UPDATE po_lines SET quantity_received = quantity_received + ? WHERE id = ?")
+                .bind(line.quantity_received).bind(&line.po_line_id)
+                .execute(&mut *tx).await?;
+
+            // Build event data from the line details we already have
+            if let Some(po_line) = existing_lines.iter().find(|l| l.id == line.po_line_id) {
                 proto_lines.push(saas_proto::events::PurchaseOrderLineReceived {
                     item_id: po_line.item_id.clone(),
                     warehouse_id: line.warehouse_id.clone(),
@@ -98,12 +125,21 @@ impl ProcurementService {
                 });
             }
         }
-        self.po_repo.update_status(id, "received").await?;
-        let _ = self.bus.publish("scm.procurement.po.received", saas_proto::events::PurchaseOrderReceived {
+
+        // Update PO status
+        sqlx::query("UPDATE purchase_orders SET status = ? WHERE id = ?")
+            .bind("received").bind(id)
+            .execute(&mut *tx).await?;
+
+        tx.commit().await?;
+
+        if let Err(e) = self.bus.publish("scm.procurement.po.received", saas_proto::events::PurchaseOrderReceived {
             po_id: id.to_string(),
             supplier_id: po.supplier_id.clone(),
             lines: proto_lines,
-        }).await;
+        }).await {
+            tracing::error!("CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.", "scm.procurement.po.received", e);
+        }
         self.get_purchase_order(id).await
     }
 }

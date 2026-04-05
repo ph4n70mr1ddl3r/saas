@@ -36,11 +36,14 @@ impl BomRepo {
     pub async fn create(&self, input: &CreateBom) -> AppResult<BomResponse> {
         let id = uuid::Uuid::new_v4().to_string();
         let quantity = input.quantity.unwrap_or(1);
+
+        let mut tx = self.pool.begin().await?;
+
         sqlx::query(
             "INSERT INTO boms (id, name, description, finished_item_id, quantity) VALUES (?, ?, ?, ?, ?)"
         )
         .bind(&id).bind(&input.name).bind(&input.description).bind(&input.finished_item_id).bind(quantity)
-        .execute(&self.pool).await?;
+        .execute(&mut *tx).await?;
 
         for component in &input.components {
             let comp_id = uuid::Uuid::new_v4().to_string();
@@ -48,8 +51,10 @@ impl BomRepo {
                 "INSERT INTO bom_components (id, bom_id, component_item_id, quantity_required) VALUES (?, ?, ?, ?)"
             )
             .bind(&comp_id).bind(&id).bind(&component.component_item_id).bind(component.quantity_required)
-            .execute(&self.pool).await?;
+            .execute(&mut *tx).await?;
         }
+
+        tx.commit().await?;
         self.get_by_id(&id).await
     }
 }

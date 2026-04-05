@@ -2,6 +2,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::components::A;
 use crate::components::auth_guard::AuthGuard;
+use crate::state::auth::use_auth;
 
 #[derive(Clone, Debug, serde::Deserialize)]
 struct Employee {
@@ -18,16 +19,21 @@ struct Employee {
 pub fn EmployeeListPage() -> impl IntoView {
     let (employees, set_employees) = signal(Vec::<Employee>::new());
     let (loading, set_loading) = signal(true);
+    let auth = use_auth();
 
     Effect::new(move |_| {
         spawn_local(async move {
             let client = reqwest::Client::new();
-            let result = client.get("http://localhost:8000/api/v1/employees")
-                .send().await;
+            let mut req = client.get(&format!("{}/api/v1/employees",
+                std::env::var("API_BASE_URL").unwrap_or_else(|_| "http://localhost:8000".to_string())));
+            if let Some(auth_state) = auth.get() {
+                req = req.header("Authorization", format!("Bearer {}", auth_state.access_token));
+            }
+            let result = req.send().await;
             if let Ok(resp) = result {
                 if let Ok(body) = resp.json::<serde_json::Value>().await {
                     if let Some(data) = body.get("data") {
-                        if let Ok(emps) = serde_json::from_value::<Vec<Employee>>(data["data"].clone()) {
+                        if let Ok(emps) = serde_json::from_value::<Vec<Employee>>(data.clone()) {
                             set_employees.set(emps);
                         }
                     }

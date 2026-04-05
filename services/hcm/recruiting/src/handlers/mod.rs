@@ -1,6 +1,7 @@
 use axum::extract::{Path, State};
 use axum::Json;
 use saas_auth_core::extractor::AuthUser;
+use saas_auth_core::rbac;
 use saas_common::error::AppError;
 use saas_common::response::ApiResponse;
 use crate::models::*;
@@ -24,20 +25,22 @@ pub async fn get_job(
 }
 
 pub async fn create_job(
-    _user: AuthUser,
+    user: AuthUser,
     State(state): State<AppState>,
     Json(input): Json<CreateJobRequest>,
 ) -> Result<Json<ApiResponse<JobPosting>>, AppError> {
+    rbac::require_admin(&user.roles, "hcm").map_err(|e| AppError::Forbidden(e))?;
     let job = state.service.create_job(input).await?;
     Ok(Json(ApiResponse::new(job)))
 }
 
 pub async fn update_job(
-    _user: AuthUser,
+    user: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(input): Json<UpdateJobRequest>,
 ) -> Result<Json<ApiResponse<JobPosting>>, AppError> {
+    rbac::require_admin(&user.roles, "hcm").map_err(|e| AppError::Forbidden(e))?;
     let job = state.service.update_job(&id, input).await?;
     Ok(Json(ApiResponse::new(job)))
 }
@@ -60,11 +63,12 @@ pub async fn create_application(
 }
 
 pub async fn update_application_status(
-    _user: AuthUser,
+    user: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(input): Json<UpdateApplicationStatusRequest>,
 ) -> Result<Json<ApiResponse<Application>>, AppError> {
+    rbac::require_admin(&user.roles, "hcm").map_err(|e| AppError::Forbidden(e))?;
     let app = state.service.update_application_status(&id, input).await?;
     Ok(Json(ApiResponse::new(app)))
 }

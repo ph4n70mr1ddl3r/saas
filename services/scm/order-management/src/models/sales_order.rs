@@ -3,7 +3,9 @@ use validator::Validate;
 
 #[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreateSalesOrder {
+    #[validate(length(min = 1))]
     pub customer_id: String,
+    #[validate(length(min = 1))]
     pub order_date: String,
     pub shipping_address: Option<String>,
     pub notes: Option<String>,
@@ -12,8 +14,11 @@ pub struct CreateSalesOrder {
 
 #[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreateSalesOrderLine {
+    #[validate(length(min = 1))]
     pub item_id: String,
+    #[validate(range(min = 1))]
     pub quantity: i64,
+    #[validate(range(min = 0))]
     pub unit_price_cents: i64,
 }
 

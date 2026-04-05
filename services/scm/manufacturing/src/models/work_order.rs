@@ -3,7 +3,9 @@ use validator::Validate;
 
 #[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreateWorkOrder {
+    #[validate(length(min = 1))]
     pub item_id: String,
+    #[validate(range(min = 1))]
     pub quantity: i64,
     pub planned_start: Option<String>,
     pub planned_end: Option<String>,

@@ -6,14 +6,17 @@ pub struct CreateBom {
     #[validate(length(min = 1, max = 200))]
     pub name: String,
     pub description: Option<String>,
+    #[validate(length(min = 1))]
     pub finished_item_id: String,
     pub quantity: Option<i64>,
     pub components: Vec<CreateBomComponent>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreateBomComponent {
+    #[validate(length(min = 1))]
     pub component_item_id: String,
+    #[validate(range(min = 1))]
     pub quantity_required: i64,
 }
 

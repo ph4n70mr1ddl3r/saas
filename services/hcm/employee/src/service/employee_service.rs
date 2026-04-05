@@ -33,14 +33,16 @@ impl EmployeeService {
     pub async fn create_employee(&self, input: CreateEmployee) -> AppResult<EmployeeResponse> {
         input.validate().map_err(|e| saas_common::error::AppError::Validation(e.to_string()))?;
         let emp = self.emp_repo.create(&input).await?;
-        let _ = self.bus.publish("hcm.employee.created", saas_proto::events::EmployeeCreated {
+        if let Err(e) = self.bus.publish("hcm.employee.created", saas_proto::events::EmployeeCreated {
             employee_id: emp.id.clone(),
             first_name: emp.first_name.clone(),
             last_name: emp.last_name.clone(),
             email: emp.email.clone(),
             department_id: emp.department_id.clone(),
             hire_date: emp.hire_date.clone(),
-        }).await;
+        }).await {
+            tracing::error!("CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.", "hcm.employee.created", e);
+        }
         Ok(emp)
     }
 
@@ -54,9 +56,11 @@ impl EmployeeService {
     pub async fn delete_employee(&self, id: &str) -> AppResult<EmployeeResponse> {
         let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
         self.emp_repo.terminate(id, &today).await?;
-        let _ = self.bus.publish("hcm.employee.terminated", saas_proto::events::EmployeeTerminated {
+        if let Err(e) = self.bus.publish("hcm.employee.terminated", saas_proto::events::EmployeeTerminated {
             employee_id: id.to_string(), termination_date: today, reason: None,
-        }).await;
+        }).await {
+            tracing::error!("CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.", "hcm.employee.terminated", e);
+        }
         self.emp_repo.get_by_id(id).await
     }
 

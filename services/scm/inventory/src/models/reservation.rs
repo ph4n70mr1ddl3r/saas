@@ -3,10 +3,15 @@ use validator::Validate;
 
 #[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreateReservation {
+    #[validate(length(min = 1))]
     pub item_id: String,
+    #[validate(length(min = 1))]
     pub warehouse_id: String,
+    #[validate(range(min = 1))]
     pub quantity: i64,
+    #[validate(length(min = 1))]
     pub reference_type: String,
+    #[validate(length(min = 1))]
     pub reference_id: String,
 }
 

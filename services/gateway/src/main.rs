@@ -27,6 +27,8 @@ async fn cleanup_rate_limiter(rate_limiter: Arc<RwLock<HashMap<String, rate_limi
 async fn main() -> anyhow::Result<()> {
     tracing_setup::init("saas-gateway");
 
+    saas_auth_core::jwt::init_jwt_secret();
+
     let port: u16 = env::var("PORT")
         .unwrap_or_else(|_| "8000".into())
         .parse()?;
@@ -61,8 +63,14 @@ async fn main() -> anyhow::Result<()> {
         rate_limiter,
     };
 
+    let cors_origin = env::var("CORS_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".to_string());
     let app = routes::build_router(state)
-        .layer(CorsLayer::permissive())
+        .layer(
+            CorsLayer::new()
+                .allow_origin(axum::http::HeaderValue::from_bytes(cors_origin.as_bytes()).expect("Invalid CORS origin"))
+                .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::PUT, axum::http::Method::DELETE, axum::http::Method::PATCH])
+                .allow_headers([axum::http::header::CONTENT_TYPE, axum::http::header::AUTHORIZATION])
+        )
         .layer(TraceLayer::new_for_http())
         .into_make_service_with_connect_info::<std::net::SocketAddr>();
 

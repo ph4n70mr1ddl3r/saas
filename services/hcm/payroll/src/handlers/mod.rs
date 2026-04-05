@@ -1,6 +1,7 @@
 use axum::extract::{Path, State};
 use axum::Json;
 use saas_auth_core::extractor::AuthUser;
+use saas_auth_core::rbac;
 use saas_common::error::AppError;
 use saas_common::response::ApiResponse;
 use crate::models::*;
@@ -33,20 +34,22 @@ pub async fn list_compensation_by_employee(
 }
 
 pub async fn create_compensation(
-    _user: AuthUser,
+    user: AuthUser,
     State(state): State<AppState>,
     Json(input): Json<CreateCompensationRequest>,
 ) -> Result<Json<ApiResponse<Compensation>>, AppError> {
+    rbac::require_admin(&user.roles, "hcm").map_err(|e| AppError::Forbidden(e))?;
     let comp = state.service.create_compensation(input).await?;
     Ok(Json(ApiResponse::new(comp)))
 }
 
 pub async fn update_compensation(
-    _user: AuthUser,
+    user: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(input): Json<UpdateCompensationRequest>,
 ) -> Result<Json<ApiResponse<Compensation>>, AppError> {
+    rbac::require_admin(&user.roles, "hcm").map_err(|e| AppError::Forbidden(e))?;
     let comp = state.service.update_compensation(&id, input).await?;
     Ok(Json(ApiResponse::new(comp)))
 }
@@ -60,19 +63,21 @@ pub async fn list_pay_runs(
 }
 
 pub async fn create_pay_run(
-    _user: AuthUser,
+    user: AuthUser,
     State(state): State<AppState>,
     Json(input): Json<CreatePayRunRequest>,
 ) -> Result<Json<ApiResponse<PayRun>>, AppError> {
+    rbac::require_admin(&user.roles, "hcm").map_err(|e| AppError::Forbidden(e))?;
     let run = state.service.create_pay_run(input).await?;
     Ok(Json(ApiResponse::new(run)))
 }
 
 pub async fn process_pay_run(
-    _user: AuthUser,
+    user: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<PayRun>>, AppError> {
+    rbac::require_admin(&user.roles, "hcm").map_err(|e| AppError::Forbidden(e))?;
     let run = state.service.process_pay_run(&id).await?;
     Ok(Json(ApiResponse::new(run)))
 }
@@ -96,10 +101,11 @@ pub async fn list_deductions_by_employee(
 }
 
 pub async fn create_deduction(
-    _user: AuthUser,
+    user: AuthUser,
     State(state): State<AppState>,
     Json(input): Json<CreateDeductionRequest>,
 ) -> Result<Json<ApiResponse<Deduction>>, AppError> {
+    rbac::require_admin(&user.roles, "hcm").map_err(|e| AppError::Forbidden(e))?;
     let deduction = state.service.create_deduction(input).await?;
     Ok(Json(ApiResponse::new(deduction)))
 }

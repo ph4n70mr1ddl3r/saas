@@ -67,7 +67,9 @@ impl RecruitingService {
                 old_status,
                 new_status: "hired".to_string(),
             };
-            let _ = self.bus.publish("hcm.recruiting.application.status_changed", event).await;
+            if let Err(e) = self.bus.publish("hcm.recruiting.application.status_changed", event).await {
+                tracing::error!("CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.", "hcm.recruiting.application.status_changed", e);
+            }
         }
 
         Ok(app)

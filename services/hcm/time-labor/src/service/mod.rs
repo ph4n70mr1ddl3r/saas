@@ -43,6 +43,11 @@ impl TimeLaborService {
         self.repo.submit_timesheet(id).await
     }
 
+    /// Fetch a timesheet for approval check (used to prevent self-approval).
+    pub async fn get_timesheet_for_approval_check(&self, id: &str) -> AppResult<Timesheet> {
+        self.repo.get_timesheet(id).await
+    }
+
     pub async fn approve_timesheet(&self, id: &str) -> AppResult<Timesheet> {
         let ts = self.repo.get_timesheet(id).await?;
         if ts.status != "submitted" {
@@ -61,6 +66,11 @@ impl TimeLaborService {
 
     pub async fn create_leave_request(&self, input: CreateLeaveRequestRequest) -> AppResult<LeaveRequest> {
         self.repo.create_leave_request(&input).await
+    }
+
+    /// Fetch a leave request for approval check (used to prevent self-approval).
+    pub async fn get_leave_request_for_approval_check(&self, id: &str) -> AppResult<LeaveRequest> {
+        self.repo.get_leave_request(id).await
     }
 
     pub async fn approve_leave_request(&self, id: &str) -> AppResult<LeaveRequest> {

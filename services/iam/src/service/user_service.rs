@@ -20,7 +20,7 @@ impl UserService {
     }
 
     pub async fn list(&self, pag: &PaginationParams) -> AppResult<ApiListResponse<UserResponse>> {
-        let (users, total) = self.repo.list(pag).await?;
+        let (users, total) = self.repo.list_safe(pag).await?;
         Ok(ApiListResponse {
             data: users.into_iter().map(UserResponse::from).collect(),
             total,

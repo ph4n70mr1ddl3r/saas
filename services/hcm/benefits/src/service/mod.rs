@@ -48,6 +48,13 @@ impl BenefitsService {
         if !plan.is_active {
             return Err(AppError::Validation(format!("Plan '{}' is not active", input.plan_id)));
         }
+        // Prevent duplicate active enrollment for same employee + plan
+        let existing = self.repo.find_active_enrollment(&input.employee_id, &input.plan_id).await?;
+        if existing.is_some() {
+            return Err(AppError::Conflict(
+                format!("Employee '{}' already has an active enrollment in plan '{}'", input.employee_id, input.plan_id)
+            ));
+        }
         self.repo.create_enrollment(&input).await
     }
 

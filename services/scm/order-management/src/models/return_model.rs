@@ -3,8 +3,11 @@ use validator::Validate;
 
 #[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreateReturn {
+    #[validate(length(min = 1))]
     pub order_id: String,
+    #[validate(length(min = 1))]
     pub order_line_id: String,
+    #[validate(range(min = 1))]
     pub quantity: i64,
     pub reason: Option<String>,
 }

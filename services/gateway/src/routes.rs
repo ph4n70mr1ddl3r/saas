@@ -36,7 +36,7 @@ async fn proxy_handler(
     // Rate limiting using real client IP
     let ip = req.headers().get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
+        .and_then(|v| v.split(',').last())
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|| addr.ip().to_string());
 

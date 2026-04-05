@@ -40,13 +40,16 @@ impl SalesOrderRepo {
         let order_number = format!("SO-{}", chrono::Utc::now().format("%Y%m%d%H%M%S"));
         let total_cents: i64 = input.lines.iter().map(|l| l.quantity * l.unit_price_cents).sum();
         let now = chrono::Utc::now().to_rfc3339();
+
+        let mut tx = self.pool.begin().await?;
+
         sqlx::query(
             "INSERT INTO sales_orders (id, order_number, customer_id, order_date, status, total_cents, shipping_address, notes, created_at, updated_at) VALUES (?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?)"
         )
         .bind(&id).bind(&order_number).bind(&input.customer_id).bind(&input.order_date)
         .bind(total_cents).bind(&input.shipping_address).bind(&input.notes)
         .bind(&now).bind(&now)
-        .execute(&self.pool).await?;
+        .execute(&mut *tx).await?;
 
         for (i, line) in input.lines.iter().enumerate() {
             let line_id = uuid::Uuid::new_v4().to_string();
@@ -57,8 +60,10 @@ impl SalesOrderRepo {
             )
             .bind(&line_id).bind(&id).bind(line_number).bind(&line.item_id)
             .bind(line.quantity).bind(line.unit_price_cents).bind(line_total)
-            .execute(&self.pool).await?;
+            .execute(&mut *tx).await?;
         }
+
+        tx.commit().await?;
         self.get_by_id(&id).await
     }
 

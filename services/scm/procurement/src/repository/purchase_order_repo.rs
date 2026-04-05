@@ -39,11 +39,14 @@ impl PurchaseOrderRepo {
         let id = uuid::Uuid::new_v4().to_string();
         let po_number = format!("PO-{}", chrono::Utc::now().format("%Y%m%d%H%M%S"));
         let total_cents: i64 = input.lines.iter().map(|l| l.quantity * l.unit_price_cents).sum();
+
+        let mut tx = self.pool.begin().await?;
+
         sqlx::query(
             "INSERT INTO purchase_orders (id, po_number, supplier_id, order_date, status, total_cents) VALUES (?, ?, ?, ?, 'draft', ?)"
         )
         .bind(&id).bind(&po_number).bind(&input.supplier_id).bind(&input.order_date).bind(total_cents)
-        .execute(&self.pool).await?;
+        .execute(&mut *tx).await?;
 
         for (i, line) in input.lines.iter().enumerate() {
             let line_id = uuid::Uuid::new_v4().to_string();
@@ -54,8 +57,10 @@ impl PurchaseOrderRepo {
             )
             .bind(&line_id).bind(&id).bind(line_number).bind(&line.item_id)
             .bind(line.quantity).bind(line.unit_price_cents).bind(line_total)
-            .execute(&self.pool).await?;
+            .execute(&mut *tx).await?;
         }
+
+        tx.commit().await?;
         self.get_by_id(&id).await
     }
 

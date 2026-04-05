@@ -28,7 +28,7 @@ impl ConfigRepo {
         .bind(key)
         .fetch_optional(&self.pool)
         .await?
-        .ok_or_else(|| AppError::NotFound(format!("Config key '{}' not found", key)))
+        .ok_or_else(|| AppError::NotFound("Config key not found".to_string()))
     }
 
     pub async fn set(&self, key: &str, value: &str) -> AppResult<ConfigEntry> {

@@ -101,9 +101,12 @@ impl ApRepo {
         Ok(rows)
     }
 
+    /// Create invoice header + lines inside a database transaction.
     pub async fn create_invoice(&self, input: &CreateApInvoiceRequest) -> AppResult<ApInvoice> {
         let id = uuid::Uuid::new_v4().to_string();
         let total_cents: i64 = input.lines.iter().map(|l| l.amount_cents).sum();
+
+        let mut tx = self.pool.begin().await?;
 
         sqlx::query(
             "INSERT INTO ap_invoices (id, vendor_id, invoice_number, invoice_date, due_date, total_cents) VALUES (?, ?, ?, ?, ?, ?)",
@@ -114,7 +117,7 @@ impl ApRepo {
         .bind(&input.invoice_date)
         .bind(&input.due_date)
         .bind(total_cents)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
         for line in &input.lines {
@@ -127,10 +130,11 @@ impl ApRepo {
             .bind(&line.description)
             .bind(&line.account_code)
             .bind(line.amount_cents)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
         }
 
+        tx.commit().await?;
         self.get_invoice(&id).await
     }
 
@@ -153,9 +157,41 @@ impl ApRepo {
         Ok(rows)
     }
 
+    /// Create payment inside a transaction with overpayment prevention.
+    /// Reads the invoice, checks total prior payments, and ensures the
+    /// new payment does not exceed the remaining balance.
     pub async fn create_payment(&self, input: &CreatePaymentRequest) -> AppResult<Payment> {
         let id = uuid::Uuid::new_v4().to_string();
         let method = input.method.as_deref().unwrap_or("wire");
+
+        let mut tx = self.pool.begin().await?;
+
+        // Read the invoice within the transaction for consistent view
+        let invoice: ApInvoice = sqlx::query_as::<_, ApInvoice>(
+            "SELECT id, vendor_id, invoice_number, invoice_date, due_date, total_cents, status, created_at FROM ap_invoices WHERE id = ?",
+        )
+        .bind(&input.invoice_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("AP Invoice '{}' not found", input.invoice_id)))?;
+
+        // Sum existing payments for this invoice
+        let previously_paid: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(amount_cents), 0) FROM payments WHERE invoice_id = ?",
+        )
+        .bind(&input.invoice_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        let remaining = invoice.total_cents - previously_paid;
+
+        // Overpayment prevention: payment must not exceed remaining balance
+        if input.amount_cents > remaining {
+            return Err(AppError::Validation(format!(
+                "Payment of {} cents exceeds remaining balance of {} cents on invoice '{}'",
+                input.amount_cents, remaining, input.invoice_id
+            )));
+        }
 
         sqlx::query(
             "INSERT INTO payments (id, invoice_id, vendor_id, amount_cents, payment_date, method, reference) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -167,14 +203,24 @@ impl ApRepo {
         .bind(&input.payment_date)
         .bind(method)
         .bind(&input.reference)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
-        // Update invoice status to paid
-        sqlx::query("UPDATE ap_invoices SET status = 'paid' WHERE id = ?")
-            .bind(&input.invoice_id)
-            .execute(&self.pool)
-            .await?;
+        // Update invoice status: mark as paid only if fully paid
+        let total_paid = previously_paid + input.amount_cents;
+        if total_paid >= invoice.total_cents {
+            sqlx::query("UPDATE ap_invoices SET status = 'paid' WHERE id = ?")
+                .bind(&input.invoice_id)
+                .execute(&mut *tx)
+                .await?;
+        } else {
+            sqlx::query("UPDATE ap_invoices SET status = 'partial' WHERE id = ?")
+                .bind(&input.invoice_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+
+        tx.commit().await?;
 
         sqlx::query_as::<_, Payment>(
             "SELECT id, invoice_id, vendor_id, amount_cents, payment_date, method, reference, created_at FROM payments WHERE id = ?",

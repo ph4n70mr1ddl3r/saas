@@ -1,18 +1,28 @@
+use saas_auth_core::rbac;
+
+#[derive(serde::Deserialize)]
+pub struct ListEmployeesParams {
+    #[serde(flatten)]
+    pagination: saas_common::pagination::PaginationParams,
+    #[serde(flatten)]
+    filters: crate::models::employee::EmployeeFilters,
+}
+
 pub async fn list_employees(
-    _user: saas_auth_core::extractor::AuthUser,
+    user: saas_auth_core::extractor::AuthUser,
     axum::extract::State(state): axum::extract::State<crate::routes::AppState>,
-    axum::extract::Query(pag): axum::extract::Query<saas_common::pagination::PaginationParams>,
-    axum::extract::Query(filters): axum::extract::Query<crate::models::employee::EmployeeFilters>,
+    axum::extract::Query(params): axum::extract::Query<ListEmployeesParams>,
 ) -> Result<axum::Json<saas_common::response::ApiListResponse<crate::models::employee::EmployeeResponse>>, saas_common::error::AppError> {
-    let result = state.service.list_employees(&pag, &filters).await?;
+    let result = state.service.list_employees(&params.pagination, &params.filters).await?;
     Ok(axum::Json(result))
 }
 
 pub async fn create_employee(
-    _user: saas_auth_core::extractor::AuthUser,
+    user: saas_auth_core::extractor::AuthUser,
     axum::extract::State(state): axum::extract::State<crate::routes::AppState>,
     axum::Json(input): axum::Json<crate::models::employee::CreateEmployee>,
 ) -> Result<(axum::http::StatusCode, axum::Json<saas_common::response::ApiResponse<crate::models::employee::EmployeeResponse>>), saas_common::error::AppError> {
+    rbac::require_admin(&user.roles, "hcm").map_err(|e| saas_common::error::AppError::Forbidden(e))?;
     let emp = state.service.create_employee(input).await?;
     Ok((axum::http::StatusCode::CREATED, axum::Json(saas_common::response::ApiResponse::new(emp))))
 }
@@ -27,20 +37,22 @@ pub async fn get_employee(
 }
 
 pub async fn update_employee(
-    _user: saas_auth_core::extractor::AuthUser,
+    user: saas_auth_core::extractor::AuthUser,
     axum::extract::State(state): axum::extract::State<crate::routes::AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
     axum::Json(input): axum::Json<crate::models::employee::UpdateEmployee>,
 ) -> Result<axum::Json<saas_common::response::ApiResponse<crate::models::employee::EmployeeResponse>>, saas_common::error::AppError> {
+    rbac::require_admin(&user.roles, "hcm").map_err(|e| saas_common::error::AppError::Forbidden(e))?;
     let emp = state.service.update_employee(&id, input).await?;
     Ok(axum::Json(saas_common::response::ApiResponse::new(emp)))
 }
 
 pub async fn delete_employee(
-    _user: saas_auth_core::extractor::AuthUser,
+    user: saas_auth_core::extractor::AuthUser,
     axum::extract::State(state): axum::extract::State<crate::routes::AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<axum::Json<saas_common::response::ApiResponse<crate::models::employee::EmployeeResponse>>, saas_common::error::AppError> {
+    rbac::require_admin(&user.roles, "hcm").map_err(|e| saas_common::error::AppError::Forbidden(e))?;
     let emp = state.service.delete_employee(&id).await?;
     Ok(axum::Json(saas_common::response::ApiResponse::new(emp)))
 }
@@ -63,10 +75,11 @@ pub async fn list_departments(
 }
 
 pub async fn create_department(
-    _user: saas_auth_core::extractor::AuthUser,
+    user: saas_auth_core::extractor::AuthUser,
     axum::extract::State(state): axum::extract::State<crate::routes::AppState>,
     axum::Json(input): axum::Json<crate::models::department::CreateDepartment>,
 ) -> Result<(axum::http::StatusCode, axum::Json<saas_common::response::ApiResponse<crate::models::department::DepartmentResponse>>), saas_common::error::AppError> {
+    rbac::require_admin(&user.roles, "hcm").map_err(|e| saas_common::error::AppError::Forbidden(e))?;
     let dept = state.service.create_department(input).await?;
     Ok((axum::http::StatusCode::CREATED, axum::Json(saas_common::response::ApiResponse::new(dept))))
 }
@@ -81,11 +94,12 @@ pub async fn get_department(
 }
 
 pub async fn update_department(
-    _user: saas_auth_core::extractor::AuthUser,
+    user: saas_auth_core::extractor::AuthUser,
     axum::extract::State(state): axum::extract::State<crate::routes::AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
     axum::Json(input): axum::Json<crate::models::department::UpdateDepartment>,
 ) -> Result<axum::Json<saas_common::response::ApiResponse<crate::models::department::DepartmentResponse>>, saas_common::error::AppError> {
+    rbac::require_admin(&user.roles, "hcm").map_err(|e| saas_common::error::AppError::Forbidden(e))?;
     let dept = state.service.update_department(&id, input).await?;
     Ok(axum::Json(saas_common::response::ApiResponse::new(dept)))
 }

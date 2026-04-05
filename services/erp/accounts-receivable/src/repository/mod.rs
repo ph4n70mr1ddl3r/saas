@@ -101,9 +101,12 @@ impl ArRepo {
         Ok(rows)
     }
 
+    /// Create invoice header + lines inside a database transaction.
     pub async fn create_invoice(&self, input: &CreateArInvoiceRequest) -> AppResult<ArInvoice> {
         let id = uuid::Uuid::new_v4().to_string();
         let total_cents: i64 = input.lines.iter().map(|l| l.amount_cents).sum();
+
+        let mut tx = self.pool.begin().await?;
 
         sqlx::query(
             "INSERT INTO ar_invoices (id, customer_id, invoice_number, invoice_date, due_date, total_cents) VALUES (?, ?, ?, ?, ?, ?)",
@@ -114,7 +117,7 @@ impl ArRepo {
         .bind(&input.invoice_date)
         .bind(&input.due_date)
         .bind(total_cents)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
         for line in &input.lines {
@@ -126,10 +129,11 @@ impl ArRepo {
             .bind(&id)
             .bind(&line.description)
             .bind(line.amount_cents)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
         }
 
+        tx.commit().await?;
         self.get_invoice(&id).await
     }
 
@@ -160,10 +164,15 @@ impl ArRepo {
         Ok(rows)
     }
 
+    /// Create receipt inside a transaction, and only mark invoice as paid
+    /// if the total received amount equals or exceeds the invoice total.
     pub async fn create_receipt(&self, input: &CreateReceiptRequest) -> AppResult<Receipt> {
         let id = uuid::Uuid::new_v4().to_string();
         let method = input.method.as_deref().unwrap_or("wire");
 
+        let mut tx = self.pool.begin().await?;
+
+        // Insert receipt
         sqlx::query(
             "INSERT INTO receipts (id, invoice_id, customer_id, amount_cents, receipt_date, method) VALUES (?, ?, ?, ?, ?, ?)",
         )
@@ -173,11 +182,44 @@ impl ArRepo {
         .bind(input.amount_cents)
         .bind(&input.receipt_date)
         .bind(method)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
-        // Update invoice status to paid
-        self.mark_invoice_paid(&input.invoice_id).await?;
+        // Read invoice to get total
+        let invoice: ArInvoice = sqlx::query_as::<_, ArInvoice>(
+            "SELECT id, customer_id, invoice_number, invoice_date, due_date, total_cents, status, created_at FROM ar_invoices WHERE id = ?",
+        )
+        .bind(&input.invoice_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("AR Invoice '{}' not found", input.invoice_id)))?;
+
+        // Sum existing receipts for this invoice (within the transaction for consistency)
+        let previously_received: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(amount_cents), 0) FROM receipts WHERE invoice_id = ? AND id != ?",
+        )
+        .bind(&input.invoice_id)
+        .bind(&id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        let total_received = previously_received + input.amount_cents;
+
+        // Only mark as paid if total received equals or exceeds invoice total
+        if total_received >= invoice.total_cents {
+            sqlx::query("UPDATE ar_invoices SET status = 'paid' WHERE id = ?")
+                .bind(&input.invoice_id)
+                .execute(&mut *tx)
+                .await?;
+        } else if invoice.status != "sent" && invoice.status != "partial" {
+            // Mark as partial if not already sent/partial
+            sqlx::query("UPDATE ar_invoices SET status = 'partial' WHERE id = ?")
+                .bind(&input.invoice_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+
+        tx.commit().await?;
 
         sqlx::query_as::<_, Receipt>(
             "SELECT id, invoice_id, customer_id, amount_cents, receipt_date, method, created_at FROM receipts WHERE id = ?",

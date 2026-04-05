@@ -21,19 +21,21 @@ impl Money {
 }
 
 impl std::ops::Add for Money {
-    type Output = Self;
-    fn add(self, rhs: Self) -> Self {
-        assert_eq!(self.currency, rhs.currency,
-            "Cannot add Money with different currencies: {} != {}", self.currency, rhs.currency);
-        Self { amount_cents: self.amount_cents + rhs.amount_cents, currency: self.currency }
+    type Output = Result<Self, String>;
+    fn add(self, rhs: Self) -> Self::Output {
+        if self.currency != rhs.currency {
+            return Err(format!("Cannot add Money with different currencies: {} != {}", self.currency, rhs.currency));
+        }
+        Ok(Self { amount_cents: self.amount_cents.saturating_add(rhs.amount_cents), currency: self.currency })
     }
 }
 
 impl std::ops::Sub for Money {
-    type Output = Self;
-    fn sub(self, rhs: Self) -> Self {
-        assert_eq!(self.currency, rhs.currency,
-            "Cannot subtract Money with different currencies: {} != {}", self.currency, rhs.currency);
-        Self { amount_cents: self.amount_cents - rhs.amount_cents, currency: self.currency }
+    type Output = Result<Self, String>;
+    fn sub(self, rhs: Self) -> Self::Output {
+        if self.currency != rhs.currency {
+            return Err(format!("Cannot subtract Money with different currencies: {} != {}", self.currency, rhs.currency));
+        }
+        Ok(Self { amount_cents: self.amount_cents.saturating_sub(rhs.amount_cents), currency: self.currency })
     }
 }

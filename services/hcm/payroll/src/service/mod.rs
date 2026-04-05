@@ -62,12 +62,15 @@ impl PayrollService {
             ));
         }
 
+        let original_status = pay_run.status.clone();
         self.repo.update_pay_run_status(id, "processing").await?;
 
         // Only process compensation records with effective_date within the pay period
         let compensations = self.repo.list_compensation().await?;
         let filtered: Vec<_> = compensations.into_iter().filter(|c| {
             c.end_date.is_none() && c.amount_cents > 0
+            && c.effective_date <= pay_run.period_end
+            && (c.effective_date.is_empty() || c.effective_date >= pay_run.period_start)
         }).collect();
 
         let mut total_net_cents: i64 = 0;
@@ -80,6 +83,15 @@ impl PayrollService {
             let deductions = self.repo.list_deductions_by_employee(&comp.employee_id).await?;
             let total_deductions: i64 = deductions.iter().map(|d| d.amount_cents).sum();
             let net = gross - tax - total_deductions;
+
+            // Prevent negative net pay
+            if net < 0 {
+                // Roll back to original status on failure
+                self.repo.update_pay_run_status(id, &original_status).await?;
+                return Err(AppError::Validation(
+                    "Net pay would be negative after deductions".into()
+                ));
+            }
 
             self.repo.create_payslip(id, &comp.employee_id, gross, net, tax, total_deductions).await?;
             total_net_cents += net;
@@ -96,7 +108,7 @@ impl PayrollService {
             total_net_pay_cents: total_net_cents,
         };
         if let Err(e) = self.bus.publish("hcm.payroll.run.completed", event).await {
-            tracing::error!("Failed to publish payroll.run.completed event: {}", e);
+            tracing::error!("CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.", "hcm.payroll.run.completed", e);
         }
 
         Ok(pay_run)

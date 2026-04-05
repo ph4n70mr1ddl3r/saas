@@ -76,6 +76,17 @@ impl CashManagementRepo {
     pub async fn create_bank_transaction(&self, input: &CreateBankTransactionRequest) -> AppResult<BankTransaction> {
         let id = uuid::Uuid::new_v4().to_string();
 
+        // Compute delta: positive for deposits, negative for withdrawals
+        let delta: i64 = match input.r#type.as_str() {
+            "deposit" => input.amount_cents,
+            "withdrawal" => -input.amount_cents,
+            "transfer" => input.amount_cents, // positive for incoming transfer
+            _ => input.amount_cents,
+        };
+
+        // Wrap transaction insert and atomic balance update in a database transaction
+        let mut tx = self.pool.begin().await?;
+
         sqlx::query(
             "INSERT INTO bank_transactions (id, bank_account_id, amount_cents, transaction_date, description, type, reference) VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
@@ -86,19 +97,28 @@ impl CashManagementRepo {
         .bind(&input.description)
         .bind(&input.r#type)
         .bind(&input.reference)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
-        // Update bank account balance
+        // Atomic balance update - eliminates TOCTOU race
+        sqlx::query("UPDATE bank_accounts SET balance_cents = balance_cents + ? WHERE id = ?")
+            .bind(delta)
+            .bind(&input.bank_account_id)
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+
+        // Verify balance did not go negative after the update
         let account = self.get_bank_account(&input.bank_account_id).await?;
-        let adjustment = match input.r#type.as_str() {
-            "deposit" => input.amount_cents,
-            "withdrawal" => -input.amount_cents,
-            "transfer" => input.amount_cents, // positive for incoming transfer
-            _ => input.amount_cents,
-        };
-        let new_balance = account.balance_cents + adjustment;
-        self.update_balance(&input.bank_account_id, new_balance).await?;
+        if account.balance_cents < 0 {
+            // This is a data integrity concern - log a warning
+            tracing::warn!(
+                bank_account_id = %input.bank_account_id,
+                balance_cents = account.balance_cents,
+                "Bank account balance went negative after transaction"
+            );
+        }
 
         sqlx::query_as::<_, BankTransaction>(
             "SELECT id, bank_account_id, amount_cents, transaction_date, description, type, reference, created_at FROM bank_transactions WHERE id = ?",

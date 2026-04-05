@@ -50,6 +50,10 @@ pub async fn update_user(
     if user.user_id != id && !is_admin(&user.roles) {
         return Err(AppError::Forbidden("Cannot update other users".into()));
     }
+    // Prevent admins from deactivating themselves
+    if user.user_id == id && input.is_active == Some(false) {
+        return Err(AppError::Forbidden("Admins cannot deactivate themselves".into()));
+    }
     let user = state.user_service.update(&id, input).await?;
     Ok(Json(ApiResponse::new(user)))
 }
@@ -61,6 +65,9 @@ pub async fn delete_user(
 ) -> Result<StatusCode, AppError> {
     if !is_admin(&user.roles) {
         return Err(AppError::Forbidden("Admin role required".into()));
+    }
+    if user.user_id == id {
+        return Err(AppError::Forbidden("Admins cannot delete themselves".into()));
     }
     state.user_service.delete(&id).await?;
     Ok(StatusCode::NO_CONTENT)

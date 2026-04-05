@@ -58,6 +58,17 @@ pub struct UserResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct UserListRow {
+    pub id: String,
+    pub username: String,
+    pub email: String,
+    pub display_name: String,
+    pub is_active: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct UserRow {
     pub id: String,
     pub username: String,
@@ -71,6 +82,20 @@ pub struct UserRow {
 
 impl From<UserRow> for UserResponse {
     fn from(row: UserRow) -> Self {
+        Self {
+            id: row.id,
+            username: row.username,
+            email: row.email,
+            display_name: row.display_name,
+            is_active: row.is_active,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        }
+    }
+}
+
+impl From<UserListRow> for UserResponse {
+    fn from(row: UserListRow) -> Self {
         Self {
             id: row.id,
             username: row.username,

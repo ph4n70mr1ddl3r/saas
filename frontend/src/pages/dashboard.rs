@@ -1,4 +1,5 @@
 use leptos::prelude::*;
+use leptos_router::components::A;
 use crate::components::auth_guard::AuthGuard;
 
 #[component]
@@ -11,17 +12,17 @@ pub fn DashboardPage() -> impl IntoView {
                     <div class="dashboard-card">
                         <h3>"Human Capital Management"</h3>
                         <p>"Manage employees, payroll, benefits, and recruiting"</p>
-                        <a href="/hcm">"Go to HCM"</a>
+                        <A href="/hcm">"Go to HCM"</A>
                     </div>
                     <div class="dashboard-card">
                         <h3>"Enterprise Resource Planning"</h3>
                         <p>"Financial management, ledger, payables, and receivables"</p>
-                        <a href="/erp">"Go to ERP"</a>
+                        <A href="/erp">"Go to ERP"</A>
                     </div>
                     <div class="dashboard-card">
                         <h3>"Supply Chain Management"</h3>
                         <p>"Inventory, procurement, orders, and manufacturing"</p>
-                        <a href="/scm">"Go to SCM"</a>
+                        <A href="/scm">"Go to SCM"</A>
                     </div>
                 </div>
             </div>

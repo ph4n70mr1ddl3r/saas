@@ -168,22 +168,30 @@ impl LedgerRepo {
     }
 
     pub async fn post_journal_entry(&self, id: &str) -> AppResult<JournalEntry> {
+        let mut tx = self.pool.begin().await?;
+
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query(
             "UPDATE journal_entries SET status = 'posted', posted_at = ? WHERE id = ?",
         )
         .bind(&now)
         .bind(id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+
+        tx.commit().await?;
         self.get_journal_entry(id).await
     }
 
     pub async fn reverse_journal_entry(&self, id: &str) -> AppResult<JournalEntry> {
+        let mut tx = self.pool.begin().await?;
+
         sqlx::query("UPDATE journal_entries SET status = 'reversed' WHERE id = ?")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+
+        tx.commit().await?;
         self.get_journal_entry(id).await
     }
 

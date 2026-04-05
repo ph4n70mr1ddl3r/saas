@@ -1,4 +1,4 @@
-use serde::{Serialize, de::DeserializeOwned};
+use serde::Serialize;
 use std::future::Future;
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]

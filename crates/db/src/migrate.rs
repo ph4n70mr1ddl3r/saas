@@ -13,16 +13,18 @@ pub async fn run_migrations(pool: &SqlitePool, migrations_dir: &str) -> Result<(
         .collect();
     sql_files.sort_by_key(|e| e.file_name());
 
+    let canonical_dir = std::fs::canonicalize(migrations_dir)?;
+
     for entry in sql_files {
         let path = entry.path();
-        let sql = std::fs::read_to_string(&path)?;
 
         // Validate the path stays within the migrations directory (prevent path traversal)
         let canonical = std::fs::canonicalize(&path)?;
-        let canonical_dir = std::fs::canonicalize(migrations_dir)?;
         if !canonical.starts_with(&canonical_dir) {
             anyhow::bail!("Migration file '{}' is outside of migrations directory", path.display());
         }
+
+        let sql = std::fs::read_to_string(&path)?;
 
         tracing::info!("Running migration: {}", path.display());
 

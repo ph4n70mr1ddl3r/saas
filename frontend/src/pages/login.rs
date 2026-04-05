@@ -1,4 +1,5 @@
 use leptos::prelude::*;
+use leptos::task::spawn_local;
 use leptos_router::hooks::use_navigate;
 use leptos_router::NavigateOptions;
 use crate::state::auth::{use_auth, AuthState};
@@ -26,14 +27,61 @@ pub fn LoginPage() -> impl IntoView {
             set_error.set(Some("Username and password are required".to_string()));
             return;
         }
-        // For now, set a mock auth state. Real auth would call the IAM service.
-        auth.set(Some(AuthState {
-            access_token: "mock-token".to_string(),
-            user_id: "1".to_string(),
-            username: user,
-            display_name: "User".to_string(),
-        }));
-        navigate("/hcm", NavigateOptions::default());
+
+        let auth = auth.clone();
+        let navigate = navigate.clone();
+        spawn_local(async move {
+            let client = reqwest::Client::new();
+            let result = client.post(&format!("{}/api/v1/auth/login",
+                std::env::var("API_BASE_URL").unwrap_or_else(|_| "http://localhost:8000".to_string())))
+                .json(&serde_json::json!({
+                    "username": user,
+                    "password": pass,
+                }))
+                .send()
+                .await;
+
+            match result {
+                Ok(resp) if resp.status().is_success() => {
+                    if let Ok(body) = resp.json::<serde_json::Value>().await {
+                        if let Some(data) = body.get("data") {
+                            let access_token = data["access_token"].as_str().unwrap_or("").to_string();
+                            let user_obj = data.get("user");
+                            let user_id = user_obj
+                                .and_then(|u| u.get("id"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let display_name = user_obj
+                                .and_then(|u| u.get("display_name"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or(&user)
+                                .to_string();
+
+                            if access_token.is_empty() {
+                                set_error.set(Some("Invalid login response".to_string()));
+                            } else {
+                                auth.set(Some(AuthState {
+                                    access_token,
+                                    user_id,
+                                    username: user.clone(),
+                                    display_name,
+                                }));
+                                navigate("/hcm", NavigateOptions::default());
+                            }
+                        } else {
+                            set_error.set(Some("Invalid login response".to_string()));
+                        }
+                    }
+                }
+                Ok(resp) => {
+                    set_error.set(Some(format!("Login failed: {}", resp.status())));
+                }
+                Err(e) => {
+                    set_error.set(Some(format!("Connection error: {}", e)));
+                }
+            }
+        });
     };
 
     view! {

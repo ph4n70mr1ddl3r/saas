@@ -108,6 +108,17 @@ impl BenefitsRepo {
         Ok(rows)
     }
 
+    pub async fn find_active_enrollment(&self, employee_id: &str, plan_id: &str) -> AppResult<Option<Enrollment>> {
+        let row = sqlx::query_as::<_, Enrollment>(
+            "SELECT id, employee_id, plan_id, status, enrolled_at, cancelled_at FROM enrollments WHERE employee_id = ? AND plan_id = ? AND status = 'active'"
+        )
+        .bind(employee_id)
+        .bind(plan_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
     pub async fn create_enrollment(&self, input: &CreateEnrollmentRequest) -> AppResult<Enrollment> {
         let id = uuid::Uuid::new_v4().to_string();
         sqlx::query(

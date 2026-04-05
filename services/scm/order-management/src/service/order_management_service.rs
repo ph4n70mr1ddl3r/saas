@@ -57,12 +57,14 @@ impl OrderManagementService {
                 warehouse_id: None,
             }
         }).collect();
-        let _ = self.bus.publish("scm.orders.order.confirmed", saas_proto::events::SalesOrderConfirmed {
+        if let Err(e) = self.bus.publish("scm.orders.order.confirmed", saas_proto::events::SalesOrderConfirmed {
             order_id: id.to_string(),
             order_number: detail.order.order_number.clone(),
             customer_id: detail.order.customer_id.clone(),
             lines: proto_lines,
-        }).await;
+        }).await {
+            tracing::error!("CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.", "scm.orders.order.confirmed", e);
+        }
         Ok(detail)
     }
 

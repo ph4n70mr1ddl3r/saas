@@ -11,13 +11,26 @@ const ALLOWED_HEADERS: &[&str] = &[
     "x-correlation-id",
 ];
 
+const SAFE_RESPONSE_HEADERS: &[&str] = &[
+    "content-type",
+    "cache-control",
+    "etag",
+    "x-request-id",
+    "location",
+    "retry-after",
+];
+
 /// Sanitize a request URI to prevent path traversal attacks.
 fn sanitize_request_uri(uri: &axum::http::Uri) -> String {
     let path = uri.path();
     let normalized: String = path
         .split('/')
-        .filter(|segment| !segment.is_empty() && *segment != ".." && *segment != ".")
-        .collect::<Vec<&str>>()
+        .filter(|segment| {
+            if segment.is_empty() { return false; }
+            let decoded = segment.replace("%2e", ".").replace("%2E", ".");
+            decoded != ".." && decoded != "."
+        })
+        .collect::<Vec<_>>()
         .join("/");
 
     if let Some(query) = uri.query() {
@@ -88,7 +101,7 @@ pub async fn forward_request(
             let mut response_builder = Response::builder().status(status);
 
             for (name, value) in resp.headers().iter() {
-                if name != "content-length" && name != "transfer-encoding" {
+                if SAFE_RESPONSE_HEADERS.contains(&name.as_str()) {
                     if let Ok(v) = value.to_str() {
                         response_builder = response_builder.header(name.as_str(), v);
                     }

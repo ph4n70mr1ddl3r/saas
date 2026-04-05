@@ -29,13 +29,35 @@ impl Permission {
 }
 
 pub fn has_permission(roles: &[String], required: &str) -> bool {
-    if roles.iter().any(|r| r.to_lowercase() == "admin") {
+    if is_admin(roles) {
         return true;
     }
-    roles.iter().any(|r| r == required)
+    let required_lower = required.to_lowercase();
+    roles.iter().any(|r| r.to_lowercase() == required_lower)
 }
 
 /// Check if the authenticated user has the admin role.
 pub fn is_admin(roles: &[String]) -> bool {
-    roles.iter().any(|r| r.to_lowercase() == "admin")
+    roles.iter().any(|r| r.eq_ignore_ascii_case("admin"))
+}
+
+/// Check if the user has any of the specified domain admin roles.
+pub fn is_domain_admin(roles: &[String], domain: &str) -> bool {
+    if is_admin(roles) {
+        return true;
+    }
+    let admin_role = format!("{}_admin", domain);
+    roles.iter().any(|r| r.eq_ignore_ascii_case(&admin_role))
+}
+
+/// Require admin or domain-specific admin role, returning a 403 error string if not.
+pub fn require_admin(roles: &[String], domain: &str) -> Result<(), String> {
+    if is_admin(roles) {
+        return Ok(());
+    }
+    let admin_role = format!("{}_admin", domain);
+    if roles.iter().any(|r| r.eq_ignore_ascii_case(&admin_role)) {
+        return Ok(());
+    }
+    Err(format!("Admin or {} role required", admin_role))
 }

@@ -1,4 +1,5 @@
 use axum::Router;
+use saas_auth_core::jwt;
 use saas_common::tracing_setup;
 use saas_db::{pool::create_pool, migrate::run_migrations};
 use saas_nats_bus::NatsBus;
@@ -15,6 +16,7 @@ mod service;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_setup::init("saas-hcm-payroll");
+    jwt::init_jwt_secret();
 
     let database_url = env::var("DATABASE_URL")
         .unwrap_or_else(|_| "sqlite:./data/payroll.db".into());
@@ -29,11 +31,17 @@ async fn main() -> anyhow::Result<()> {
     let pool = create_pool(&database_url).await?;
     run_migrations(&pool, "./migrations").await?;
 
-    let bus = NatsBus::connect(&nats_url).await?;
+    let bus = NatsBus::connect(&nats_url, "saas-hcm-payroll").await?;
 
     let service = service::PayrollService::new(pool, bus.clone());
+    let cors_origin = env::var("CORS_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".to_string());
+    let cors_origin = std::env::var("CORS_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".to_string());
+    let cors = CorsLayer::new()
+        .allow_origin(axum::http::HeaderValue::from_bytes(cors_origin.as_bytes()).expect("Invalid CORS origin"))
+        .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::PUT, axum::http::Method::DELETE, axum::http::Method::PATCH])
+        .allow_headers([axum::http::header::CONTENT_TYPE, axum::http::header::AUTHORIZATION]);
     let app = routes::build_router(routes::AppState { service })
-        .layer(CorsLayer::permissive());
+        .layer(cors);
 
     events::subscribe(&bus).await?;
 

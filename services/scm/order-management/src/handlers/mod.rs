@@ -1,3 +1,6 @@
+use saas_auth_core::rbac;
+use saas_common::error::AppError;
+
 pub async fn list_sales_orders(
     _user: saas_auth_core::extractor::AuthUser,
     axum::extract::State(state): axum::extract::State<crate::routes::AppState>,
@@ -7,10 +10,11 @@ pub async fn list_sales_orders(
 }
 
 pub async fn create_sales_order(
-    _user: saas_auth_core::extractor::AuthUser,
+    user: saas_auth_core::extractor::AuthUser,
     axum::extract::State(state): axum::extract::State<crate::routes::AppState>,
     axum::Json(input): axum::Json<crate::models::sales_order::CreateSalesOrder>,
 ) -> Result<(axum::http::StatusCode, axum::Json<saas_common::response::ApiResponse<crate::models::sales_order::SalesOrderResponse>>), saas_common::error::AppError> {
+    rbac::require_admin(&user.roles, "scm").map_err(|e| AppError::Forbidden(e))?;
     let order = state.service.create_sales_order(input).await?;
     Ok((axum::http::StatusCode::CREATED, axum::Json(saas_common::response::ApiResponse::new(order))))
 }
@@ -25,20 +29,22 @@ pub async fn get_sales_order(
 }
 
 pub async fn confirm_sales_order(
-    _user: saas_auth_core::extractor::AuthUser,
+    user: saas_auth_core::extractor::AuthUser,
     axum::extract::State(state): axum::extract::State<crate::routes::AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<axum::Json<saas_common::response::ApiResponse<crate::models::sales_order::SalesOrderDetailResponse>>, saas_common::error::AppError> {
+    rbac::require_admin(&user.roles, "scm").map_err(|e| AppError::Forbidden(e))?;
     let order = state.service.confirm_sales_order(&id).await?;
     Ok(axum::Json(saas_common::response::ApiResponse::new(order)))
 }
 
 pub async fn fulfill_sales_order(
-    _user: saas_auth_core::extractor::AuthUser,
+    user: saas_auth_core::extractor::AuthUser,
     axum::extract::State(state): axum::extract::State<crate::routes::AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
     axum::Json(input): axum::Json<crate::models::sales_order::FulfillRequest>,
 ) -> Result<axum::Json<saas_common::response::ApiResponse<crate::models::sales_order::SalesOrderDetailResponse>>, saas_common::error::AppError> {
+    rbac::require_admin(&user.roles, "scm").map_err(|e| AppError::Forbidden(e))?;
     let order = state.service.fulfill_sales_order(&id, input).await?;
     Ok(axum::Json(saas_common::response::ApiResponse::new(order)))
 }
@@ -61,10 +67,11 @@ pub async fn get_return(
 }
 
 pub async fn create_return(
-    _user: saas_auth_core::extractor::AuthUser,
+    user: saas_auth_core::extractor::AuthUser,
     axum::extract::State(state): axum::extract::State<crate::routes::AppState>,
     axum::Json(input): axum::Json<crate::models::return_model::CreateReturn>,
 ) -> Result<(axum::http::StatusCode, axum::Json<saas_common::response::ApiResponse<crate::models::return_model::ReturnResponse>>), saas_common::error::AppError> {
+    rbac::require_admin(&user.roles, "scm").map_err(|e| AppError::Forbidden(e))?;
     let ret = state.service.create_return(input).await?;
     Ok((axum::http::StatusCode::CREATED, axum::Json(saas_common::response::ApiResponse::new(ret))))
 }

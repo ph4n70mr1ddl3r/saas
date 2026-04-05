@@ -1,6 +1,7 @@
 use axum::extract::{Path, State};
 use axum::Json;
 use saas_auth_core::extractor::AuthUser;
+use saas_auth_core::rbac;
 use saas_common::error::AppError;
 use saas_common::response::ApiResponse;
 use crate::models::*;
@@ -24,20 +25,22 @@ pub async fn get_plan(
 }
 
 pub async fn create_plan(
-    _user: AuthUser,
+    user: AuthUser,
     State(state): State<AppState>,
     Json(input): Json<CreatePlanRequest>,
 ) -> Result<Json<ApiResponse<BenefitPlan>>, AppError> {
+    rbac::require_admin(&user.roles, "hcm").map_err(|e| AppError::Forbidden(e))?;
     let plan = state.service.create_plan(input).await?;
     Ok(Json(ApiResponse::new(plan)))
 }
 
 pub async fn update_plan(
-    _user: AuthUser,
+    user: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(input): Json<UpdatePlanRequest>,
 ) -> Result<Json<ApiResponse<BenefitPlan>>, AppError> {
+    rbac::require_admin(&user.roles, "hcm").map_err(|e| AppError::Forbidden(e))?;
     let plan = state.service.update_plan(&id, input).await?;
     Ok(Json(ApiResponse::new(plan)))
 }
@@ -51,10 +54,11 @@ pub async fn list_enrollments(
 }
 
 pub async fn create_enrollment(
-    _user: AuthUser,
+    user: AuthUser,
     State(state): State<AppState>,
     Json(input): Json<CreateEnrollmentRequest>,
 ) -> Result<Json<ApiResponse<Enrollment>>, AppError> {
+    rbac::require_admin(&user.roles, "hcm").map_err(|e| AppError::Forbidden(e))?;
     let enrollment = state.service.create_enrollment(input).await?;
     Ok(Json(ApiResponse::new(enrollment)))
 }
@@ -69,10 +73,11 @@ pub async fn list_enrollments_by_employee(
 }
 
 pub async fn cancel_enrollment(
-    _user: AuthUser,
+    user: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<Enrollment>>, AppError> {
+    rbac::require_admin(&user.roles, "hcm").map_err(|e| AppError::Forbidden(e))?;
     let enrollment = state.service.cancel_enrollment(&id).await?;
     Ok(Json(ApiResponse::new(enrollment)))
 }

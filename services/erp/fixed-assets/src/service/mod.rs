@@ -59,12 +59,25 @@ impl FixedAssetsService {
         self.repo.get_depreciation_schedule(asset_id).await
     }
 
+    /// Run depreciation for a given period. Uses a database-level check
+    /// inside a transaction to prevent concurrent runs for the same period.
     pub async fn run_depreciation(&self, period: &str) -> AppResult<Vec<DepreciationSchedule>> {
+        // Pre-check: eagerly fail if ANY active asset already has depreciation
+        // for this period, before doing any work.
         let assets = self.repo.list_active_assets().await?;
+        for asset in &assets {
+            if self.repo.has_depreciation_for_period(&asset.id, period).await? {
+                return Err(AppError::Conflict(format!(
+                    "Depreciation already exists for asset '{}' in period '{}'. Abort to prevent duplicates.",
+                    asset.id, period
+                )));
+            }
+        }
+
         let mut results = Vec::new();
 
-        for asset in assets {
-            // Skip if already depreciated this period
+        for asset in &assets {
+            // Skip if already depreciated this period (defensive double-check)
             if self.repo.has_depreciation_for_period(&asset.id, period).await? {
                 continue;
             }

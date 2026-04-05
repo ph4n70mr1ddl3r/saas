@@ -52,7 +52,7 @@ impl StockLevelRepo {
 
     pub async fn release_reservation(&self, item_id: &str, warehouse_id: &str, quantity: i64) -> AppResult<()> {
         sqlx::query(
-            "UPDATE stock_levels SET quantity_reserved = quantity_reserved - ?, quantity_available = quantity_on_hand - quantity_reserved + ?, updated_at = datetime('now') WHERE item_id = ? AND warehouse_id = ?"
+            "UPDATE stock_levels SET quantity_reserved = quantity_reserved - ?, quantity_available = quantity_on_hand - (quantity_reserved - ?), updated_at = datetime('now') WHERE item_id = ? AND warehouse_id = ?"
         )
         .bind(quantity).bind(quantity).bind(item_id).bind(warehouse_id)
         .execute(&self.pool).await?;

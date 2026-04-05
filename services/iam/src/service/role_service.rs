@@ -1,8 +1,9 @@
 use sqlx::SqlitePool;
 use saas_nats_bus::NatsBus;
-use saas_common::error::AppResult;
+use saas_common::error::{AppError, AppResult};
 use crate::repository::role_repo::RoleRepo;
 use crate::models::role::{RoleResponse, CreateRole, UpdateRole, PermissionResponse};
+use validator::Validate;
 
 #[derive(Clone)]
 pub struct RoleService {
@@ -25,10 +26,12 @@ impl RoleService {
     }
 
     pub async fn create(&self, input: CreateRole) -> AppResult<RoleResponse> {
+        input.validate().map_err(|e| AppError::Validation(e.to_string()))?;
         self.repo.create_role(&input.name, input.description.as_deref()).await
     }
 
     pub async fn update(&self, id: &str, input: UpdateRole) -> AppResult<RoleResponse> {
+        input.validate().map_err(|e| AppError::Validation(e.to_string()))?;
         self.repo.update_role(id, input.name.as_deref(), input.description.as_deref()).await
     }
 
