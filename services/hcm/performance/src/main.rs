@@ -51,9 +51,9 @@ async fn main() -> anyhow::Result<()> {
             axum::http::header::CONTENT_TYPE,
             axum::http::header::AUTHORIZATION,
         ]);
-    let app = routes::build_router(AppState { service }).layer(cors);
+    let app = routes::build_router(AppState { service: service.clone() }).layer(cors);
 
-    events::subscribe(&bus).await?;
+    events::subscribe(&bus, service).await?;
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
     tracing::info!("Performance service listening on port {}", port);

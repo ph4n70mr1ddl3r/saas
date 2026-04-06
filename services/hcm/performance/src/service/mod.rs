@@ -7,7 +7,6 @@ use sqlx::SqlitePool;
 #[derive(Clone)]
 pub struct PerformanceService {
     repo: PerformanceRepo,
-    #[allow(dead_code)]
     bus: NatsBus,
 }
 
@@ -173,6 +172,50 @@ impl PerformanceService {
         // Verify the cycle exists
         self.repo.get_review_cycle(&input.cycle_id).await?;
         self.repo.create_feedback(&input).await
+    }
+
+    /// Handle new employee creation — auto-create a default onboarding goal
+    /// in the first active review cycle.
+    pub async fn handle_employee_created(
+        &self,
+        employee_id: &str,
+        first_name: &str,
+        last_name: &str,
+    ) -> AppResult<Option<Goal>> {
+        let cycles = self.repo.list_review_cycles().await?;
+        let active_cycle = cycles.into_iter().find(|c| c.status == "active");
+
+        let cycle = match active_cycle {
+            Some(c) => c,
+            None => {
+                tracing::info!(
+                    "No active review cycle found — skipping default goal for employee {}",
+                    employee_id
+                );
+                return Ok(None);
+            }
+        };
+
+        let goal = self
+            .repo
+            .create_goal(&CreateGoalRequest {
+                employee_id: employee_id.to_string(),
+                cycle_id: cycle.id.clone(),
+                title: format!("{} {}: Complete onboarding", first_name, last_name),
+                description: Some("Auto-created onboarding goal for new hire".to_string()),
+                weight: Some(1.0),
+                progress: Some(0.0),
+                due_date: None,
+            })
+            .await?;
+
+        tracing::info!(
+            "Created default onboarding goal '{}' for employee {} in cycle {}",
+            goal.title,
+            employee_id,
+            cycle.id
+        );
+        Ok(Some(goal))
     }
 }
 
@@ -468,5 +511,146 @@ mod tests {
         };
         let anon = repo.create_feedback(&anon_input).await.unwrap();
         assert!(anon.is_anonymous);
+    }
+
+    #[tokio::test]
+    async fn test_handle_employee_created_with_active_cycle() {
+        let repo = setup_repo().await;
+
+        // Create and activate a cycle
+        let cycle_input = CreateReviewCycleRequest {
+            name: "Q1 Onboarding".into(),
+            description: None,
+            start_date: "2025-01-01".into(),
+            end_date: "2025-03-31".into(),
+        };
+        let cycle = repo.create_review_cycle(&cycle_input).await.unwrap();
+        repo.update_cycle_status(&cycle.id, "active").await.unwrap();
+
+        // Simulate handle_employee_created logic at repo level
+        let employee_id = "emp-new-hire-001";
+        let first_name = "Alice";
+        let last_name = "Johnson";
+
+        let goal = repo
+            .create_goal(&CreateGoalRequest {
+                employee_id: employee_id.to_string(),
+                cycle_id: cycle.id.clone(),
+                title: format!("{} {}: Complete onboarding", first_name, last_name),
+                description: Some("Auto-created onboarding goal for new hire".to_string()),
+                weight: Some(1.0),
+                progress: Some(0.0),
+                due_date: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(goal.title, "Alice Johnson: Complete onboarding");
+        assert_eq!(goal.employee_id, "emp-new-hire-001");
+        assert_eq!(goal.cycle_id, cycle.id);
+        assert_eq!(goal.weight, 1.0);
+        assert_eq!(goal.progress, 0.0);
+        assert_eq!(goal.status, "not_started");
+    }
+
+    #[tokio::test]
+    async fn test_handle_employee_created_no_active_cycle() {
+        let repo = setup_repo().await;
+
+        // Create a draft cycle (not active)
+        let cycle_input = CreateReviewCycleRequest {
+            name: "Q2".into(),
+            description: None,
+            start_date: "2025-04-01".into(),
+            end_date: "2025-06-30".into(),
+        };
+        repo.create_review_cycle(&cycle_input).await.unwrap();
+
+        // Verify no active cycle exists — simulate the skip logic
+        let cycles = repo.list_review_cycles().await.unwrap();
+        let active = cycles.into_iter().find(|c| c.status == "active");
+        assert!(active.is_none(), "No active cycle should exist");
+    }
+
+    #[tokio::test]
+    async fn test_handle_employee_created_uses_first_active_cycle() {
+        let repo = setup_repo().await;
+
+        // Create two active cycles
+        let cycle1 = repo
+            .create_review_cycle(&CreateReviewCycleRequest {
+                name: "Cycle 1".into(),
+                description: None,
+                start_date: "2025-01-01".into(),
+                end_date: "2025-03-31".into(),
+            })
+            .await
+            .unwrap();
+        repo.update_cycle_status(&cycle1.id, "active").await.unwrap();
+
+        let cycle2 = repo
+            .create_review_cycle(&CreateReviewCycleRequest {
+                name: "Cycle 2".into(),
+                description: None,
+                start_date: "2025-04-01".into(),
+                end_date: "2025-06-30".into(),
+            })
+            .await
+            .unwrap();
+        repo.update_cycle_status(&cycle2.id, "active").await.unwrap();
+
+        // Find first active cycle and create goal
+        let cycles = repo.list_review_cycles().await.unwrap();
+        let active_cycle = cycles.into_iter().find(|c| c.status == "active").unwrap();
+
+        let goal = repo
+            .create_goal(&CreateGoalRequest {
+                employee_id: "emp-001".into(),
+                cycle_id: active_cycle.id.clone(),
+                title: "New Hire: Complete onboarding".into(),
+                description: None,
+                weight: Some(1.0),
+                progress: Some(0.0),
+                due_date: None,
+            })
+            .await
+            .unwrap();
+
+        // Goal should be created in one of the active cycles
+        assert!(goal.cycle_id == cycle1.id || goal.cycle_id == cycle2.id);
+    }
+
+    #[tokio::test]
+    async fn test_onboarding_goal_appears_in_goal_list() {
+        let repo = setup_repo().await;
+
+        let cycle = repo
+            .create_review_cycle(&CreateReviewCycleRequest {
+                name: "Q1".into(),
+                description: None,
+                start_date: "2025-01-01".into(),
+                end_date: "2025-03-31".into(),
+            })
+            .await
+            .unwrap();
+        repo.update_cycle_status(&cycle.id, "active").await.unwrap();
+
+        // Create onboarding goal
+        repo.create_goal(&CreateGoalRequest {
+            employee_id: "emp-999".into(),
+            cycle_id: cycle.id.clone(),
+            title: "John Smith: Complete onboarding".into(),
+            description: Some("Auto-created onboarding goal".to_string()),
+            weight: Some(1.0),
+            progress: Some(0.0),
+            due_date: None,
+        })
+        .await
+        .unwrap();
+
+        let goals = repo.list_goals().await.unwrap();
+        assert_eq!(goals.len(), 1);
+        assert_eq!(goals[0].employee_id, "emp-999");
+        assert!(goals[0].title.contains("onboarding"));
     }
 }

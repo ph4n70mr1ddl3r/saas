@@ -38,7 +38,11 @@ pub struct PayRunCompleted {
 pub struct ApplicationStatusChanged {
     pub application_id: String,
     pub job_id: String,
+    pub candidate_first_name: String,
+    pub candidate_last_name: String,
     pub candidate_email: String,
+    pub job_title: String,
+    pub department_id: String,
     pub old_status: String,
     pub new_status: String,
 }
@@ -154,4 +158,12 @@ pub struct CycleCountPosted {
     pub session_id: String,
     pub warehouse_id: String,
     pub adjustment_count: u32,
+}
+
+// IAM Events
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenRevoked {
+    pub jti: String,
+    pub user_id: String,
+    pub expires_at: String,
 }

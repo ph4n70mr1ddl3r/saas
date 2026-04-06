@@ -24,7 +24,10 @@ async fn main() -> anyhow::Result<()> {
     run_migrations(&pool, "./migrations").await?;
     let bus = NatsBus::connect(&nats_url, "saas-hcm-employee").await?;
     let service = service::EmployeeService::new(pool, bus.clone());
-    let state = routes::AppState { service };
+    let state = routes::AppState { service: service.clone() };
+
+    events::register(&bus, service).await?;
+
     let app = routes::build_router(state)
         .layer(saas_common::middleware::create_cors_layer())
         .layer(saas_common::middleware::create_trace_layer());

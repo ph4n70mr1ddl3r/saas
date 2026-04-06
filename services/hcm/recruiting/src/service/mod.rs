@@ -71,10 +71,16 @@ impl RecruitingService {
             .await?;
 
         if input.status == "hired" {
+            // Fetch job details to include in event for downstream consumers
+            let job = self.repo.get_job(&app.job_id).await.ok();
             let event = ApplicationStatusChanged {
                 application_id: id.to_string(),
                 job_id: app.job_id.clone(),
+                candidate_first_name: app.candidate_first_name.clone(),
+                candidate_last_name: app.candidate_last_name.clone(),
                 candidate_email: app.candidate_email.clone(),
+                job_title: job.as_ref().map(|j| j.title.clone()).unwrap_or_default(),
+                department_id: job.as_ref().map(|j| j.department_id.clone()).unwrap_or_default(),
                 old_status,
                 new_status: "hired".to_string(),
             };

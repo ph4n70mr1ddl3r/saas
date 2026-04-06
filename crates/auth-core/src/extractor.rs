@@ -9,6 +9,7 @@ pub struct AuthUser {
     pub user_id: String,
     pub username: String,
     pub roles: Vec<String>,
+    pub jti: Option<String>,
 }
 
 #[derive(Debug)]
@@ -58,6 +59,7 @@ impl<S: Send + Sync> FromRequestParts<S> for AuthUser {
             user_id: claims.sub,
             username: claims.username,
             roles: claims.roles,
+            jti: claims.jti,
         })
     }
 }

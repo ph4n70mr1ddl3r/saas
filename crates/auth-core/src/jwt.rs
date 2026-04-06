@@ -12,6 +12,8 @@ pub struct Claims {
     pub roles: Vec<String>,
     pub exp: u64,
     pub iat: u64,
+    #[serde(default)]
+    pub jti: Option<String>,
 }
 
 pub fn encode_token(
@@ -27,6 +29,7 @@ pub fn encode_token(
         roles,
         iat: now.timestamp() as u64,
         exp: (now + chrono::Duration::hours(24)).timestamp() as u64,
+        jti: Some(uuid::Uuid::new_v4().to_string()),
     };
     encode(
         &Header::default(),

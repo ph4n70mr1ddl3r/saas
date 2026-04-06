@@ -6,6 +6,7 @@ use saas_common::error::AppResult;
 use saas_common::pagination::PaginationParams;
 use saas_common::response::ApiListResponse;
 use saas_nats_bus::NatsBus;
+use saas_proto::events::ApplicationStatusChanged;
 use sqlx::SqlitePool;
 use validator::Validate;
 
@@ -155,5 +156,25 @@ impl EmployeeService {
 
     pub async fn get_org_chart(&self) -> AppResult<Vec<OrgChartNode>> {
         self.emp_repo.get_org_chart().await
+    }
+
+    /// Handle hiring event from recruiting service — auto-create an employee record.
+    pub async fn handle_application_hired(&self, event: &ApplicationStatusChanged) -> AppResult<EmployeeResponse> {
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let employee_number = format!("EMP-AUTO-{}", &event.application_id[..8.min(event.application_id.len())]);
+
+        let input = CreateEmployee {
+            first_name: event.candidate_first_name.clone(),
+            last_name: event.candidate_last_name.clone(),
+            email: event.candidate_email.clone(),
+            phone: None,
+            hire_date: today,
+            department_id: event.department_id.clone(),
+            reports_to: None,
+            job_title: event.job_title.clone(),
+            employee_number: employee_number,
+        };
+
+        self.create_employee(input).await
     }
 }

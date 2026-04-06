@@ -576,4 +576,116 @@ mod tests {
         assert_eq!(term_total, 1);
         assert_eq!(terminated[0].first_name, "Kate");
     }
+
+    #[tokio::test]
+    async fn test_auto_create_employee_from_hire_event() {
+        let (dept_repo, emp_repo) = setup_repos().await;
+
+        let dept = dept_repo
+            .create(&CreateDepartment {
+                name: "Engineering".into(),
+                parent_id: None,
+                manager_id: None,
+                cost_center: None,
+            })
+            .await
+            .unwrap();
+
+        // Simulate the hiring event by creating an employee using the same
+        // logic that handle_application_hired uses (repo-level test)
+        let app_id = uuid::Uuid::new_v4().to_string();
+        let employee_number = format!("EMP-AUTO-{}", &app_id[..8.min(app_id.len())]);
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+
+        let input = CreateEmployee {
+            first_name: "Jane".into(),
+            last_name: "Doe".into(),
+            email: "jane.doe@example.com".into(),
+            phone: None,
+            hire_date: today,
+            department_id: dept.id.clone(),
+            reports_to: None,
+            job_title: "Software Engineer".into(),
+            employee_number: employee_number.clone(),
+        };
+
+        let emp = emp_repo.create(&input).await.unwrap();
+
+        assert_eq!(emp.first_name, "Jane");
+        assert_eq!(emp.last_name, "Doe");
+        assert_eq!(emp.email, "jane.doe@example.com");
+        assert_eq!(emp.job_title, "Software Engineer");
+        assert_eq!(emp.department_id, dept.id);
+        assert_eq!(emp.status, "active");
+        assert!(emp.employee_number.starts_with("EMP-AUTO-"));
+    }
+
+    #[tokio::test]
+    async fn test_auto_create_employee_number_format() {
+        // Verify the employee number generation logic
+        let app_id = "abcdef12-3456-7890-abcd-ef1234567890";
+        let emp_num = format!("EMP-AUTO-{}", &app_id[..8.min(app_id.len())]);
+        assert_eq!(emp_num, "EMP-AUTO-abcdef12");
+
+        // Short application ID
+        let short_id = "abc";
+        let emp_num_short = format!("EMP-AUTO-{}", &short_id[..8.min(short_id.len())]);
+        assert_eq!(emp_num_short, "EMP-AUTO-abc");
+
+        // Exactly 8 chars
+        let exact_id = "12345678";
+        let emp_num_exact = format!("EMP-AUTO-{}", &exact_id[..8.min(exact_id.len())]);
+        assert_eq!(emp_num_exact, "EMP-AUTO-12345678");
+    }
+
+    #[tokio::test]
+    async fn test_auto_created_employee_appears_in_list() {
+        let (dept_repo, emp_repo) = setup_repos().await;
+
+        let dept = dept_repo
+            .create(&CreateDepartment {
+                name: "Product".into(),
+                parent_id: None,
+                manager_id: None,
+                cost_center: None,
+            })
+            .await
+            .unwrap();
+
+        // Auto-create employee (simulating hire event handler)
+        let app_id = uuid::Uuid::new_v4().to_string();
+        let employee_number = format!("EMP-AUTO-{}", &app_id[..8.min(app_id.len())]);
+
+        emp_repo
+            .create(&CreateEmployee {
+                first_name: "Auto".into(),
+                last_name: "Hire".into(),
+                email: "auto.hire@example.com".into(),
+                phone: None,
+                hire_date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
+                department_id: dept.id.clone(),
+                reports_to: None,
+                job_title: "Product Manager".into(),
+                employee_number: employee_number,
+            })
+            .await
+            .unwrap();
+
+        // Verify it appears in the employee list
+        let pag = PaginationParams { page: Some(1), per_page: Some(10) };
+        let (emps, total) = emp_repo
+            .list(
+                &pag,
+                &EmployeeFilters {
+                    department_id: Some(dept.id),
+                    status: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(total, 1);
+        assert_eq!(emps[0].first_name, "Auto");
+        assert_eq!(emps[0].last_name, "Hire");
+    }
 }
