@@ -160,6 +160,193 @@ pub struct CycleCountPosted {
     pub adjustment_count: u32,
 }
 
+// HCM Benefits Events
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenefitPlanCreated {
+    pub plan_id: String,
+    pub name: String,
+    pub plan_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenefitPlanDeactivated {
+    pub plan_id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmployeeEnrolled {
+    pub enrollment_id: String,
+    pub employee_id: String,
+    pub plan_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnrollmentCancelled {
+    pub enrollment_id: String,
+    pub employee_id: String,
+    pub plan_id: String,
+}
+
+// ERP General Ledger Events
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JournalEntryReversed {
+    pub entry_id: String,
+    pub original_entry_id: String,
+    pub reversed_by: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeriodClosed {
+    pub period_id: String,
+    pub name: String,
+    pub fiscal_year: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BudgetActivated {
+    pub budget_id: String,
+    pub name: String,
+    pub total_budget_cents: i64,
+}
+
+// ERP Fixed Assets Events
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssetCreated {
+    pub asset_id: String,
+    pub name: String,
+    pub asset_number: String,
+    pub category: String,
+    pub purchase_cost_cents: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssetDisposed {
+    pub asset_id: String,
+    pub name: String,
+    pub asset_number: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DepreciationRunCompleted {
+    pub period: String,
+    pub asset_count: u32,
+    pub total_depreciation_cents: i64,
+}
+
+// ERP Cash Management Events
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BankAccountCreated {
+    pub account_id: String,
+    pub name: String,
+    pub bank_name: String,
+    pub currency: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransferCompleted {
+    pub from_account_id: String,
+    pub to_account_id: String,
+    pub amount_cents: i64,
+    pub currency: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReconciliationCompleted {
+    pub reconciliation_id: String,
+    pub bank_account_id: String,
+    pub book_balance_cents: i64,
+    pub statement_balance_cents: i64,
+    pub difference_cents: i64,
+}
+
+// ERP Expense Management Events
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExpenseReportSubmitted {
+    pub report_id: String,
+    pub employee_id: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExpenseReportRejected {
+    pub report_id: String,
+    pub employee_id: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExpenseReportPaid {
+    pub report_id: String,
+    pub employee_id: String,
+    pub total_cents: i64,
+}
+
+// HCM Time & Labor Events
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimesheetSubmitted {
+    pub timesheet_id: String,
+    pub employee_id: String,
+    pub week_start: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimesheetApproved {
+    pub timesheet_id: String,
+    pub employee_id: String,
+    pub week_start: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LeaveRequestSubmitted {
+    pub request_id: String,
+    pub employee_id: String,
+    pub leave_type: String,
+    pub start_date: String,
+    pub end_date: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LeaveRequestApproved {
+    pub request_id: String,
+    pub employee_id: String,
+    pub leave_type: String,
+    pub days: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LeaveRequestRejected {
+    pub request_id: String,
+    pub employee_id: String,
+    pub leave_type: String,
+}
+
+// IAM Role Events
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoleCreated {
+    pub role_id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoleUpdated {
+    pub role_id: String,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RolePermissionsChanged {
+    pub role_id: String,
+    pub permission_count: u32,
+}
+
+// Config Service Events
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigUpdated {
+    pub key: String,
+    pub value: String,
+}
+
 // IAM Events
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenRevoked {

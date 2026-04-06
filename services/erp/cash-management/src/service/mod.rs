@@ -2,12 +2,14 @@ use crate::models::*;
 use crate::repository::CashManagementRepo;
 use saas_common::error::{AppError, AppResult};
 use saas_nats_bus::NatsBus;
+use saas_proto::events::{
+    BankAccountCreated, ReconciliationCompleted, TransferCompleted,
+};
 use sqlx::SqlitePool;
 
 #[derive(Clone)]
 pub struct CashManagementService {
     repo: CashManagementRepo,
-    #[allow(dead_code)]
     bus: NatsBus,
 }
 
@@ -33,7 +35,27 @@ impl CashManagementService {
         &self,
         input: &CreateBankAccountRequest,
     ) -> AppResult<BankAccount> {
-        self.repo.create_bank_account(input).await
+        let account = self.repo.create_bank_account(input).await?;
+        if let Err(e) = self
+            .bus
+            .publish(
+                "erp.cash.account.created",
+                BankAccountCreated {
+                    account_id: account.id.clone(),
+                    name: account.name.clone(),
+                    bank_name: account.bank_name.clone(),
+                    currency: account.currency.clone(),
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "erp.cash.account.created",
+                e
+            );
+        }
+        Ok(account)
     }
 
     // --- Bank Transactions ---
@@ -77,7 +99,33 @@ impl CashManagementService {
     ) -> AppResult<Reconciliation> {
         // Validate bank account exists
         self.repo.get_bank_account(&input.bank_account_id).await?;
-        self.repo.create_reconciliation(input).await
+        let recon = self.repo.create_reconciliation(input).await?;
+
+        // Publish reconciliation completed event if balanced
+        if recon.status == "completed" {
+            if let Err(e) = self
+                .bus
+                .publish(
+                    "erp.cash.reconciliation.completed",
+                    ReconciliationCompleted {
+                        reconciliation_id: recon.id.clone(),
+                        bank_account_id: recon.bank_account_id.clone(),
+                        book_balance_cents: recon.book_balance_cents,
+                        statement_balance_cents: recon.statement_balance_cents,
+                        difference_cents: recon.difference_cents,
+                    },
+                )
+                .await
+            {
+                tracing::error!(
+                    "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                    "erp.cash.reconciliation.completed",
+                    e
+                );
+            }
+        }
+
+        Ok(recon)
     }
 
     // --- Cash Flow Statement ---
@@ -174,7 +222,8 @@ impl CashManagementService {
             ));
         }
 
-        self.repo
+        let result = self
+            .repo
             .transfer_between_accounts(
                 &input.from_account_id,
                 &input.to_account_id,
@@ -183,7 +232,29 @@ impl CashManagementService {
                 input.description.as_deref(),
                 input.reference.as_deref(),
             )
+            .await?;
+
+        if let Err(e) = self
+            .bus
+            .publish(
+                "erp.cash.transfer.completed",
+                TransferCompleted {
+                    from_account_id: input.from_account_id.clone(),
+                    to_account_id: input.to_account_id.clone(),
+                    amount_cents: input.amount_cents,
+                    currency: from_account.currency.clone(),
+                },
+            )
             .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "erp.cash.transfer.completed",
+                e
+            );
+        }
+
+        Ok(result)
     }
 }
 
@@ -248,7 +319,6 @@ mod tests {
     async fn test_bank_account_crud() {
         let repo = setup_repo().await;
 
-        // Create
         let input = CreateBankAccountRequest {
             name: "Operating Account".into(),
             bank_name: "First Bank".into(),
@@ -262,16 +332,13 @@ mod tests {
         assert_eq!(account.balance_cents, 100_000);
         assert_eq!(account.currency, "USD");
 
-        // Read
         let fetched = repo.get_bank_account(&account.id).await.unwrap();
         assert_eq!(fetched.id, account.id);
         assert_eq!(fetched.bank_name, "First Bank");
 
-        // List
         let accounts = repo.list_bank_accounts().await.unwrap();
         assert_eq!(accounts.len(), 1);
 
-        // Update balance
         let updated = repo.update_balance(&account.id, 250_000).await.unwrap();
         assert_eq!(updated.balance_cents, 250_000);
     }
@@ -373,7 +440,6 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-        // Balance should remain unchanged after rollback
         let acct_after = repo.get_bank_account(&acct.id).await.unwrap();
         assert_eq!(acct_after.balance_cents, 10_000);
     }
@@ -445,7 +511,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Reconcile with matching statement balance
         let recon = repo
             .create_reconciliation(&CreateReconciliationRequest {
                 bank_account_id: acct.id.clone(),
@@ -477,7 +542,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Reconcile with mismatched statement balance
         let recon = repo
             .create_reconciliation(&CreateReconciliationRequest {
                 bank_account_id: acct.id.clone(),
@@ -532,7 +596,6 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-        // Balances unchanged
         let from_after = repo.get_bank_account(&from_acct.id).await.unwrap();
         let to_after = repo.get_bank_account(&to_acct.id).await.unwrap();
         assert_eq!(from_after.balance_cents, 5_000);
@@ -577,7 +640,6 @@ mod tests {
         .await
         .unwrap();
 
-        // Query June only
         let june_txns = repo
             .get_transactions_for_period(&acct.id, "2025-06-01", "2025-06-30")
             .await
@@ -585,7 +647,6 @@ mod tests {
         assert_eq!(june_txns.len(), 1);
         assert_eq!(june_txns[0].amount_cents, 10_000);
 
-        // Query full range
         let all_txns = repo
             .get_transactions_for_period(&acct.id, "2025-06-01", "2025-07-31")
             .await
@@ -609,7 +670,6 @@ mod tests {
             .await
             .unwrap();
 
-        // First reconciliation
         repo.create_reconciliation(&CreateReconciliationRequest {
             bank_account_id: acct.id.clone(),
             period_start: "2025-05-01".into(),
@@ -619,7 +679,6 @@ mod tests {
         .await
         .unwrap();
 
-        // Second reconciliation for different period
         repo.create_reconciliation(&CreateReconciliationRequest {
             bank_account_id: acct.id.clone(),
             period_start: "2025-06-01".into(),

@@ -32,9 +32,7 @@ pub async fn logout(
     let jti = user.jti.as_deref().unwrap_or("");
     if !jti.is_empty() {
         let exp = {
-            let secret = saas_auth_core::jwt::read_jwt_secret();
-            // Decode the exp from the claims - we know the user was already authenticated
-            // so we use a default 24h window for the revocation expiry
+            // Use a default 24h window for the revocation expiry
             (chrono::Utc::now() + chrono::Duration::hours(24)).timestamp() as u64
         };
         state.auth_service.logout(&user.user_id, jti, exp).await?;

@@ -2,13 +2,13 @@ use crate::models::role::{CreateRole, PermissionResponse, RoleResponse, UpdateRo
 use crate::repository::role_repo::RoleRepo;
 use saas_common::error::{AppError, AppResult};
 use saas_nats_bus::NatsBus;
+use saas_proto::events::{RoleCreated, RoleUpdated, RolePermissionsChanged};
 use sqlx::SqlitePool;
 use validator::Validate;
 
 #[derive(Clone)]
 pub struct RoleService {
     repo: RoleRepo,
-    #[allow(dead_code)]
     bus: NatsBus,
 }
 
@@ -32,18 +32,58 @@ impl RoleService {
         input
             .validate()
             .map_err(|e| AppError::Validation(e.to_string()))?;
-        self.repo
+        let role = self.repo
             .create_role(&input.name, input.description.as_deref())
+            .await?;
+
+        if let Err(e) = self
+            .bus
+            .publish(
+                "iam.role.created",
+                RoleCreated {
+                    role_id: role.id.clone(),
+                    name: role.name.clone(),
+                },
+            )
             .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "iam.role.created",
+                e
+            );
+        }
+
+        Ok(role)
     }
 
     pub async fn update(&self, id: &str, input: UpdateRole) -> AppResult<RoleResponse> {
         input
             .validate()
             .map_err(|e| AppError::Validation(e.to_string()))?;
-        self.repo
+        let role = self.repo
             .update_role(id, input.name.as_deref(), input.description.as_deref())
+            .await?;
+
+        if let Err(e) = self
+            .bus
+            .publish(
+                "iam.role.updated",
+                RoleUpdated {
+                    role_id: role.id.clone(),
+                    name: input.name,
+                },
+            )
             .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "iam.role.updated",
+                e
+            );
+        }
+
+        Ok(role)
     }
 
     pub async fn list_permissions(&self) -> AppResult<Vec<PermissionResponse>> {
@@ -57,7 +97,27 @@ impl RoleService {
     ) -> AppResult<()> {
         self.repo
             .set_role_permissions(role_id, &permission_ids)
+            .await?;
+
+        if let Err(e) = self
+            .bus
+            .publish(
+                "iam.role.permissions.changed",
+                RolePermissionsChanged {
+                    role_id: role_id.to_string(),
+                    permission_count: permission_ids.len() as u32,
+                },
+            )
             .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "iam.role.permissions.changed",
+                e
+            );
+        }
+
+        Ok(())
     }
 }
 
@@ -120,27 +180,27 @@ mod tests {
         let pool = setup().await;
         let repo = RoleRepo::new(pool);
 
-        // Create
         let role = repo
             .create_role("test_role", Some("A test role"))
             .await
             .unwrap();
         assert_eq!(role.name, "test_role");
-        assert_eq!(role.description, Some("A test role".into()));
+        assert_eq!(role.description.as_deref(), Some("A test role"));
 
-        // Read
         let fetched = repo.get_role(&role.id).await.unwrap();
         assert_eq!(fetched.name, "test_role");
 
-        // Update
         let updated = repo
-            .update_role(&role.id, Some("updated_role"), Some("Updated desc"))
+            .update_role(
+                &role.id,
+                Some("updated_role"),
+                Some("Updated desc"),
+            )
             .await
             .unwrap();
         assert_eq!(updated.name, "updated_role");
-        assert_eq!(updated.description, Some("Updated desc".into()));
+        assert_eq!(updated.description.as_deref(), Some("Updated desc"));
 
-        // List
         let roles = repo.list_roles().await.unwrap();
         assert_eq!(roles.len(), 1);
     }
@@ -149,11 +209,8 @@ mod tests {
     async fn test_permissions_are_seeded() {
         let pool = setup().await;
         let repo = RoleRepo::new(pool);
-
-        // The 003_create_permissions.sql seeds permissions
         let perms = repo.list_permissions().await.unwrap();
         assert!(!perms.is_empty(), "Seed permissions should exist");
-        // Verify some known seed data
         let codes: Vec<&str> = perms.iter().map(|p| p.code.as_str()).collect();
         assert!(codes.contains(&"iam:user:read"));
         assert!(codes.contains(&"iam:role:write"));
@@ -163,23 +220,15 @@ mod tests {
     async fn test_role_permission_assignment() {
         let pool = setup().await;
         let repo = RoleRepo::new(pool);
-
-        // Create role
         let role = repo
             .create_role("perm_test_role", None)
             .await
             .unwrap();
-
-        // Get some permission IDs from seeded data
         let perms = repo.list_permissions().await.unwrap();
         let perm_ids: Vec<String> = perms.iter().take(3).map(|p| p.id.clone()).collect();
-
-        // Assign permissions
         repo.set_role_permissions(&role.id, &perm_ids)
             .await
             .unwrap();
-
-        // Verify
         let role_perms = repo.get_role_permissions(&role.id).await.unwrap();
         assert_eq!(role_perms.len(), 3);
     }
@@ -188,24 +237,18 @@ mod tests {
     async fn test_role_permission_replacement() {
         let pool = setup().await;
         let repo = RoleRepo::new(pool);
-
         let role = repo
             .create_role("replace_role", None)
             .await
             .unwrap();
-
         let perms = repo.list_permissions().await.unwrap();
         let first_three: Vec<String> = perms.iter().take(3).map(|p| p.id.clone()).collect();
         let next_two: Vec<String> = perms.iter().skip(3).take(2).map(|p| p.id.clone()).collect();
-
-        // Assign first set
         repo.set_role_permissions(&role.id, &first_three)
             .await
             .unwrap();
         let role_perms = repo.get_role_permissions(&role.id).await.unwrap();
         assert_eq!(role_perms.len(), 3);
-
-        // Replace with second set
         repo.set_role_permissions(&role.id, &next_two)
             .await
             .unwrap();
@@ -219,5 +262,49 @@ mod tests {
         let repo = RoleRepo::new(pool);
         let result = repo.get_role("nonexistent").await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_role_create_validation_empty_name() {
+        let pool = setup().await;
+        let repo = RoleRepo::new(pool);
+
+        // Attempt to create with empty name should be caught by service validation
+        let input = CreateRole {
+            name: String::new(),
+            description: None,
+        };
+        input.validate()
+            .map_err(|e| AppError::Validation(e.to_string()))
+            .expect_err("Empty name should fail validation");
+    }
+
+    #[tokio::test]
+    async fn test_multiple_roles() {
+        let pool = setup().await;
+        let repo = RoleRepo::new(pool);
+
+        repo.create_role("role_a", None).await.unwrap();
+        repo.create_role("role_b", Some("Second role")).await.unwrap();
+        repo.create_role("role_c", None).await.unwrap();
+
+        let roles = repo.list_roles().await.unwrap();
+        assert_eq!(roles.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_role_permission_clear() {
+        let pool = setup().await;
+        let repo = RoleRepo::new(pool);
+        let role = repo.create_role("clear_perm_role", None).await.unwrap();
+        let perms = repo.list_permissions().await.unwrap();
+        let perm_ids: Vec<String> = perms.iter().take(2).map(|p| p.id.clone()).collect();
+
+        repo.set_role_permissions(&role.id, &perm_ids).await.unwrap();
+        assert_eq!(repo.get_role_permissions(&role.id).await.unwrap().len(), 2);
+
+        // Clear all permissions
+        repo.set_role_permissions(&role.id, &[]).await.unwrap();
+        assert_eq!(repo.get_role_permissions(&role.id).await.unwrap().len(), 0);
     }
 }

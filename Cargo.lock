@@ -3016,6 +3016,7 @@ dependencies = [
  "saas-common",
  "saas-db",
  "saas-nats-bus",
+ "saas-proto",
  "serde",
  "serde_json",
  "sqlx",

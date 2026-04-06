@@ -2,12 +2,14 @@ use crate::models::*;
 use crate::repository::BenefitsRepo;
 use saas_common::error::{AppError, AppResult};
 use saas_nats_bus::NatsBus;
+use saas_proto::events::{
+    BenefitPlanCreated, BenefitPlanDeactivated, EnrollmentCancelled, EmployeeEnrolled,
+};
 use sqlx::SqlitePool;
 
 #[derive(Clone)]
 pub struct BenefitsService {
     repo: BenefitsRepo,
-    #[allow(dead_code)]
     bus: NatsBus,
 }
 
@@ -30,11 +32,51 @@ impl BenefitsService {
     }
 
     pub async fn create_plan(&self, input: CreatePlanRequest) -> AppResult<BenefitPlan> {
-        self.repo.create_plan(&input).await
+        let plan = self.repo.create_plan(&input).await?;
+        if let Err(e) = self
+            .bus
+            .publish(
+                "hcm.benefits.plan.created",
+                BenefitPlanCreated {
+                    plan_id: plan.id.clone(),
+                    name: plan.name.clone(),
+                    plan_type: plan.plan_type.clone(),
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "hcm.benefits.plan.created",
+                e
+            );
+        }
+        Ok(plan)
     }
 
     pub async fn update_plan(&self, id: &str, input: UpdatePlanRequest) -> AppResult<BenefitPlan> {
-        self.repo.update_plan(id, &input).await
+        let plan = self.repo.update_plan(id, &input).await?;
+        // Publish deactivation event if plan was deactivated
+        if input.is_active == Some(false) {
+            if let Err(e) = self
+                .bus
+                .publish(
+                    "hcm.benefits.plan.deactivated",
+                    BenefitPlanDeactivated {
+                        plan_id: plan.id.clone(),
+                        name: plan.name.clone(),
+                    },
+                )
+                .await
+            {
+                tracing::error!(
+                    "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                    "hcm.benefits.plan.deactivated",
+                    e
+                );
+            }
+        }
+        Ok(plan)
     }
 
     // --- Enrollments ---
@@ -62,7 +104,26 @@ impl BenefitsService {
                 input.employee_id, input.plan_id
             )));
         }
-        self.repo.create_enrollment(&input).await
+        let enrollment = self.repo.create_enrollment(&input).await?;
+        if let Err(e) = self
+            .bus
+            .publish(
+                "hcm.benefits.enrollment.created",
+                EmployeeEnrolled {
+                    enrollment_id: enrollment.id.clone(),
+                    employee_id: enrollment.employee_id.clone(),
+                    plan_id: enrollment.plan_id.clone(),
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "hcm.benefits.enrollment.created",
+                e
+            );
+        }
+        Ok(enrollment)
     }
 
     pub async fn list_enrollments_by_employee(
@@ -102,7 +163,26 @@ impl BenefitsService {
                 id
             )));
         }
-        self.repo.cancel_enrollment(id).await
+        let cancelled = self.repo.cancel_enrollment(id).await?;
+        if let Err(e) = self
+            .bus
+            .publish(
+                "hcm.benefits.enrollment.cancelled",
+                EnrollmentCancelled {
+                    enrollment_id: cancelled.id.clone(),
+                    employee_id: cancelled.employee_id.clone(),
+                    plan_id: cancelled.plan_id.clone(),
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "hcm.benefits.enrollment.cancelled",
+                e
+            );
+        }
+        Ok(cancelled)
     }
 }
 

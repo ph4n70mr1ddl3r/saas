@@ -58,6 +58,13 @@ impl TimeLaborRepo {
     }
 
     pub async fn submit_timesheet(&self, id: &str) -> AppResult<Timesheet> {
+        let ts = self.get_timesheet(id).await?;
+        if ts.status != "draft" {
+            return Err(AppError::Validation(format!(
+                "Timesheet '{}' must be in draft status to submit (current: {})",
+                id, ts.status
+            )));
+        }
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query("UPDATE timesheets SET status = 'submitted', submitted_at = ? WHERE id = ?")
             .bind(&now)
@@ -68,6 +75,13 @@ impl TimeLaborRepo {
     }
 
     pub async fn approve_timesheet(&self, id: &str) -> AppResult<Timesheet> {
+        let ts = self.get_timesheet(id).await?;
+        if ts.status != "submitted" {
+            return Err(AppError::Validation(format!(
+                "Timesheet '{}' must be in submitted status to approve (current: {})",
+                id, ts.status
+            )));
+        }
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query("UPDATE timesheets SET status = 'approved', approved_at = ? WHERE id = ?")
             .bind(&now)

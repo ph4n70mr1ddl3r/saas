@@ -2,12 +2,12 @@ use crate::models::*;
 use crate::repository::LedgerRepo;
 use saas_common::error::{AppError, AppResult};
 use saas_nats_bus::NatsBus;
+use saas_proto::events::{JournalEntryPosted, JournalEntryReversed, PeriodClosed, BudgetActivated};
 use sqlx::SqlitePool;
 
 #[derive(Clone)]
 pub struct LedgerService {
     repo: LedgerRepo,
-    #[allow(dead_code)]
     bus: NatsBus,
 }
 
@@ -56,7 +56,26 @@ impl LedgerService {
     }
 
     pub async fn close_period(&self, id: &str) -> AppResult<Period> {
-        self.repo.close_period(id).await
+        let period = self.repo.close_period(id).await?;
+        if let Err(e) = self
+            .bus
+            .publish(
+                "erp.gl.period.closed",
+                PeriodClosed {
+                    period_id: period.id.clone(),
+                    name: period.name.clone(),
+                    fiscal_year: period.fiscal_year as i32,
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "erp.gl.period.closed",
+                e
+            );
+        }
+        Ok(period)
     }
 
     // --- Journal Entries ---
@@ -156,6 +175,34 @@ impl LedgerService {
 
         let entry = self.repo.post_journal_entry(id).await?;
         let lines = self.repo.get_journal_lines(id).await?;
+
+        if let Err(e) = self
+            .bus
+            .publish(
+                "erp.gl.journal.posted",
+                JournalEntryPosted {
+                    entry_id: entry.id.clone(),
+                    entry_number: entry.entry_number.clone(),
+                    lines: lines
+                        .iter()
+                        .map(|l| saas_proto::events::JournalLinePosted {
+                            account_code: l.account_id.clone(),
+                            debit_cents: l.debit_cents,
+                            credit_cents: l.credit_cents,
+                        })
+                        .collect(),
+                    posted_by: entry.created_by.clone(),
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "erp.gl.journal.posted",
+                e
+            );
+        }
+
         Ok(JournalEntryWithLines { entry, lines })
     }
 
@@ -168,6 +215,34 @@ impl LedgerService {
         }
         let entry = self.repo.reverse_journal_entry(id).await?;
         let lines = self.repo.get_journal_lines(id).await?;
+
+        // Find the reversal entry to publish its ID
+        let all_entries = self.repo.list_journal_entries().await?;
+        let reversal = all_entries
+            .iter()
+            .find(|e| e.entry_number.starts_with("REV-") && e.status == "posted");
+
+        if let Some(rev) = reversal {
+            if let Err(e) = self
+                .bus
+                .publish(
+                    "erp.gl.journal.reversed",
+                    JournalEntryReversed {
+                        entry_id: rev.id.clone(),
+                        original_entry_id: id.to_string(),
+                        reversed_by: "system".to_string(),
+                    },
+                )
+                .await
+            {
+                tracing::error!(
+                    "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                    "erp.gl.journal.reversed",
+                    e
+                );
+            }
+        }
+
         Ok(JournalEntryWithLines { entry, lines })
     }
 
@@ -266,7 +341,26 @@ impl LedgerService {
                 "Only approved budgets can be activated".into(),
             ));
         }
-        self.repo.update_budget_status(id, "active").await
+        let budget = self.repo.update_budget_status(id, "active").await?;
+        if let Err(e) = self
+            .bus
+            .publish(
+                "erp.gl.budget.activated",
+                BudgetActivated {
+                    budget_id: budget.id.clone(),
+                    name: budget.name.clone(),
+                    total_budget_cents: budget.total_budget_cents,
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "erp.gl.budget.activated",
+                e
+            );
+        }
+        Ok(budget)
     }
 
     pub async fn close_budget(&self, id: &str) -> AppResult<Budget> {

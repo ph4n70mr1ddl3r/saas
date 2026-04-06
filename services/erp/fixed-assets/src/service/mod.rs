@@ -2,12 +2,12 @@ use crate::models::*;
 use crate::repository::FixedAssetsRepo;
 use saas_common::error::{AppError, AppResult};
 use saas_nats_bus::NatsBus;
+use saas_proto::events::{AssetCreated, AssetDisposed, DepreciationRunCompleted};
 use sqlx::SqlitePool;
 
 #[derive(Clone)]
 pub struct FixedAssetsService {
     repo: FixedAssetsRepo,
-    #[allow(dead_code)]
     bus: NatsBus,
 }
 
@@ -38,7 +38,28 @@ impl FixedAssetsService {
         if input.useful_life_months <= 0 {
             return Err(AppError::Validation("Useful life must be positive".into()));
         }
-        self.repo.create_asset(input).await
+        let asset = self.repo.create_asset(input).await?;
+        if let Err(e) = self
+            .bus
+            .publish(
+                "erp.assets.asset.created",
+                AssetCreated {
+                    asset_id: asset.id.clone(),
+                    name: asset.name.clone(),
+                    asset_number: asset.asset_number.clone(),
+                    category: asset.category.clone(),
+                    purchase_cost_cents: asset.purchase_cost_cents,
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "erp.assets.asset.created",
+                e
+            );
+        }
+        Ok(asset)
     }
 
     pub async fn update_asset(&self, id: &str, input: &UpdateAssetRequest) -> AppResult<Asset> {
@@ -52,7 +73,31 @@ impl FixedAssetsService {
                 )));
             }
         }
-        self.repo.update_asset(id, input).await
+        let asset = self.repo.update_asset(id, input).await?;
+
+        // Publish disposal event if asset was disposed
+        if input.status.as_deref() == Some("disposed") {
+            if let Err(e) = self
+                .bus
+                .publish(
+                    "erp.assets.asset.disposed",
+                    AssetDisposed {
+                        asset_id: asset.id.clone(),
+                        name: asset.name.clone(),
+                        asset_number: asset.asset_number.clone(),
+                    },
+                )
+                .await
+            {
+                tracing::error!(
+                    "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                    "erp.assets.asset.disposed",
+                    e
+                );
+            }
+        }
+
+        Ok(asset)
     }
 
     // --- Depreciation ---
@@ -82,6 +127,7 @@ impl FixedAssetsService {
         }
 
         let mut results = Vec::new();
+        let mut total_depreciation_cents: i64 = 0;
 
         for asset in &assets {
             // Skip if already depreciated this period (defensive double-check)
@@ -142,7 +188,30 @@ impl FixedAssetsService {
                 )
                 .await?;
 
+            total_depreciation_cents += actual_depreciation;
             results.push(schedule);
+        }
+
+        // Publish depreciation run completed event
+        if !results.is_empty() {
+            if let Err(e) = self
+                .bus
+                .publish(
+                    "erp.assets.depreciation.completed",
+                    DepreciationRunCompleted {
+                        period: period.to_string(),
+                        asset_count: results.len() as u32,
+                        total_depreciation_cents,
+                    },
+                )
+                .await
+            {
+                tracing::error!(
+                    "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                    "erp.assets.depreciation.completed",
+                    e
+                );
+            }
         }
 
         Ok(results)

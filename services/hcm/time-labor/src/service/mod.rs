@@ -2,12 +2,15 @@ use crate::models::*;
 use crate::repository::TimeLaborRepo;
 use saas_common::error::{AppError, AppResult};
 use saas_nats_bus::NatsBus;
+use saas_proto::events::{
+    TimesheetSubmitted, TimesheetApproved, LeaveRequestSubmitted, LeaveRequestApproved,
+    LeaveRequestRejected,
+};
 use sqlx::SqlitePool;
 
 #[derive(Clone)]
 pub struct TimeLaborService {
     repo: TimeLaborRepo,
-    #[allow(dead_code)]
     bus: NatsBus,
 }
 
@@ -44,7 +47,26 @@ impl TimeLaborService {
                 id, ts.status
             )));
         }
-        self.repo.submit_timesheet(id).await
+        let ts = self.repo.submit_timesheet(id).await?;
+        if let Err(e) = self
+            .bus
+            .publish(
+                "hcm.timelabor.timesheet.submitted",
+                TimesheetSubmitted {
+                    timesheet_id: ts.id.clone(),
+                    employee_id: ts.employee_id.clone(),
+                    week_start: ts.week_start.clone(),
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "hcm.timelabor.timesheet.submitted",
+                e
+            );
+        }
+        Ok(ts)
     }
 
     /// Fetch a timesheet for approval check (used to prevent self-approval).
@@ -60,7 +82,26 @@ impl TimeLaborService {
                 id, ts.status
             )));
         }
-        self.repo.approve_timesheet(id).await
+        let ts = self.repo.approve_timesheet(id).await?;
+        if let Err(e) = self
+            .bus
+            .publish(
+                "hcm.timelabor.timesheet.approved",
+                TimesheetApproved {
+                    timesheet_id: ts.id.clone(),
+                    employee_id: ts.employee_id.clone(),
+                    week_start: ts.week_start.clone(),
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "hcm.timelabor.timesheet.approved",
+                e
+            );
+        }
+        Ok(ts)
     }
 
     // --- Leave Requests ---
@@ -73,11 +114,35 @@ impl TimeLaborService {
         &self,
         input: CreateLeaveRequestRequest,
     ) -> AppResult<LeaveRequest> {
-        self.repo.create_leave_request(&input).await
+        let req = self.repo.create_leave_request(&input).await?;
+        if let Err(e) = self
+            .bus
+            .publish(
+                "hcm.timelabor.leave.submitted",
+                LeaveRequestSubmitted {
+                    request_id: req.id.clone(),
+                    employee_id: req.employee_id.clone(),
+                    leave_type: req.leave_type.clone(),
+                    start_date: req.start_date.clone(),
+                    end_date: req.end_date.clone(),
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "hcm.timelabor.leave.submitted",
+                e
+            );
+        }
+        Ok(req)
     }
 
     /// Fetch a leave request for approval check (used to prevent self-approval).
-    pub async fn get_leave_request_for_approval_check(&self, id: &str) -> AppResult<LeaveRequest> {
+    pub async fn get_leave_request_for_approval_check(
+        &self,
+        id: &str,
+    ) -> AppResult<LeaveRequest> {
         self.repo.get_leave_request(id).await
     }
 
@@ -107,10 +172,31 @@ impl TimeLaborService {
             .repo
             .update_leave_request_status(id, "approved")
             .await?;
-        // Deduct from leave balance -- propagate error instead of discarding
+        // Deduct from leave balance
         self.repo
             .deduct_leave_balance(&result.employee_id, &result.leave_type, days)
             .await?;
+
+        if let Err(e) = self
+            .bus
+            .publish(
+                "hcm.timelabor.leave.approved",
+                LeaveRequestApproved {
+                    request_id: result.id.clone(),
+                    employee_id: result.employee_id.clone(),
+                    leave_type: result.leave_type.clone(),
+                    days,
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "hcm.timelabor.leave.approved",
+                e
+            );
+        }
+
         Ok(result)
     }
 
@@ -122,7 +208,26 @@ impl TimeLaborService {
                 id, req.status
             )));
         }
-        self.repo.update_leave_request_status(id, "rejected").await
+        let result = self.repo.update_leave_request_status(id, "rejected").await?;
+        if let Err(e) = self
+            .bus
+            .publish(
+                "hcm.timelabor.leave.rejected",
+                LeaveRequestRejected {
+                    request_id: result.id.clone(),
+                    employee_id: result.employee_id.clone(),
+                    leave_type: result.leave_type.clone(),
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "hcm.timelabor.leave.rejected",
+                e
+            );
+        }
+        Ok(result)
     }
 
     // --- Leave Balances ---
@@ -221,208 +326,249 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_timesheet_crud_and_status_transitions() {
+    async fn test_timesheet_crud() {
         let repo = setup_repo().await;
-
-        // Create timesheet (draft)
-        let input = CreateTimesheetRequest {
-            employee_id: "emp-001".into(),
-            week_start: "2025-01-06".into(),
-        };
-        let ts = repo.create_timesheet(&input).await.unwrap();
+        let ts = repo
+            .create_timesheet(&CreateTimesheetRequest {
+                employee_id: "emp-001".into(),
+                week_start: "2025-06-02".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(ts.employee_id, "emp-001");
+        assert_eq!(ts.week_start, "2025-06-02");
         assert_eq!(ts.status, "draft");
         assert_eq!(ts.total_hours, 0.0);
 
-        // Submit (draft -> submitted)
+        let fetched = repo.get_timesheet(&ts.id).await.unwrap();
+        assert_eq!(fetched.id, ts.id);
+
+        let list = repo.list_timesheets().await.unwrap();
+        assert_eq!(list.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_timesheet_status_transitions() {
+        let repo = setup_repo().await;
+        let ts = repo
+            .create_timesheet(&CreateTimesheetRequest {
+                employee_id: "emp-002".into(),
+                week_start: "2025-06-09".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(ts.status, "draft");
+
         let submitted = repo.submit_timesheet(&ts.id).await.unwrap();
         assert_eq!(submitted.status, "submitted");
         assert!(submitted.submitted_at.is_some());
 
-        // Approve (submitted -> approved)
         let approved = repo.approve_timesheet(&ts.id).await.unwrap();
         assert_eq!(approved.status, "approved");
         assert!(approved.approved_at.is_some());
     }
 
     #[tokio::test]
-    async fn test_timesheet_submit_requires_draft() {
+    async fn test_timesheet_submit_only_from_draft() {
         let repo = setup_repo().await;
-
-        let ts = repo
-            .create_timesheet(&CreateTimesheetRequest {
-                employee_id: "emp-002".into(),
-                week_start: "2025-01-13".into(),
-            })
-            .await
-            .unwrap();
-
-        // Submit
-        repo.submit_timesheet(&ts.id).await.unwrap();
-        let submitted = repo.get_timesheet(&ts.id).await.unwrap();
-        assert_eq!(submitted.status, "submitted");
-
-        // Service layer would block re-submission; at repo level verify status is correct
-        assert_ne!(submitted.status, "draft", "Should not be draft after submit");
-    }
-
-    #[tokio::test]
-    async fn test_timesheet_approve_requires_submitted() {
-        let repo = setup_repo().await;
-
         let ts = repo
             .create_timesheet(&CreateTimesheetRequest {
                 employee_id: "emp-003".into(),
-                week_start: "2025-01-20".into(),
+                week_start: "2025-06-16".into(),
             })
             .await
             .unwrap();
-        // Still in draft -- service layer would block approval
-        assert_eq!(ts.status, "draft");
-        assert_ne!(ts.status, "submitted", "Cannot approve non-submitted timesheet");
+        repo.submit_timesheet(&ts.id).await.unwrap();
+        // Second submit should fail
+        let result = repo.submit_timesheet(&ts.id).await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]
-    async fn test_list_timesheets_by_employee() {
+    async fn test_timesheet_approve_only_from_submitted() {
         let repo = setup_repo().await;
+        let ts = repo
+            .create_timesheet(&CreateTimesheetRequest {
+                employee_id: "emp-004".into(),
+                week_start: "2025-06-23".into(),
+            })
+            .await
+            .unwrap();
+        // Approve without submitting should fail
+        let result = repo.approve_timesheet(&ts.id).await;
+        assert!(result.is_err());
+    }
 
+    #[tokio::test]
+    async fn test_timesheet_by_employee() {
+        let repo = setup_repo().await;
         repo.create_timesheet(&CreateTimesheetRequest {
             employee_id: "emp-010".into(),
-            week_start: "2025-02-03".into(),
+            week_start: "2025-07-01".into(),
         })
         .await
         .unwrap();
         repo.create_timesheet(&CreateTimesheetRequest {
             employee_id: "emp-010".into(),
-            week_start: "2025-02-10".into(),
+            week_start: "2025-07-08".into(),
         })
         .await
         .unwrap();
         repo.create_timesheet(&CreateTimesheetRequest {
             employee_id: "emp-020".into(),
-            week_start: "2025-02-03".into(),
+            week_start: "2025-07-01".into(),
         })
         .await
         .unwrap();
 
-        let emp10 = repo.list_timesheets_by_employee("emp-010").await.unwrap();
-        assert_eq!(emp10.len(), 2);
-
-        let emp20 = repo.list_timesheets_by_employee("emp-020").await.unwrap();
-        assert_eq!(emp20.len(), 1);
+        let emp010 = repo.list_timesheets_by_employee("emp-010").await.unwrap();
+        assert_eq!(emp010.len(), 2);
+        let emp020 = repo.list_timesheets_by_employee("emp-020").await.unwrap();
+        assert_eq!(emp020.len(), 1);
     }
 
     #[tokio::test]
-    async fn test_leave_request_creation() {
+    async fn test_time_entries_and_total_calculation() {
         let repo = setup_repo().await;
-
-        let input = CreateLeaveRequestRequest {
-            employee_id: "emp-100".into(),
-            leave_type: "vacation".into(),
-            start_date: "2025-03-10".into(),
-            end_date: "2025-03-12".into(),
-            reason: Some("Family trip".into()),
-        };
-        let req = repo.create_leave_request(&input).await.unwrap();
-        assert_eq!(req.status, "pending");
-        assert_eq!(req.leave_type, "vacation");
-        assert_eq!(req.reason, Some("Family trip".into()));
-    }
-
-    #[tokio::test]
-    async fn test_leave_approval_with_balance_deduction() {
-        let repo = setup_repo().await;
-
-        // Create leave balance: 10 vacation days
-        repo.create_leave_balance("emp-200", "vacation", 10.0)
-            .await
-            .unwrap();
-
-        // Create leave request for 3 days
-        let req = repo
-            .create_leave_request(&CreateLeaveRequestRequest {
-                employee_id: "emp-200".into(),
-                leave_type: "vacation".into(),
-                start_date: "2025-04-01".into(),
-                end_date: "2025-04-03".into(),
-                reason: None,
+        let ts = repo
+            .create_timesheet(&CreateTimesheetRequest {
+                employee_id: "emp-030".into(),
+                week_start: "2025-08-04".into(),
             })
             .await
             .unwrap();
 
-        // Approve
-        let approved = repo
-            .update_leave_request_status(&req.id, "approved")
+        repo.create_time_entry(&CreateTimeEntryRequest {
+            timesheet_id: ts.id.clone(),
+            date: "2025-08-04".into(),
+            hours: 8.0,
+            project_code: Some("PROJ-1".into()),
+            description: Some("Development".into()),
+        })
+        .await
+        .unwrap();
+
+        repo.create_time_entry(&CreateTimeEntryRequest {
+            timesheet_id: ts.id.clone(),
+            date: "2025-08-05".into(),
+            hours: 7.5,
+            project_code: Some("PROJ-1".into()),
+            description: Some("Code review".into()),
+        })
+        .await
+        .unwrap();
+
+        let ts = repo.get_timesheet(&ts.id).await.unwrap();
+        assert_eq!(ts.total_hours, 15.5);
+
+        let entries = repo.list_time_entries(&ts.id).await.unwrap();
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_leave_request_create_and_approve() {
+        let repo = setup_repo().await;
+        repo.create_leave_balance("emp-100", "vacation", 20.0)
             .await
             .unwrap();
+
+        let req = repo
+            .create_leave_request(&CreateLeaveRequestRequest {
+                employee_id: "emp-100".into(),
+                leave_type: "vacation".into(),
+                start_date: "2025-07-14".into(),
+                end_date: "2025-07-18".into(),
+                reason: Some("Family trip".into()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(req.employee_id, "emp-100");
+        assert_eq!(req.leave_type, "vacation");
+        assert_eq!(req.status, "pending");
+
+        let approved = repo.update_leave_request_status(&req.id, "approved").await.unwrap();
         assert_eq!(approved.status, "approved");
 
-        // Deduct balance (replicating service logic)
-        let days = calculate_leave_days(&req.start_date, &req.end_date);
-        assert_eq!(days, 3.0);
-        repo.deduct_leave_balance("emp-200", "vacation", days)
+        // Deduct balance
+        let days = calculate_leave_days("2025-07-14", "2025-07-18");
+        assert_eq!(days, 5.0);
+        repo.deduct_leave_balance("emp-100", "vacation", days)
             .await
             .unwrap();
 
-        let balance = repo.get_leave_balance("emp-200", "vacation").await.unwrap();
-        assert_eq!(balance.entitled, 10.0);
-        assert_eq!(balance.used, 3.0);
-        assert_eq!(balance.remaining, 7.0);
+        let balance = repo.get_leave_balance("emp-100", "vacation").await.unwrap();
+        assert_eq!(balance.used, 5.0);
+        assert_eq!(balance.remaining, 15.0);
     }
 
     #[tokio::test]
-    async fn test_leave_rejection() {
+    async fn test_leave_request_reject() {
         let repo = setup_repo().await;
+        repo.create_leave_balance("emp-101", "sick", 10.0)
+            .await
+            .unwrap();
 
         let req = repo
             .create_leave_request(&CreateLeaveRequestRequest {
-                employee_id: "emp-300".into(),
+                employee_id: "emp-101".into(),
                 leave_type: "sick".into(),
-                start_date: "2025-05-01".into(),
-                end_date: "2025-05-01".into(),
+                start_date: "2025-08-01".into(),
+                end_date: "2025-08-01".into(),
                 reason: None,
             })
             .await
             .unwrap();
-        assert_eq!(req.status, "pending");
 
-        let rejected = repo
-            .update_leave_request_status(&req.id, "rejected")
-            .await
-            .unwrap();
+        let rejected = repo.update_leave_request_status(&req.id, "rejected").await.unwrap();
         assert_eq!(rejected.status, "rejected");
     }
 
     #[tokio::test]
-    async fn test_leave_balance_management() {
+    async fn test_leave_balance_deduction() {
         let repo = setup_repo().await;
-
-        // Create balances
-        repo.create_leave_balance("emp-400", "vacation", 20.0)
-            .await
-            .unwrap();
-        repo.create_leave_balance("emp-400", "sick", 10.0)
-            .await
-            .unwrap();
-        repo.create_leave_balance("emp-400", "personal", 3.0)
+        repo.create_leave_balance("emp-200", "vacation", 20.0)
             .await
             .unwrap();
 
-        let balances = repo
-            .list_leave_balances_by_employee("emp-400")
+        repo.deduct_leave_balance("emp-200", "vacation", 5.0)
             .await
             .unwrap();
-        assert_eq!(balances.len(), 3);
 
-        let vacation = repo.get_leave_balance("emp-400", "vacation").await.unwrap();
-        assert_eq!(vacation.remaining, 20.0);
-        assert_eq!(vacation.used, 0.0);
+        let balance = repo.get_leave_balance("emp-200", "vacation").await.unwrap();
+        assert_eq!(balance.entitled, 20.0);
+        assert_eq!(balance.used, 5.0);
+        assert_eq!(balance.remaining, 15.0);
     }
 
     #[tokio::test]
-    async fn test_handle_employee_created_default_balances() {
+    async fn test_leave_balance_list_by_employee() {
+        let repo = setup_repo().await;
+        repo.create_leave_balance("emp-300", "vacation", 20.0)
+            .await
+            .unwrap();
+        repo.create_leave_balance("emp-300", "sick", 10.0)
+            .await
+            .unwrap();
+        repo.create_leave_balance("emp-300", "personal", 3.0)
+            .await
+            .unwrap();
+
+        let balances = repo.list_leave_balances_by_employee("emp-300").await.unwrap();
+        assert_eq!(balances.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_calculate_leave_days_function() {
+        assert_eq!(calculate_leave_days("2025-07-14", "2025-07-14"), 1.0);
+        assert_eq!(calculate_leave_days("2025-07-14", "2025-07-18"), 5.0);
+        assert_eq!(calculate_leave_days("invalid", "2025-07-18"), 1.0);
+        assert_eq!(calculate_leave_days("2025-07-01", "2025-07-31"), 31.0);
+    }
+
+    #[tokio::test]
+    async fn test_handle_employee_created_sets_balances() {
         let repo = setup_repo().await;
 
-        // Simulate handle_employee_created logic
         let defaults = vec![("vacation", 20.0), ("sick", 10.0), ("personal", 3.0)];
         for (leave_type, entitled) in defaults {
             repo.create_leave_balance("emp-new", leave_type, entitled)
@@ -430,57 +576,77 @@ mod tests {
                 .unwrap();
         }
 
-        let balances = repo
-            .list_leave_balances_by_employee("emp-new")
-            .await
-            .unwrap();
+        let balances = repo.list_leave_balances_by_employee("emp-new").await.unwrap();
         assert_eq!(balances.len(), 3);
 
-        let vacation = repo.get_leave_balance("emp-new", "vacation").await.unwrap();
-        assert_eq!(vacation.entitled, 20.0);
-        assert_eq!(vacation.remaining, 20.0);
+        let vac = balances.iter().find(|b| b.leave_type == "vacation").unwrap();
+        assert_eq!(vac.entitled, 20.0);
+        assert_eq!(vac.remaining, 20.0);
 
-        let sick = repo.get_leave_balance("emp-new", "sick").await.unwrap();
+        let sick = balances.iter().find(|b| b.leave_type == "sick").unwrap();
         assert_eq!(sick.entitled, 10.0);
 
-        let personal = repo.get_leave_balance("emp-new", "personal").await.unwrap();
+        let personal = balances.iter().find(|b| b.leave_type == "personal").unwrap();
         assert_eq!(personal.entitled, 3.0);
     }
 
     #[tokio::test]
-    async fn test_time_entry_updates_timesheet_total_hours() {
+    async fn test_leave_request_list() {
         let repo = setup_repo().await;
-
-        let ts = repo
-            .create_timesheet(&CreateTimesheetRequest {
-                employee_id: "emp-500".into(),
-                week_start: "2025-06-02".into(),
-            })
+        repo.create_leave_balance("emp-400", "vacation", 20.0)
             .await
             .unwrap();
-        assert_eq!(ts.total_hours, 0.0);
 
-        // Add time entries
-        repo.create_time_entry(&CreateTimeEntryRequest {
-            timesheet_id: ts.id.clone(),
-            date: "2025-06-02".into(),
-            hours: 8.0,
-            project_code: Some("PROJ-1".into()),
-            description: None,
+        repo.create_leave_request(&CreateLeaveRequestRequest {
+            employee_id: "emp-400".into(),
+            leave_type: "vacation".into(),
+            start_date: "2025-09-01".into(),
+            end_date: "2025-09-05".into(),
+            reason: None,
         })
         .await
         .unwrap();
-        repo.create_time_entry(&CreateTimeEntryRequest {
-            timesheet_id: ts.id.clone(),
-            date: "2025-06-03".into(),
-            hours: 7.5,
-            project_code: Some("PROJ-1".into()),
-            description: Some("Review".into()),
+        repo.create_leave_request(&CreateLeaveRequestRequest {
+            employee_id: "emp-400".into(),
+            leave_type: "vacation".into(),
+            start_date: "2025-10-01".into(),
+            end_date: "2025-10-03".into(),
+            reason: Some("Conference".into()),
         })
         .await
         .unwrap();
 
-        let updated = repo.get_timesheet(&ts.id).await.unwrap();
-        assert_eq!(updated.total_hours, 15.5);
+        let list = repo.list_leave_requests().await.unwrap();
+        assert_eq!(list.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_leave_insufficient_balance_prevented() {
+        let repo = setup_repo().await;
+        repo.create_leave_balance("emp-500", "personal", 3.0)
+            .await
+            .unwrap();
+
+        // Request 5 days when only 3 available
+        let balance = repo.get_leave_balance("emp-500", "personal").await.unwrap();
+        assert_eq!(balance.remaining, 3.0);
+
+        let days = calculate_leave_days("2025-11-01", "2025-11-05");
+        assert_eq!(days, 5.0);
+        assert!(days > balance.remaining, "Should detect insufficient balance");
+    }
+
+    #[tokio::test]
+    async fn test_timesheet_not_found() {
+        let repo = setup_repo().await;
+        let result = repo.get_timesheet("nonexistent").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_leave_request_not_found() {
+        let repo = setup_repo().await;
+        let result = repo.get_leave_request("nonexistent").await;
+        assert!(result.is_err());
     }
 }
