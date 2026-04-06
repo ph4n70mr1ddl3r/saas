@@ -1,7 +1,7 @@
 use crate::service::LedgerService;
 use saas_common::error::AppResult;
 use saas_nats_bus::NatsBus;
-use saas_proto::events::{ExpenseReportApproved, PayRunCompleted, VendorInvoiceApproved, CustomerInvoiceCreated};
+use saas_proto::events::{ExpenseReportApproved, PayRunCompleted, VendorInvoiceApproved, CustomerInvoiceCreated, DepreciationRunCompleted};
 
 pub async fn register(bus: &NatsBus, service: &LedgerService) -> AppResult<()> {
     // AP Invoice Approved -> auto-create journal entry
@@ -58,6 +58,24 @@ pub async fn register(bus: &NatsBus, service: &LedgerService) -> AppResult<()> {
             tracing::info!("Expense report approved: {} ({} cents)", report_id, total_cents);
             if let Err(e) = svc.handle_expense_report_approved(&report_id, total_cents, &gl_account_code).await {
                 tracing::error!("Failed to create auto-JE for expense report {}: {}", report_id, e);
+            }
+        }
+    }).await.ok();
+
+    // Depreciation Run Completed -> auto-create journal entry
+    let svc = service.clone();
+    bus.subscribe::<DepreciationRunCompleted, _, _>("erp.assets.depreciation.completed", move |envelope| {
+        let svc = svc.clone();
+        let period = envelope.payload.period.clone();
+        let total_depreciation_cents = envelope.payload.total_depreciation_cents;
+        let asset_count = envelope.payload.asset_count;
+        async move {
+            tracing::info!(
+                "Depreciation completed: period={}, {} assets, total={} cents",
+                period, asset_count, total_depreciation_cents
+            );
+            if let Err(e) = svc.handle_depreciation_completed(&period, total_depreciation_cents, asset_count).await {
+                tracing::error!("Failed to create auto-JE for depreciation {}: {}", period, e);
             }
         }
     }).await.ok();

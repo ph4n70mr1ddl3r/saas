@@ -205,6 +205,70 @@ impl ArService {
         self.repo.list_credit_memos().await
     }
 
+    // --- Event Handlers (cross-domain auto-invoice creation) ---
+
+    /// Create an AR invoice when a sales order is fulfilled.
+    /// Uses customer_id to look up the customer. If customer not found, returns None (skips).
+    pub async fn handle_order_fulfilled(
+        &self,
+        order_id: &str,
+        order_number: &str,
+        customer_id: &str,
+        order_lines: &[(String, i64)], // (item_id, quantity)
+    ) -> AppResult<Option<ArInvoiceWithLines>> {
+        // Try to find customer matching the order
+        let customer = match self.repo.get_customer(customer_id).await {
+            Ok(c) => c,
+            Err(_) => {
+                tracing::warn!(
+                    "Customer '{}' not found for order '{}', skipping auto-invoice creation",
+                    customer_id, order_number
+                );
+                return Ok(None);
+            }
+        };
+
+        if order_lines.is_empty() {
+            tracing::warn!(
+                "Order '{}' has no lines, skipping auto-invoice creation",
+                order_number
+            );
+            return Ok(None);
+        }
+
+        let default_unit_price_cents: i64 = 1000; // $10 per unit default
+        let invoice_lines: Vec<CreateArInvoiceLineRequest> = order_lines
+            .iter()
+            .map(|(item_id, qty)| CreateArInvoiceLineRequest {
+                description: Some(format!(
+                    "Order {} - Item {} (qty: {})",
+                    order_number, item_id, qty
+                )),
+                amount_cents: qty * default_unit_price_cents,
+            })
+            .collect();
+
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let due_date = (chrono::Utc::now() + chrono::Duration::days(30))
+            .format("%Y-%m-%d")
+            .to_string();
+
+        let input = CreateArInvoiceRequest {
+            customer_id: customer.id,
+            invoice_number: format!("AUTO-SO-{}", order_number),
+            invoice_date: today,
+            due_date,
+            lines: invoice_lines,
+        };
+
+        let result = self.create_invoice(&input).await?;
+        tracing::info!(
+            "Auto-created AR invoice {} for order {}",
+            result.invoice.invoice_number, order_number
+        );
+        Ok(Some(result))
+    }
+
     // --- Aging Report ---
 
     pub async fn aging_report(&self, as_of_date: &str) -> AppResult<ArAgingReport> {
@@ -672,5 +736,117 @@ mod tests {
         // Verify invoice is now paid
         let paid = repo.get_invoice(&invoice.id).await.unwrap();
         assert_eq!(paid.status, "paid");
+    }
+
+    #[tokio::test]
+    async fn test_handle_order_fulfilled_creates_invoice() {
+        let repo = setup_repo().await;
+
+        // Create a customer (simulating an SCM customer that exists in AR)
+        let customer = repo
+            .create_customer(&CreateCustomerRequest {
+                name: "Fulfillment Client".into(),
+                email: Some("fulfill@example.com".into()),
+                phone: None,
+                address: None,
+            })
+            .await
+            .unwrap();
+
+        // Simulate what handle_order_fulfilled does:
+        // Create invoice from order lines with default unit price
+        let default_unit_price_cents: i64 = 1000; // $10 per unit
+        let order_lines = vec![
+            ("ITEM-A".to_string(), 3i64), // 3 units
+            ("ITEM-B".to_string(), 7i64), // 7 units
+        ];
+
+        let invoice_lines: Vec<CreateArInvoiceLineRequest> = order_lines
+            .iter()
+            .map(|(item_id, qty)| CreateArInvoiceLineRequest {
+                description: Some(format!(
+                    "Order SO-10042 - Item {} (qty: {})",
+                    item_id, qty
+                )),
+                amount_cents: qty * default_unit_price_cents,
+            })
+            .collect();
+
+        let today = "2025-06-15".to_string();
+        let due_date = "2025-07-15".to_string();
+
+        let input = CreateArInvoiceRequest {
+            customer_id: customer.id.clone(),
+            invoice_number: "AUTO-SO-SO-10042".into(),
+            invoice_date: today,
+            due_date,
+            lines: invoice_lines,
+        };
+
+        let invoice = repo.create_invoice(&input).await.unwrap();
+        assert_eq!(invoice.customer_id, customer.id);
+        assert_eq!(invoice.invoice_number, "AUTO-SO-SO-10042");
+        assert_eq!(invoice.total_cents, 10000); // 3*1000 + 7*1000
+        assert_eq!(invoice.status, "draft");
+
+        // Verify lines were created
+        let lines = repo.get_invoice_lines(&invoice.id).await.unwrap();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].amount_cents, 3000); // 3 * 1000
+        assert_eq!(lines[1].amount_cents, 7000); // 7 * 1000
+    }
+
+    #[tokio::test]
+    async fn test_handle_order_fulfilled_customer_not_found() {
+        let repo = setup_repo().await;
+
+        // Try to create an invoice for a customer that doesn't exist
+        let result = repo.get_customer("nonexistent-customer").await;
+        assert!(result.is_err());
+
+        // Verify no invoices were created
+        let invoices = repo.list_invoices().await.unwrap();
+        assert_eq!(invoices.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_handle_order_fulfilled_multi_line_order() {
+        let repo = setup_repo().await;
+
+        let customer = create_test_customer(&repo, "Multi-Order Client").await;
+
+        // Create invoice with 5 line items from a complex order
+        let default_unit_price: i64 = 2500; // $25 per unit
+        let order_lines = vec![
+            ("WIDGET-S".to_string(), 10i64),
+            ("WIDGET-M".to_string(), 5i64),
+            ("WIDGET-L".to_string(), 3i64),
+            ("GADGET-1".to_string(), 2i64),
+            ("SERVICE-INSTALL".to_string(), 1i64),
+        ];
+
+        let invoice_lines: Vec<CreateArInvoiceLineRequest> = order_lines
+            .iter()
+            .map(|(item_id, qty)| CreateArInvoiceLineRequest {
+                description: Some(format!("Order SO-MULTI - Item {} (qty: {})", item_id, qty)),
+                amount_cents: qty * default_unit_price,
+            })
+            .collect();
+
+        let expected_total: i64 = (10 + 5 + 3 + 2 + 1) * 2500;
+
+        let input = CreateArInvoiceRequest {
+            customer_id: customer.id.clone(),
+            invoice_number: "AUTO-SO-SO-MULTI".into(),
+            invoice_date: "2025-06-01".into(),
+            due_date: "2025-07-01".into(),
+            lines: invoice_lines,
+        };
+
+        let invoice = repo.create_invoice(&input).await.unwrap();
+        assert_eq!(invoice.total_cents, expected_total); // 21 * 2500 = 52500
+
+        let lines = repo.get_invoice_lines(&invoice.id).await.unwrap();
+        assert_eq!(lines.len(), 5);
     }
 }

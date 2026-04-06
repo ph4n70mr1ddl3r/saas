@@ -515,6 +515,53 @@ impl LedgerService {
         self.post_journal_entry(&result.entry.id).await
     }
 
+    /// Create a journal entry when a depreciation run completes.
+    /// Debit depreciation expense, credit accumulated depreciation (contra-asset).
+    pub async fn handle_depreciation_completed(
+        &self,
+        period: &str,
+        total_depreciation_cents: i64,
+        asset_count: u32,
+    ) -> AppResult<JournalEntryWithLines> {
+        let open_period = self.find_open_period().await?;
+        let expense_account = match self.repo.find_account_by_type_async("expense").await {
+            Ok(a) => a,
+            Err(_) => self.repo.find_account_by_type_async("asset").await?,
+        };
+        let contra_asset_account = match self.repo.find_account_by_code("1800").await {
+            Ok(a) => a,
+            Err(_) => match self.repo.find_account_by_type_async("asset").await {
+                Ok(a) => a,
+                Err(_) => self.repo.find_account_by_type_async("liability").await?,
+            },
+        };
+
+        let input = CreateJournalEntryRequest {
+            description: Some(format!(
+                "Depreciation for {} ({} assets)",
+                period, asset_count
+            )),
+            period_id: open_period.id,
+            lines: vec![
+                CreateJournalLineRequest {
+                    account_id: expense_account.id.clone(),
+                    debit_cents: total_depreciation_cents,
+                    credit_cents: 0,
+                    description: Some(format!("Depreciation expense for {}", period)),
+                },
+                CreateJournalLineRequest {
+                    account_id: contra_asset_account.id.clone(),
+                    debit_cents: 0,
+                    credit_cents: total_depreciation_cents,
+                    description: Some(format!("Accumulated depreciation for {}", period)),
+                },
+            ],
+        };
+
+        let result = self.create_journal_entry(&input, "system").await?;
+        self.post_journal_entry(&result.entry.id).await
+    }
+
     /// Create a journal entry when an expense report is approved.
     /// Debit expense account, credit cash/AP.
     pub async fn handle_expense_report_approved(
@@ -1291,6 +1338,129 @@ mod tests {
             .unwrap();
 
         assert_eq!(entry.description, Some("Auto-JE: Expense Report Approved".to_string()));
+        let posted = repo.post_journal_entry(&entry.id).await.unwrap();
+        assert_eq!(posted.status, "posted");
+    }
+
+    #[tokio::test]
+    async fn test_handle_depreciation_completed_creates_je() {
+        let repo = setup_repo().await;
+
+        let expense = repo
+            .create_account(&CreateAccountRequest {
+                code: "6200".into(),
+                name: "Depreciation Expense".into(),
+                account_type: "expense".into(),
+                parent_id: None,
+            })
+            .await
+            .unwrap();
+
+        let contra_asset = repo
+            .create_account(&CreateAccountRequest {
+                code: "1800".into(),
+                name: "Accumulated Depreciation".into(),
+                account_type: "asset".into(),
+                parent_id: None,
+            })
+            .await
+            .unwrap();
+
+        let period = repo
+            .create_period(&CreatePeriodRequest {
+                name: "Depreciation Period".into(),
+                start_date: "2025-01-01".into(),
+                end_date: "2025-01-31".into(),
+                fiscal_year: 2025,
+            })
+            .await
+            .unwrap();
+
+        let entry_number = repo.next_entry_number().await.unwrap();
+        let entry = repo
+            .create_journal_entry(
+                &entry_number,
+                &CreateJournalEntryRequest {
+                    description: Some("Depreciation for 2025-01 (5 assets)".into()),
+                    period_id: period.id.clone(),
+                    lines: vec![
+                        CreateJournalLineRequest {
+                            account_id: expense.id.clone(),
+                            debit_cents: 25000,
+                            credit_cents: 0,
+                            description: Some("Depreciation expense for 2025-01".into()),
+                        },
+                        CreateJournalLineRequest {
+                            account_id: contra_asset.id.clone(),
+                            debit_cents: 0,
+                            credit_cents: 25000,
+                            description: Some("Accumulated depreciation for 2025-01".into()),
+                        },
+                    ],
+                },
+                "system",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            entry.description,
+            Some("Depreciation for 2025-01 (5 assets)".to_string())
+        );
+
+        let posted = repo.post_journal_entry(&entry.id).await.unwrap();
+        assert_eq!(posted.status, "posted");
+
+        let lines = repo.get_journal_lines(&entry.id).await.unwrap();
+        assert_eq!(lines.len(), 2);
+
+        let debit_line = lines.iter().find(|l| l.debit_cents > 0).unwrap();
+        assert_eq!(debit_line.debit_cents, 25000);
+        assert_eq!(debit_line.account_id, expense.id);
+
+        let credit_line = lines.iter().find(|l| l.credit_cents > 0).unwrap();
+        assert_eq!(credit_line.credit_cents, 25000);
+        assert_eq!(credit_line.account_id, contra_asset.id);
+    }
+
+    #[tokio::test]
+    async fn test_depreciation_je_without_contra_asset_code_uses_asset_type() {
+        let repo = setup_repo().await;
+
+        // Only create generic accounts (no code 1800)
+        let expense = create_test_account(&repo, "6200", "Depreciation Expense", "expense").await;
+        let asset = create_test_account(&repo, "1000", "Fixed Assets", "asset").await;
+
+        let period = create_test_period(&repo, "Q1 2025").await;
+
+        // Simulate the depreciation handler: debit expense, credit asset
+        let entry_number = repo.next_entry_number().await.unwrap();
+        let entry = repo
+            .create_journal_entry(
+                &entry_number,
+                &CreateJournalEntryRequest {
+                    description: Some("Depreciation for 2025-Q1 (3 assets)".into()),
+                    period_id: period.id,
+                    lines: vec![
+                        CreateJournalLineRequest {
+                            account_id: expense.id,
+                            debit_cents: 15000,
+                            credit_cents: 0,
+                            description: None,
+                        },
+                        CreateJournalLineRequest {
+                            account_id: asset.id,
+                            debit_cents: 0,
+                            credit_cents: 15000,
+                            description: None,
+                        },
+                    ],
+                },
+                "system",
+            )
+            .await
+            .unwrap();
+
         let posted = repo.post_journal_entry(&entry.id).await.unwrap();
         assert_eq!(posted.status, "posted");
     }

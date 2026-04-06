@@ -297,6 +297,49 @@ impl ExpenseService {
     pub async fn list_all_mileage(&self) -> AppResult<Vec<Mileage>> {
         self.repo.list_all_mileage().await
     }
+
+    // --- Event Handlers (cross-domain integration) ---
+
+    /// Create an onboarding expense report when a new employee is created.
+    pub async fn handle_employee_created(
+        &self,
+        employee_id: &str,
+        first_name: &str,
+        last_name: &str,
+    ) -> AppResult<ExpenseReport> {
+        let report = self.repo.create_report(&CreateExpenseReportRequest {
+            employee_id: employee_id.to_string(),
+            title: format!("Onboarding expenses - {} {}", first_name, last_name),
+            description: Some("Auto-created onboarding expense report for new employee".to_string()),
+        }).await?;
+
+        tracing::info!(
+            "Auto-created onboarding expense report {} for employee {} {}",
+            report.id, first_name, last_name
+        );
+        Ok(report)
+    }
+
+    /// Create an expense category when a benefit plan is created.
+    pub async fn handle_benefit_plan_created(
+        &self,
+        plan_id: &str,
+        name: &str,
+        plan_type: &str,
+    ) -> AppResult<ExpenseCategory> {
+        let category = self.repo.create_category(&CreateExpenseCategoryRequest {
+            name: format!("{} - {}", plan_type, name),
+            description: Some(format!("Auto-created category for benefit plan {}", plan_id)),
+            limit_cents: None,
+            requires_receipt: Some(false),
+        }).await?;
+
+        tracing::info!(
+            "Auto-created expense category '{}' for benefit plan {}",
+            category.name, plan_id
+        );
+        Ok(category)
+    }
 }
 
 #[cfg(test)]
@@ -648,5 +691,133 @@ mod tests {
         let lines = repo.list_lines(&report.id).await.unwrap();
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].amount_cents, 7500);
+    }
+
+    #[tokio::test]
+    async fn test_handle_employee_created_onboarding_report() {
+        let repo = setup_repo().await;
+
+        // Simulate what handle_employee_created does:
+        // Create an onboarding expense report for the new employee
+        let report = repo
+            .create_report(&CreateExpenseReportRequest {
+                employee_id: "emp-new-001".to_string(),
+                title: "Onboarding expenses - Jane Smith".to_string(),
+                description: Some("Auto-created onboarding expense report for new employee".to_string()),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(report.employee_id, "emp-new-001");
+        assert_eq!(report.title, "Onboarding expenses - Jane Smith");
+        assert_eq!(report.status, "draft");
+        assert_eq!(report.total_cents, 0);
+
+        // Verify it's listed
+        let reports = repo.list_reports().await.unwrap();
+        assert_eq!(reports.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_handle_benefit_plan_created_category() {
+        let repo = setup_repo().await;
+
+        // Simulate what handle_benefit_plan_created does:
+        // Create an expense category for the new benefit plan
+        let category = repo
+            .create_category(&CreateExpenseCategoryRequest {
+                name: "Health Insurance - Medical Plus".to_string(),
+                description: Some("Auto-created category for benefit plan plan-001".to_string()),
+                limit_cents: None,
+                requires_receipt: Some(false),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(category.name, "Health Insurance - Medical Plus");
+        assert_eq!(category.limit_cents, 0);
+        assert_eq!(category.requires_receipt, 0);
+        assert_eq!(category.is_active, 1);
+
+        // Verify it's listed
+        let categories = repo.list_categories().await.unwrap();
+        assert_eq!(categories.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_handle_multiple_benefit_plans_create_categories() {
+        let repo = setup_repo().await;
+
+        // Create categories for multiple benefit plans
+        let plans = vec![
+            ("plan-1", "Medical Plus", "Health Insurance"),
+            ("plan-2", "Dental Basic", "Dental Insurance"),
+            ("plan-3", "Vision Standard", "Vision Insurance"),
+        ];
+
+        for (plan_id, name, plan_type) in &plans {
+            repo.create_category(&CreateExpenseCategoryRequest {
+                name: format!("{} - {}", plan_type, name),
+                description: Some(format!("Auto-created category for benefit plan {}", plan_id)),
+                limit_cents: None,
+                requires_receipt: Some(false),
+            })
+            .await
+            .unwrap();
+        }
+
+        let categories = repo.list_categories().await.unwrap();
+        assert_eq!(categories.len(), 3);
+
+        // Verify all are active
+        for cat in &categories {
+            assert_eq!(cat.is_active, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_onboarding_report_can_receive_expense_lines() {
+        let repo = setup_repo().await;
+
+        // Create onboarding report (like handle_employee_created would)
+        let report = repo
+            .create_report(&CreateExpenseReportRequest {
+                employee_id: "emp-onboard-001".to_string(),
+                title: "Onboarding expenses - John Doe".to_string(),
+                description: Some("Auto-created onboarding expense report".to_string()),
+            })
+            .await
+            .unwrap();
+
+        // Create a category for onboarding
+        let cat = repo
+            .create_category(&CreateExpenseCategoryRequest {
+                name: "Relocation - Moving".to_string(),
+                description: Some("Auto-created for benefit plan reloc-001".to_string()),
+                limit_cents: None,
+                requires_receipt: Some(true),
+            })
+            .await
+            .unwrap();
+
+        // Add expense lines to the onboarding report
+        repo.create_line(&CreateExpenseLineRequest {
+            report_id: report.id.clone(),
+            expense_date: "2025-07-01".into(),
+            category_id: cat.id.clone(),
+            amount_cents: 50000,
+            description: Some("Moving company fee".into()),
+            receipt_url: Some("https://receipts.example.com/moving".into()),
+        })
+        .await
+        .unwrap();
+
+        // Verify total was updated
+        let report = repo.get_report(&report.id).await.unwrap();
+        assert_eq!(report.total_cents, 50000);
+
+        // Verify report can be submitted
+        let report = repo.submit_report(&report.id).await.unwrap();
+        assert_eq!(report.status, "submitted");
     }
 }

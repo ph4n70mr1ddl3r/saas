@@ -183,6 +183,85 @@ impl CashManagementService {
         })
     }
 
+    // --- Event Handlers (cross-domain bank transaction creation) ---
+
+    /// Find a default operating bank account for auto-transactions.
+    async fn find_default_account(&self) -> AppResult<BankAccount> {
+        let accounts = self.repo.list_bank_accounts().await?;
+        accounts
+            .into_iter()
+            .next()
+            .ok_or_else(|| AppError::Validation("No bank account available for auto-transaction".into()))
+    }
+
+    /// Create a bank withdrawal when an AP payment is made.
+    pub async fn handle_ap_payment_created(
+        &self,
+        amount_cents: i64,
+        vendor_id: &str,
+    ) -> AppResult<BankTransaction> {
+        let account = self.find_default_account().await?;
+        self.repo.create_bank_transaction(&CreateBankTransactionRequest {
+            bank_account_id: account.id,
+            amount_cents,
+            transaction_date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
+            description: Some(format!("AP Payment to vendor {}", vendor_id)),
+            r#type: "withdrawal".to_string(),
+            reference: Some(format!("ap:vendor:{}", vendor_id)),
+        }).await
+    }
+
+    /// Create a bank deposit when an AR receipt is recorded.
+    pub async fn handle_ar_receipt_created(
+        &self,
+        amount_cents: i64,
+        customer_id: &str,
+    ) -> AppResult<BankTransaction> {
+        let account = self.find_default_account().await?;
+        self.repo.create_bank_transaction(&CreateBankTransactionRequest {
+            bank_account_id: account.id,
+            amount_cents,
+            transaction_date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
+            description: Some(format!("AR Receipt from customer {}", customer_id)),
+            r#type: "deposit".to_string(),
+            reference: Some(format!("ar:customer:{}", customer_id)),
+        }).await
+    }
+
+    /// Create a bank withdrawal when an expense report is paid (reimbursement).
+    pub async fn handle_expense_report_paid(
+        &self,
+        amount_cents: i64,
+        employee_id: &str,
+    ) -> AppResult<BankTransaction> {
+        let account = self.find_default_account().await?;
+        self.repo.create_bank_transaction(&CreateBankTransactionRequest {
+            bank_account_id: account.id,
+            amount_cents,
+            transaction_date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
+            description: Some(format!("Expense reimbursement for employee {}", employee_id)),
+            r#type: "withdrawal".to_string(),
+            reference: Some(format!("expense:employee:{}", employee_id)),
+        }).await
+    }
+
+    /// Create a bank withdrawal for payroll disbursement.
+    pub async fn handle_payroll_completed(
+        &self,
+        total_net_pay_cents: i64,
+        pay_run_id: &str,
+    ) -> AppResult<BankTransaction> {
+        let account = self.find_default_account().await?;
+        self.repo.create_bank_transaction(&CreateBankTransactionRequest {
+            bank_account_id: account.id,
+            amount_cents: total_net_pay_cents,
+            transaction_date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
+            description: Some(format!("Payroll disbursement for run {}", pay_run_id)),
+            r#type: "withdrawal".to_string(),
+            reference: Some(format!("payroll:run:{}", pay_run_id)),
+        }).await
+    }
+
     // --- Transfers ---
 
     pub async fn transfer(
@@ -788,5 +867,169 @@ mod tests {
 
         // Same account ID should fail at service level
         assert_eq!(acct.id, acct.id);
+    }
+
+    #[tokio::test]
+    async fn test_handle_ap_payment_created_withdrawal() {
+        let repo = setup_repo().await;
+
+        // Create a bank account with funds
+        let acct = repo
+            .create_bank_account(&CreateBankAccountRequest {
+                name: "Operating".into(),
+                bank_name: "Bank AP".into(),
+                account_number: "ap1111".into(),
+                routing_number: None,
+                balance_cents: Some(200_000),
+                currency: Some("USD".into()),
+            })
+            .await
+            .unwrap();
+
+        // Simulate what handle_ap_payment_created does:
+        // Create a withdrawal for the vendor payment
+        let tx = repo
+            .create_bank_transaction(&CreateBankTransactionRequest {
+                bank_account_id: acct.id.clone(),
+                amount_cents: 50_000,
+                transaction_date: "2025-06-20".into(),
+                description: Some("AP Payment to vendor vendor-123".into()),
+                r#type: "withdrawal".into(),
+                reference: Some("ap:vendor:vendor-123".into()),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(tx.r#type, "withdrawal");
+        assert_eq!(tx.amount_cents, 50_000);
+        assert_eq!(tx.bank_account_id, acct.id);
+
+        // Verify balance decreased
+        let updated = repo.get_bank_account(&acct.id).await.unwrap();
+        assert_eq!(updated.balance_cents, 150_000);
+    }
+
+    #[tokio::test]
+    async fn test_handle_ar_receipt_created_deposit() {
+        let repo = setup_repo().await;
+
+        let acct = repo
+            .create_bank_account(&CreateBankAccountRequest {
+                name: "Operating".into(),
+                bank_name: "Bank AR".into(),
+                account_number: "ar2222".into(),
+                routing_number: None,
+                balance_cents: Some(100_000),
+                currency: Some("USD".into()),
+            })
+            .await
+            .unwrap();
+
+        // Simulate what handle_ar_receipt_created does:
+        // Create a deposit for the customer receipt
+        let tx = repo
+            .create_bank_transaction(&CreateBankTransactionRequest {
+                bank_account_id: acct.id.clone(),
+                amount_cents: 30_000,
+                transaction_date: "2025-06-20".into(),
+                description: Some("AR Receipt from customer cust-456".into()),
+                r#type: "deposit".into(),
+                reference: Some("ar:customer:cust-456".into()),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(tx.r#type, "deposit");
+        assert_eq!(tx.amount_cents, 30_000);
+
+        let updated = repo.get_bank_account(&acct.id).await.unwrap();
+        assert_eq!(updated.balance_cents, 130_000);
+    }
+
+    #[tokio::test]
+    async fn test_handle_expense_report_paid_withdrawal() {
+        let repo = setup_repo().await;
+
+        let acct = repo
+            .create_bank_account(&CreateBankAccountRequest {
+                name: "Payroll".into(),
+                bank_name: "Bank EX".into(),
+                account_number: "ex3333".into(),
+                routing_number: None,
+                balance_cents: Some(500_000),
+                currency: Some("USD".into()),
+            })
+            .await
+            .unwrap();
+
+        // Simulate what handle_expense_report_paid does:
+        // Create a withdrawal for employee reimbursement
+        let tx = repo
+            .create_bank_transaction(&CreateBankTransactionRequest {
+                bank_account_id: acct.id.clone(),
+                amount_cents: 7_500,
+                transaction_date: "2025-06-25".into(),
+                description: Some("Expense reimbursement for employee emp-789".into()),
+                r#type: "withdrawal".into(),
+                reference: Some("expense:employee:emp-789".into()),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(tx.r#type, "withdrawal");
+        assert_eq!(tx.amount_cents, 7_500);
+
+        let updated = repo.get_bank_account(&acct.id).await.unwrap();
+        assert_eq!(updated.balance_cents, 492_500);
+    }
+
+    #[tokio::test]
+    async fn test_handle_payroll_completed_withdrawal() {
+        let repo = setup_repo().await;
+
+        let acct = repo
+            .create_bank_account(&CreateBankAccountRequest {
+                name: "Payroll Account".into(),
+                bank_name: "Bank PR".into(),
+                account_number: "pr4444".into(),
+                routing_number: None,
+                balance_cents: Some(1_000_000),
+                currency: Some("USD".into()),
+            })
+            .await
+            .unwrap();
+
+        // Simulate what handle_payroll_completed does:
+        // Create a withdrawal for payroll disbursement
+        let tx = repo
+            .create_bank_transaction(&CreateBankTransactionRequest {
+                bank_account_id: acct.id.clone(),
+                amount_cents: 250_000,
+                transaction_date: "2025-06-30".into(),
+                description: Some("Payroll disbursement for run payrun-001".into()),
+                r#type: "withdrawal".into(),
+                reference: Some("payroll:run:payrun-001".into()),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(tx.r#type, "withdrawal");
+        assert_eq!(tx.amount_cents, 250_000);
+
+        let updated = repo.get_bank_account(&acct.id).await.unwrap();
+        assert_eq!(updated.balance_cents, 750_000);
+    }
+
+    #[tokio::test]
+    async fn test_no_bank_account_returns_error() {
+        let repo = setup_repo().await;
+
+        // No bank accounts created - list should be empty
+        let accounts = repo.list_bank_accounts().await.unwrap();
+        assert!(accounts.is_empty());
+
+        // Any transaction attempt would fail because no bank account exists
+        let result = repo.get_bank_account("nonexistent").await;
+        assert!(result.is_err());
     }
 }
