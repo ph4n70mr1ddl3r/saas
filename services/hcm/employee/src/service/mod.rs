@@ -688,4 +688,97 @@ mod tests {
         assert_eq!(emps[0].first_name, "Auto");
         assert_eq!(emps[0].last_name, "Hire");
     }
+
+    #[tokio::test]
+    async fn test_employee_update_returns_updated_fields() {
+        let pool = setup().await;
+        let emp_repo = EmployeeRepo::new(pool.clone());
+        let dept_repo = DepartmentRepo::new(pool);
+
+        let dept = dept_repo
+            .create(&CreateDepartment {
+                name: "Test Dept".into(),
+                parent_id: None,
+                manager_id: None,
+                cost_center: None,
+            })
+            .await
+            .unwrap();
+
+        let emp = emp_repo
+            .create(&CreateEmployee {
+                first_name: "John".into(),
+                last_name: "Doe".into(),
+                email: "john@example.com".into(),
+                phone: None,
+                hire_date: "2025-01-01".into(),
+                department_id: dept.id.clone(),
+                reports_to: None,
+                job_title: "Engineer".into(),
+                employee_number: "EMP-001".into(),
+            })
+            .await
+            .unwrap();
+
+        let updated = emp_repo
+            .update(
+                &emp.id,
+                Some("Jane"),
+                None,
+                Some("jane@example.com"),
+                None,
+                None,
+                None,
+                Some("Senior Engineer"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(updated.first_name, "Jane");
+        assert_eq!(updated.email, "jane@example.com");
+        assert_eq!(updated.job_title, "Senior Engineer");
+        // Last name unchanged
+        assert_eq!(updated.last_name, "Doe");
+    }
+
+    #[tokio::test]
+    async fn test_employee_terminate_sets_status() {
+        let pool = setup().await;
+        let emp_repo = EmployeeRepo::new(pool.clone());
+        let dept_repo = DepartmentRepo::new(pool);
+
+        let dept = dept_repo
+            .create(&CreateDepartment {
+                name: "Finance".into(),
+                parent_id: None,
+                manager_id: None,
+                cost_center: None,
+            })
+            .await
+            .unwrap();
+
+        let emp = emp_repo
+            .create(&CreateEmployee {
+                first_name: "Alice".into(),
+                last_name: "Smith".into(),
+                email: "alice@example.com".into(),
+                phone: None,
+                hire_date: "2025-01-01".into(),
+                department_id: dept.id.clone(),
+                reports_to: None,
+                job_title: "Analyst".into(),
+                employee_number: "EMP-002".into(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(emp.status, "active");
+
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        emp_repo.terminate(&emp.id, &today).await.unwrap();
+
+        let terminated = emp_repo.get_by_id(&emp.id).await.unwrap();
+        assert_eq!(terminated.status, "terminated");
+    }
 }

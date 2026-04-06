@@ -1023,4 +1023,275 @@ mod tests {
         assert!(num2.starts_with("JE-"));
         assert_ne!(num1, num2, "Entry numbers should be unique");
     }
+
+    #[tokio::test]
+    async fn test_handle_ap_invoice_approved_creates_je() {
+        let repo = setup_repo().await;
+
+        // Create a liability account for AP
+        let liability = repo
+            .create_account(&CreateAccountRequest {
+                code: "2000".into(),
+                name: "Accounts Payable".into(),
+                account_type: "liability".into(),
+                parent_id: None,
+            })
+            .await
+            .unwrap();
+
+        // Create an expense account
+        let expense = repo
+            .create_account(&CreateAccountRequest {
+                code: "5000".into(),
+                name: "Operating Expenses".into(),
+                account_type: "expense".into(),
+                parent_id: None,
+            })
+            .await
+            .unwrap();
+
+        // Simulate what the event handler does: create a JE for AP invoice
+        let period = repo
+            .create_period(&CreatePeriodRequest {
+                name: "AP Test Period".into(),
+                start_date: "2025-01-01".into(),
+                end_date: "2025-01-31".into(),
+                fiscal_year: 2025,
+            })
+            .await
+            .unwrap();
+
+        let entry_number = repo.next_entry_number().await.unwrap();
+        let entry = repo
+            .create_journal_entry(
+                &entry_number,
+                &CreateJournalEntryRequest {
+                    description: Some("Auto-JE: AP Invoice Approved".into()),
+                    period_id: period.id.clone(),
+                    lines: vec![
+                        CreateJournalLineRequest {
+                            account_id: expense.id.clone(),
+                            debit_cents: 10000,
+                            credit_cents: 0,
+                            description: None,
+                        },
+                        CreateJournalLineRequest {
+                            account_id: liability.id.clone(),
+                            debit_cents: 0,
+                            credit_cents: 10000,
+                            description: None,
+                        },
+                    ],
+                },
+                "system",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(entry.status, "draft");
+        assert_eq!(entry.description, Some("Auto-JE: AP Invoice Approved".to_string()));
+
+        // Post it
+        let posted = repo.post_journal_entry(&entry.id).await.unwrap();
+        assert_eq!(posted.status, "posted");
+    }
+
+    #[tokio::test]
+    async fn test_handle_ar_invoice_created_creates_je() {
+        let repo = setup_repo().await;
+
+        let asset = repo
+            .create_account(&CreateAccountRequest {
+                code: "1200".into(),
+                name: "Accounts Receivable".into(),
+                account_type: "asset".into(),
+                parent_id: None,
+            })
+            .await
+            .unwrap();
+
+        let revenue = repo
+            .create_account(&CreateAccountRequest {
+                code: "4000".into(),
+                name: "Revenue".into(),
+                account_type: "revenue".into(),
+                parent_id: None,
+            })
+            .await
+            .unwrap();
+
+        let period = repo
+            .create_period(&CreatePeriodRequest {
+                name: "AR Test Period".into(),
+                start_date: "2025-02-01".into(),
+                end_date: "2025-02-28".into(),
+                fiscal_year: 2025,
+            })
+            .await
+            .unwrap();
+
+        let entry_number = repo.next_entry_number().await.unwrap();
+        let entry = repo
+            .create_journal_entry(
+                &entry_number,
+                &CreateJournalEntryRequest {
+                    description: Some("Auto-JE: AR Invoice Created".into()),
+                    period_id: period.id.clone(),
+                    lines: vec![
+                        CreateJournalLineRequest {
+                            account_id: asset.id.clone(),
+                            debit_cents: 15000,
+                            credit_cents: 0,
+                            description: None,
+                        },
+                        CreateJournalLineRequest {
+                            account_id: revenue.id.clone(),
+                            debit_cents: 0,
+                            credit_cents: 15000,
+                            description: None,
+                        },
+                    ],
+                },
+                "system",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(entry.description, Some("Auto-JE: AR Invoice Created".to_string()));
+
+        let posted = repo.post_journal_entry(&entry.id).await.unwrap();
+        assert_eq!(posted.status, "posted");
+    }
+
+    #[tokio::test]
+    async fn test_handle_payroll_completed_creates_je() {
+        let repo = setup_repo().await;
+
+        let expense = repo
+            .create_account(&CreateAccountRequest {
+                code: "6000".into(),
+                name: "Salary Expense".into(),
+                account_type: "expense".into(),
+                parent_id: None,
+            })
+            .await
+            .unwrap();
+
+        let liability = repo
+            .create_account(&CreateAccountRequest {
+                code: "2100".into(),
+                name: "Salaries Payable".into(),
+                account_type: "liability".into(),
+                parent_id: None,
+            })
+            .await
+            .unwrap();
+
+        let period = repo
+            .create_period(&CreatePeriodRequest {
+                name: "Payroll Period".into(),
+                start_date: "2025-03-01".into(),
+                end_date: "2025-03-31".into(),
+                fiscal_year: 2025,
+            })
+            .await
+            .unwrap();
+
+        let entry_number = repo.next_entry_number().await.unwrap();
+        let entry = repo
+            .create_journal_entry(
+                &entry_number,
+                &CreateJournalEntryRequest {
+                    description: Some("Auto-JE: Payroll Run Completed".into()),
+                    period_id: period.id.clone(),
+                    lines: vec![
+                        CreateJournalLineRequest {
+                            account_id: expense.id.clone(),
+                            debit_cents: 50000,
+                            credit_cents: 0,
+                            description: None,
+                        },
+                        CreateJournalLineRequest {
+                            account_id: liability.id.clone(),
+                            debit_cents: 0,
+                            credit_cents: 50000,
+                            description: None,
+                        },
+                    ],
+                },
+                "system",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(entry.description, Some("Auto-JE: Payroll Run Completed".to_string()));
+        let posted = repo.post_journal_entry(&entry.id).await.unwrap();
+        assert_eq!(posted.status, "posted");
+    }
+
+    #[tokio::test]
+    async fn test_handle_expense_approved_creates_je() {
+        let repo = setup_repo().await;
+
+        let expense = repo
+            .create_account(&CreateAccountRequest {
+                code: "6100".into(),
+                name: "Travel Expense".into(),
+                account_type: "expense".into(),
+                parent_id: None,
+            })
+            .await
+            .unwrap();
+
+        let asset = repo
+            .create_account(&CreateAccountRequest {
+                code: "1100".into(),
+                name: "Cash".into(),
+                account_type: "asset".into(),
+                parent_id: None,
+            })
+            .await
+            .unwrap();
+
+        let period = repo
+            .create_period(&CreatePeriodRequest {
+                name: "Expense Period".into(),
+                start_date: "2025-04-01".into(),
+                end_date: "2025-04-30".into(),
+                fiscal_year: 2025,
+            })
+            .await
+            .unwrap();
+
+        let entry_number = repo.next_entry_number().await.unwrap();
+        let entry = repo
+            .create_journal_entry(
+                &entry_number,
+                &CreateJournalEntryRequest {
+                    description: Some("Auto-JE: Expense Report Approved".into()),
+                    period_id: period.id.clone(),
+                    lines: vec![
+                        CreateJournalLineRequest {
+                            account_id: expense.id.clone(),
+                            debit_cents: 7500,
+                            credit_cents: 0,
+                            description: None,
+                        },
+                        CreateJournalLineRequest {
+                            account_id: asset.id.clone(),
+                            debit_cents: 0,
+                            credit_cents: 7500,
+                            description: None,
+                        },
+                    ],
+                },
+                "system",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(entry.description, Some("Auto-JE: Expense Report Approved".to_string()));
+        let posted = repo.post_journal_entry(&entry.id).await.unwrap();
+        assert_eq!(posted.status, "posted");
+    }
 }

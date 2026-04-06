@@ -120,6 +120,8 @@ fn resolve_service(path: &str) -> String {
         return "gl".to_string();
     }
     if path.starts_with("/api/v1/vendors")
+        || path.starts_with("/api/v1/invoices")
+        || path.starts_with("/api/v1/payments")
         || path.starts_with("/api/v1/ap-invoices")
         || path.starts_with("/api/v1/ap-payments")
         || path.starts_with("/api/v1/tax-codes")
@@ -171,4 +173,111 @@ fn resolve_service(path: &str) -> String {
         return "manufacturing".to_string();
     }
     "unknown".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_service_iam() {
+        assert_eq!(resolve_service("/api/v1/auth/login"), "iam");
+        assert_eq!(resolve_service("/api/v1/users"), "iam");
+        assert_eq!(resolve_service("/api/v1/users/123"), "iam");
+        assert_eq!(resolve_service("/api/v1/roles"), "iam");
+        assert_eq!(resolve_service("/api/v1/permissions"), "iam");
+    }
+
+    #[test]
+    fn test_resolve_service_employee() {
+        assert_eq!(resolve_service("/api/v1/employees"), "employee");
+        assert_eq!(resolve_service("/api/v1/employees/abc123"), "employee");
+        assert_eq!(resolve_service("/api/v1/departments"), "employee");
+        assert_eq!(resolve_service("/api/v1/org-chart"), "employee");
+    }
+
+    #[test]
+    fn test_resolve_service_payroll() {
+        assert_eq!(resolve_service("/api/v1/compensation"), "payroll");
+        assert_eq!(resolve_service("/api/v1/pay-runs"), "payroll");
+        assert_eq!(resolve_service("/api/v1/deductions"), "payroll");
+    }
+
+    #[test]
+    fn test_resolve_service_gl() {
+        assert_eq!(resolve_service("/api/v1/accounts"), "gl");
+        assert_eq!(resolve_service("/api/v1/periods"), "gl");
+        assert_eq!(resolve_service("/api/v1/journal-entries"), "gl");
+        assert_eq!(resolve_service("/api/v1/trial-balance"), "gl");
+        assert_eq!(resolve_service("/api/v1/balance-sheet"), "gl");
+        assert_eq!(resolve_service("/api/v1/income-statement"), "gl");
+        assert_eq!(resolve_service("/api/v1/budgets"), "gl");
+    }
+
+    #[test]
+    fn test_resolve_service_ap() {
+        assert_eq!(resolve_service("/api/v1/vendors"), "ap");
+        assert_eq!(resolve_service("/api/v1/invoices"), "ap");
+        assert_eq!(resolve_service("/api/v1/payments"), "ap");
+        assert_eq!(resolve_service("/api/v1/ap-invoices"), "ap");
+        assert_eq!(resolve_service("/api/v1/ap-payments"), "ap");
+        assert_eq!(resolve_service("/api/v1/tax-codes"), "ap");
+    }
+
+    #[test]
+    fn test_resolve_service_ar() {
+        assert_eq!(resolve_service("/api/v1/customers"), "ar");
+        assert_eq!(resolve_service("/api/v1/ar-invoices"), "ar");
+        assert_eq!(resolve_service("/api/v1/receipts"), "ar");
+        assert_eq!(resolve_service("/api/v1/credit-memos"), "ar");
+    }
+
+    #[test]
+    fn test_resolve_service_inventory() {
+        assert_eq!(resolve_service("/api/v1/warehouses"), "inventory");
+        assert_eq!(resolve_service("/api/v1/items"), "inventory");
+        assert_eq!(resolve_service("/api/v1/stock-movements"), "inventory");
+        assert_eq!(resolve_service("/api/v1/reservations"), "inventory");
+        assert_eq!(resolve_service("/api/v1/cycle-counts"), "inventory");
+    }
+
+    #[test]
+    fn test_resolve_service_procurement() {
+        assert_eq!(resolve_service("/api/v1/suppliers"), "procurement");
+        assert_eq!(resolve_service("/api/v1/purchase-orders"), "procurement");
+    }
+
+    #[test]
+    fn test_resolve_service_orders() {
+        assert_eq!(resolve_service("/api/v1/sales-orders"), "orders");
+        assert_eq!(resolve_service("/api/v1/fulfillments"), "orders");
+        assert_eq!(resolve_service("/api/v1/returns"), "orders");
+    }
+
+    #[test]
+    fn test_resolve_service_manufacturing() {
+        assert_eq!(resolve_service("/api/v1/work-orders"), "manufacturing");
+        assert_eq!(resolve_service("/api/v1/bom"), "manufacturing");
+    }
+
+    #[test]
+    fn test_resolve_service_others() {
+        assert_eq!(resolve_service("/api/v1/config"), "config");
+        assert_eq!(resolve_service("/api/v1/benefits"), "benefits");
+        assert_eq!(resolve_service("/api/v1/review-cycles"), "performance");
+        assert_eq!(resolve_service("/api/v1/timesheets"), "time-labor");
+        assert_eq!(resolve_service("/api/v1/leave"), "time-labor");
+        assert_eq!(resolve_service("/api/v1/jobs"), "recruiting");
+        assert_eq!(resolve_service("/api/v1/assets"), "assets");
+        assert_eq!(resolve_service("/api/v1/depreciation"), "assets");
+        assert_eq!(resolve_service("/api/v1/bank-accounts"), "cash");
+        assert_eq!(resolve_service("/api/v1/cash-flow-statement"), "cash");
+        assert_eq!(resolve_service("/api/v1/expense-categories"), "expense-mgmt");
+    }
+
+    #[test]
+    fn test_resolve_service_unknown() {
+        assert_eq!(resolve_service("/api/v1/unknown"), "unknown");
+        assert_eq!(resolve_service("/health"), "unknown");
+    }
 }

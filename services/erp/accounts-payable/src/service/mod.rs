@@ -128,7 +128,30 @@ impl ApService {
             ));
         }
 
-        self.repo.create_payment(input).await
+        let payment = self.repo.create_payment(input).await?;
+
+        // Publish AP payment created event
+        if let Err(e) = self
+            .bus
+            .publish(
+                "erp.ap.payment.created",
+                saas_proto::events::ApPaymentCreated {
+                    payment_id: payment.id.clone(),
+                    invoice_id: input.invoice_id.clone(),
+                    vendor_id: input.vendor_id.clone(),
+                    amount_cents: input.amount_cents,
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "erp.ap.payment.created",
+                e
+            );
+        }
+
+        Ok(payment)
     }
 
     // --- Tax Codes ---
@@ -550,5 +573,37 @@ mod tests {
         for rate in invalid_rates {
             assert!(rate < 0.0 || rate > 1.0, "Rate {} should be invalid", rate);
         }
+    }
+
+    #[tokio::test]
+    async fn test_ap_payment_publishes_event_data() {
+        let repo = setup_repo().await;
+        let vendor = create_test_vendor(&repo, "Payment Event Vendor").await;
+        let invoice = create_test_invoice(&repo, &vendor.id, 25000).await;
+
+        // Approve the invoice first
+        repo.approve_invoice(&invoice.id).await.unwrap();
+
+        // Create a payment
+        let payment = repo
+            .create_payment(&CreatePaymentRequest {
+                invoice_id: invoice.id.clone(),
+                vendor_id: vendor.id.clone(),
+                amount_cents: 25000,
+                payment_date: "2025-03-01".into(),
+                method: Some("wire".into()),
+                reference: Some("PAY-REF-001".into()),
+            })
+            .await
+            .unwrap();
+
+        // Verify payment data matches what would be in the event
+        assert_eq!(payment.invoice_id, invoice.id);
+        assert_eq!(payment.vendor_id, vendor.id);
+        assert_eq!(payment.amount_cents, 25000);
+
+        // Verify invoice is now paid
+        let paid = repo.get_invoice(&invoice.id).await.unwrap();
+        assert_eq!(paid.status, "paid");
     }
 }

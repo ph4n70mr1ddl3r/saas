@@ -117,7 +117,30 @@ impl ArService {
             ));
         }
 
-        self.repo.create_receipt(input).await
+        let receipt = self.repo.create_receipt(input).await?;
+
+        // Publish AR receipt created event
+        if let Err(e) = self
+            .bus
+            .publish(
+                "erp.ar.receipt.created",
+                saas_proto::events::ArReceiptCreated {
+                    receipt_id: receipt.id.clone(),
+                    invoice_id: input.invoice_id.clone(),
+                    customer_id: input.customer_id.clone(),
+                    amount_cents: input.amount_cents,
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "erp.ar.receipt.created",
+                e
+            );
+        }
+
+        Ok(receipt)
     }
 
     // --- Credit Memos ---
@@ -621,5 +644,33 @@ mod tests {
 
         let receipts = repo.list_receipts().await.unwrap();
         assert_eq!(receipts.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_ar_receipt_publishes_event_data() {
+        let repo = setup_repo().await;
+        let customer = create_test_customer(&repo, "Receipt Event Client").await;
+        let invoice = create_test_invoice(&repo, &customer.id, 30000).await;
+
+        // Create a receipt
+        let receipt = repo
+            .create_receipt(&CreateReceiptRequest {
+                invoice_id: invoice.id.clone(),
+                customer_id: customer.id.clone(),
+                amount_cents: 30000,
+                receipt_date: "2025-03-15".into(),
+                method: Some("wire".into()),
+            })
+            .await
+            .unwrap();
+
+        // Verify receipt data matches what would be in the event
+        assert_eq!(receipt.invoice_id, invoice.id);
+        assert_eq!(receipt.customer_id, customer.id);
+        assert_eq!(receipt.amount_cents, 30000);
+
+        // Verify invoice is now paid
+        let paid = repo.get_invoice(&invoice.id).await.unwrap();
+        assert_eq!(paid.status, "paid");
     }
 }

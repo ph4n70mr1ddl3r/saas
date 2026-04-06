@@ -354,3 +354,52 @@ pub struct TokenRevoked {
     pub user_id: String,
     pub expires_at: String,
 }
+
+// SCM Manufacturing Events
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkOrderCompleted {
+    pub work_order_id: String,
+    pub item_id: String,
+    pub quantity: i64,
+}
+
+// SCM Order Management Events
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderFulfilled {
+    pub order_id: String,
+    pub order_number: String,
+    pub customer_id: String,
+    pub lines: Vec<OrderFulfilledLine>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderFulfilledLine {
+    pub item_id: String,
+    pub quantity: i64,
+    pub warehouse_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReturnCreated {
+    pub return_id: String,
+    pub order_id: String,
+    pub item_id: String,
+    pub quantity: i64,
+}
+
+// ERP Payment Events
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApPaymentCreated {
+    pub payment_id: String,
+    pub invoice_id: String,
+    pub vendor_id: String,
+    pub amount_cents: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArReceiptCreated {
+    pub receipt_id: String,
+    pub invoice_id: String,
+    pub customer_id: String,
+    pub amount_cents: i64,
+}

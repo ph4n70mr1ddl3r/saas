@@ -78,6 +78,16 @@ impl EmployeeService {
         id: &str,
         input: UpdateEmployee,
     ) -> AppResult<EmployeeResponse> {
+        let mut changes = Vec::new();
+        if input.first_name.is_some() { changes.push("first_name".into()); }
+        if input.last_name.is_some() { changes.push("last_name".into()); }
+        if input.email.is_some() { changes.push("email".into()); }
+        if input.phone.is_some() { changes.push("phone".into()); }
+        if input.department_id.is_some() { changes.push("department_id".into()); }
+        if input.reports_to.is_some() { changes.push("reports_to".into()); }
+        if input.job_title.is_some() { changes.push("job_title".into()); }
+        if input.status.is_some() { changes.push("status".into()); }
+
         let emp = self
             .emp_repo
             .update(
@@ -92,6 +102,23 @@ impl EmployeeService {
                 input.status.as_deref(),
             )
             .await?;
+        if let Err(e) = self
+            .bus
+            .publish(
+                "hcm.employee.updated",
+                saas_proto::events::EmployeeUpdated {
+                    employee_id: emp.id.clone(),
+                    changes,
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "hcm.employee.updated",
+                e
+            );
+        }
         Ok(emp)
     }
 

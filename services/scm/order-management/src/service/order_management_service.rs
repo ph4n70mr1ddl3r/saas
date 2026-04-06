@@ -99,12 +99,37 @@ impl OrderManagementService {
                 "Only confirmed orders can be fulfilled".into(),
             ));
         }
+        let mut fulfilled_lines = Vec::new();
         for line in &input.lines {
             self.fulfillment_repo
                 .create(id, &line.order_line_id, line.quantity, &line.warehouse_id)
                 .await?;
+            fulfilled_lines.push(saas_proto::events::OrderFulfilledLine {
+                item_id: line.order_line_id.clone(),
+                quantity: line.quantity,
+                warehouse_id: line.warehouse_id.clone(),
+            });
         }
         self.order_repo.update_status(id, "picking").await?;
+        if let Err(e) = self
+            .bus
+            .publish(
+                "scm.orders.order.fulfilled",
+                saas_proto::events::OrderFulfilled {
+                    order_id: id.to_string(),
+                    order_number: order.order_number.clone(),
+                    customer_id: order.customer_id.clone(),
+                    lines: fulfilled_lines,
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "scm.orders.order.fulfilled",
+                e
+            );
+        }
         self.get_sales_order(id).await
     }
 
@@ -121,7 +146,27 @@ impl OrderManagementService {
         input
             .validate()
             .map_err(|e| saas_common::error::AppError::Validation(e.to_string()))?;
-        self.return_repo.create(&input).await
+        let ret = self.return_repo.create(&input).await?;
+        if let Err(e) = self
+            .bus
+            .publish(
+                "scm.orders.return.created",
+                saas_proto::events::ReturnCreated {
+                    return_id: ret.id.clone(),
+                    order_id: ret.order_id.clone(),
+                    item_id: ret.order_line_id.clone(),
+                    quantity: ret.quantity,
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "scm.orders.return.created",
+                e
+            );
+        }
+        Ok(ret)
     }
 }
 
@@ -410,5 +455,72 @@ mod tests {
         let order = repo.create(&input).await.unwrap();
         let lines = repo.get_lines(&order.id).await.unwrap();
         assert_eq!(lines[0].status, "open");
+    }
+
+    #[tokio::test]
+    async fn test_fulfillment_updates_order_status() {
+        let pool = setup().await;
+        let order_repo = SalesOrderRepo::new(pool.clone());
+        let fulfillment_repo = FulfillmentRepo::new(pool);
+
+        let input = CreateSalesOrder {
+            customer_id: "CUST-FUL".into(),
+            order_date: "2025-09-01".into(),
+            shipping_address: Some("123 Main St".into()),
+            notes: None,
+            lines: vec![CreateSalesOrderLine {
+                item_id: "ITEM-FUL".into(),
+                quantity: 10,
+                unit_price_cents: 500,
+            }],
+        };
+        let order = order_repo.create(&input).await.unwrap();
+        let lines = order_repo.get_lines(&order.id).await.unwrap();
+        order_repo.update_status(&order.id, "confirmed").await.unwrap();
+
+        // Fulfill the order
+        fulfillment_repo
+            .create(&order.id, &lines[0].id, 10, "WH-FUL-001")
+            .await
+            .unwrap();
+
+        order_repo.update_status(&order.id, "picking").await.unwrap();
+        let updated = order_repo.get_by_id(&order.id).await.unwrap();
+        assert_eq!(updated.status, "picking");
+    }
+
+    #[tokio::test]
+    async fn test_return_tracks_order_line() {
+        let pool = setup().await;
+        let order_repo = SalesOrderRepo::new(pool.clone());
+        let return_repo = ReturnRepo::new(pool);
+
+        let input = CreateSalesOrder {
+            customer_id: "CUST-RET".into(),
+            order_date: "2025-10-01".into(),
+            shipping_address: None,
+            notes: None,
+            lines: vec![CreateSalesOrderLine {
+                item_id: "ITEM-RET".into(),
+                quantity: 5,
+                unit_price_cents: 2000,
+            }],
+        };
+        let order = order_repo.create(&input).await.unwrap();
+        let lines = order_repo.get_lines(&order.id).await.unwrap();
+
+        let ret = return_repo
+            .create(&CreateReturn {
+                order_id: order.id.clone(),
+                order_line_id: lines[0].id.clone(),
+                quantity: 3,
+                reason: Some("Wrong size".into()),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(ret.order_id, order.id);
+        assert_eq!(ret.quantity, 3);
+        assert_eq!(ret.status, "requested");
     }
 }

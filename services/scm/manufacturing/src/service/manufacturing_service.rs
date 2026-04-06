@@ -67,7 +67,26 @@ impl ManufacturingService {
         self.work_order_repo
             .update_status(id, "completed", None, Some(&now))
             .await?;
-        self.work_order_repo.get_by_id(id).await
+        let wo = self.work_order_repo.get_by_id(id).await?;
+        if let Err(e) = self
+            .bus
+            .publish(
+                "scm.manufacturing.work_order.completed",
+                saas_proto::events::WorkOrderCompleted {
+                    work_order_id: wo.id.clone(),
+                    item_id: wo.item_id.clone(),
+                    quantity: wo.quantity,
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "scm.manufacturing.work_order.completed",
+                e
+            );
+        }
+        Ok(wo)
     }
 
     // BOMs
@@ -383,5 +402,36 @@ mod tests {
         let repo = BomRepo::new(pool);
         let result = repo.get_by_id("nonexistent").await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_work_order_completion_updates_item_and_quantity() {
+        let pool = setup().await;
+        let repo = WorkOrderRepo::new(pool);
+
+        let input = CreateWorkOrder {
+            item_id: "ITEM-FG-001".into(),
+            quantity: 500,
+            planned_start: Some("2025-06-01T08:00:00".into()),
+            planned_end: Some("2025-06-05T17:00:00".into()),
+        };
+        let wo = repo.create(&input).await.unwrap();
+
+        // Start the work order
+        repo.update_status(&wo.id, "in_progress", Some("2025-06-01T08:00:00"), None)
+            .await
+            .unwrap();
+
+        // Complete the work order
+        let end_time = "2025-06-04T16:00:00";
+        repo.update_status(&wo.id, "completed", None, Some(end_time))
+            .await
+            .unwrap();
+
+        let completed = repo.get_by_id(&wo.id).await.unwrap();
+        assert_eq!(completed.status, "completed");
+        assert_eq!(completed.item_id, "ITEM-FG-001");
+        assert_eq!(completed.quantity, 500);
+        assert_eq!(completed.actual_end, Some(end_time.to_string()));
     }
 }
