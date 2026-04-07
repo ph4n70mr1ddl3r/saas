@@ -40,6 +40,10 @@ impl LedgerService {
         self.repo.create_account(input).await
     }
 
+    pub async fn deactivate_account(&self, id: &str) -> AppResult<Account> {
+        self.repo.deactivate_account(id).await
+    }
+
     // --- Periods ---
 
     pub async fn list_periods(&self) -> AppResult<Vec<Period>> {
@@ -2372,5 +2376,40 @@ mod tests {
         let total_debits: i64 = lines.iter().map(|l| l.debit_cents).sum();
         let total_credits: i64 = lines.iter().map(|l| l.credit_cents).sum();
         assert_eq!(total_debits, total_credits); // 80000 == 30000 + 50000
+    }
+
+    #[tokio::test]
+    async fn test_deactivate_account() {
+        let repo = setup_repo().await;
+
+        let account = create_test_account(&repo, "1000", "Cash", "asset").await;
+        assert_eq!(account.is_active, 1);
+
+        let deactivated = repo.deactivate_account(&account.id).await.unwrap();
+        assert_eq!(deactivated.is_active, 0);
+
+        // Double deactivate should fail
+        let result = repo.deactivate_account(&account.id).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_deactivate_account_not_found() {
+        let repo = setup_repo().await;
+
+        let result = repo.deactivate_account("nonexistent").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_deactivated_account_not_found_by_type() {
+        let repo = setup_repo().await;
+
+        let account = create_test_account(&repo, "1000", "Cash", "asset").await;
+        repo.deactivate_account(&account.id).await.unwrap();
+
+        // Deactivated account should not be found by type search
+        let result = repo.find_account_by_type_async("asset").await;
+        assert!(result.is_err());
     }
 }

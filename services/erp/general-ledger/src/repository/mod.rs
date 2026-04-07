@@ -502,6 +502,21 @@ impl LedgerRepo {
         .ok_or_else(|| AppError::NotFound(format!("No active '{}' account found", account_type)))
     }
 
+    /// Deactivate an account (soft delete). Prevents use in future journal entries.
+    pub async fn deactivate_account(&self, id: &str) -> AppResult<Account> {
+        let account = self.get_account(id).await?;
+        if account.is_active == 0 {
+            return Err(AppError::Validation(
+                "Account is already deactivated".into(),
+            ));
+        }
+        sqlx::query("UPDATE accounts SET is_active = 0 WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        self.get_account(id).await
+    }
+
     /// Compute the net balance for an account within a fiscal year's periods.
     /// Revenue accounts: credits - debits. Expense accounts: debits - credits.
     pub async fn account_balance_for_fiscal_year(

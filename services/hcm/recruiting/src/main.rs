@@ -32,7 +32,7 @@ async fn main() -> anyhow::Result<()> {
 
     let bus = NatsBus::connect(&nats_url, "saas-hcm-recruiting").await?;
 
-    let service = RecruitingService::new(pool, bus.clone());
+    let service = RecruitingService::new(pool.clone(), bus.clone());
     let cors_origin =
         env::var("CORS_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".to_string());
     let cors = CorsLayer::new()
@@ -51,9 +51,9 @@ async fn main() -> anyhow::Result<()> {
             axum::http::header::CONTENT_TYPE,
             axum::http::header::AUTHORIZATION,
         ]);
-    let app = routes::build_router(AppState { service }).layer(cors);
+    events::subscribe(&bus, service.clone()).await?;
 
-    events::subscribe(&bus).await?;
+    let app = routes::build_router(AppState { service }).layer(cors);
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
     tracing::info!("Recruiting service listening on port {}", port);

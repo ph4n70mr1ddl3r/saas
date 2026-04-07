@@ -50,6 +50,10 @@ impl InventoryService {
         self.warehouse_repo.create(&input).await
     }
 
+    pub async fn get_warehouse(&self, id: &str) -> AppResult<WarehouseResponse> {
+        self.warehouse_repo.get_by_id(id).await
+    }
+
     pub async fn update_warehouse(&self, id: &str, input: UpdateWarehouse) -> AppResult<WarehouseResponse> {
         self.warehouse_repo.update(id, &input).await
     }

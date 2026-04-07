@@ -36,6 +36,16 @@ pub async fn create_account(
     Ok(Json(ApiResponse::new(account)))
 }
 
+pub async fn deactivate_account(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<Account>>, AppError> {
+    rbac::require_admin(&user.roles, "erp").map_err(|e| AppError::Forbidden(e))?;
+    let account = state.service.deactivate_account(&id).await?;
+    Ok(Json(ApiResponse::new(account)))
+}
+
 pub async fn list_periods(
     user: AuthUser,
     State(state): State<AppState>,

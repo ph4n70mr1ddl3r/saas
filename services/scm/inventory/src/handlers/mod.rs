@@ -35,6 +35,18 @@ pub async fn create_warehouse(
     ))
 }
 
+pub async fn get_warehouse(
+    _user: saas_auth_core::extractor::AuthUser,
+    axum::extract::State(state): axum::extract::State<crate::routes::AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<
+    axum::Json<saas_common::response::ApiResponse<crate::models::warehouse::WarehouseResponse>>,
+    saas_common::error::AppError,
+> {
+    let warehouse = state.service.get_warehouse(&id).await?;
+    Ok(axum::Json(saas_common::response::ApiResponse::new(warehouse)))
+}
+
 pub async fn update_warehouse(
     user: saas_auth_core::extractor::AuthUser,
     axum::extract::State(state): axum::extract::State<crate::routes::AppState>,

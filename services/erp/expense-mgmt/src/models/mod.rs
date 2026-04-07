@@ -129,6 +129,15 @@ pub struct CreateMileageRequest {
 // --- Status transition requests ---
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct UpdateExpenseCategoryRequest {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub limit_cents: Option<i64>,
+    pub requires_receipt: Option<bool>,
+    pub gl_account_code: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SubmitReportRequest {
     pub rejected_reason: Option<String>,
 }

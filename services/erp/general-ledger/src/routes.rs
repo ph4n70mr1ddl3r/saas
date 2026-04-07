@@ -25,6 +25,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/v1/accounts/{id}", get(handlers::get_account))
         .route(
+            "/api/v1/accounts/{id}/deactivate",
+            axum::routing::put(handlers::deactivate_account),
+        )
+        .route(
             "/api/v1/periods",
             get(handlers::list_periods).post(handlers::create_period),
         )

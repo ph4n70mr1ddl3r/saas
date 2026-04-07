@@ -18,7 +18,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(
             "/api/v1/warehouses/{id}",
-            put(handlers::update_warehouse),
+            get(handlers::get_warehouse).put(handlers::update_warehouse),
         )
         .route(
             "/api/v1/items",

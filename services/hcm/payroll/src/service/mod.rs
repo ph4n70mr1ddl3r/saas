@@ -228,6 +228,25 @@ impl PayrollService {
                 ));
             }
         }
+
+        // Check for overlapping brackets
+        let existing = self.repo.list_tax_brackets().await?;
+        let new_max = input.max_income_cents.unwrap_or(i64::MAX);
+        for bracket in &existing {
+            let existing_max = bracket.max_income_cents.unwrap_or(i64::MAX);
+            // Two ranges overlap if: new_min < existing_max AND existing_min < new_max
+            if input.min_income_cents < existing_max && bracket.min_income_cents < new_max {
+                return Err(AppError::Validation(format!(
+                    "Tax bracket overlaps with existing bracket ({}-{} @ {}%). New bracket ({}-{}) conflicts",
+                    bracket.min_income_cents,
+                    bracket.max_income_cents.map(|v| v.to_string()).unwrap_or("∞".into()),
+                    bracket.rate_percent,
+                    input.min_income_cents,
+                    input.max_income_cents.map(|v| v.to_string()).unwrap_or("∞".into()),
+                )));
+            }
+        }
+
         self.repo.create_tax_bracket(&input).await
     }
 
@@ -757,5 +776,110 @@ mod tests {
             remaining -= taxable;
         }
         assert_eq!(total_tax, 13_200_00); // 22% of 60k
+    }
+
+    #[tokio::test]
+    async fn test_tax_bracket_overlap_validation() {
+        let repo = setup_repo().await;
+        let svc = PayrollService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Create first bracket: 0-100000 cents at 10%
+        svc.create_tax_bracket(CreateTaxBracketRequest {
+            name: "Low".into(),
+            min_income_cents: 0,
+            max_income_cents: Some(100_000_00),
+            rate_percent: 10.0,
+        })
+        .await
+        .unwrap();
+
+        // Overlapping: 50000-150000 at 15% should fail
+        let result = svc
+            .create_tax_bracket(CreateTaxBracketRequest {
+                name: "Overlap".into(),
+                min_income_cents: 50_000_00,
+                max_income_cents: Some(150_000_00),
+                rate_percent: 15.0,
+            })
+            .await;
+        assert!(result.is_err());
+
+        // Adjacent (non-overlapping): 100000-200000 at 22% should succeed
+        let bracket = svc
+            .create_tax_bracket(CreateTaxBracketRequest {
+                name: "High".into(),
+                min_income_cents: 100_000_00,
+                max_income_cents: Some(200_000_00),
+                rate_percent: 22.0,
+            })
+            .await
+            .unwrap();
+        assert_eq!(bracket.name, "High");
+
+        // Adjacent open-ended: 200000+ at 30% should succeed
+        let top = svc
+            .create_tax_bracket(CreateTaxBracketRequest {
+                name: "Top".into(),
+                min_income_cents: 200_000_00,
+                max_income_cents: None,
+                rate_percent: 30.0,
+            })
+            .await
+            .unwrap();
+        assert_eq!(top.name, "Top");
+        assert_eq!(top.max_income_cents, None);
+
+        // Verify 3 brackets total
+        let brackets = repo.list_tax_brackets().await.unwrap();
+        assert_eq!(brackets.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_tax_bracket_invalid_rate() {
+        let repo = setup_repo().await;
+        let svc = PayrollService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Negative rate should fail
+        let result = svc
+            .create_tax_bracket(CreateTaxBracketRequest {
+                name: "Invalid".into(),
+                min_income_cents: 0,
+                max_income_cents: None,
+                rate_percent: -5.0,
+            })
+            .await;
+        assert!(result.is_err());
+
+        // Rate > 100 should fail
+        let result = svc
+            .create_tax_bracket(CreateTaxBracketRequest {
+                name: "Invalid2".into(),
+                min_income_cents: 0,
+                max_income_cents: None,
+                rate_percent: 150.0,
+            })
+            .await;
+        assert!(result.is_err());
+
+        // max <= min should fail
+        let result = svc
+            .create_tax_bracket(CreateTaxBracketRequest {
+                name: "Invalid3".into(),
+                min_income_cents: 100_000_00,
+                max_income_cents: Some(50_000_00),
+                rate_percent: 10.0,
+            })
+            .await;
+        assert!(result.is_err());
     }
 }

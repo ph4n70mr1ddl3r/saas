@@ -38,6 +38,17 @@ pub async fn create_expense_category(
     Ok(Json(ApiResponse::new(category)))
 }
 
+pub async fn update_expense_category(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(input): Json<UpdateExpenseCategoryRequest>,
+) -> Result<Json<ApiResponse<ExpenseCategory>>, AppError> {
+    rbac::require_admin(&user.roles, "erp").map_err(|e| AppError::Forbidden(e))?;
+    let category = state.service.update_category(&id, &input).await?;
+    Ok(Json(ApiResponse::new(category)))
+}
+
 // --- Expense Reports ---
 
 pub async fn list_expense_reports(

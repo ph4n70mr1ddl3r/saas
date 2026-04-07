@@ -26,7 +26,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(
             "/api/v1/expense-categories/{id}",
-            get(handlers::get_expense_category),
+            get(handlers::get_expense_category).put(handlers::update_expense_category),
         )
         .route(
             "/api/v1/expense-reports",

@@ -58,6 +58,39 @@ impl ExpenseRepo {
         self.get_category(&id).await
     }
 
+    pub async fn update_category(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        description: Option<&str>,
+        limit_cents: Option<i64>,
+        requires_receipt: Option<bool>,
+        gl_account_code: Option<&str>,
+    ) -> AppResult<ExpenseCategory> {
+        let current = self.get_category(id).await?;
+        let name = name.unwrap_or(&current.name);
+        let limit = limit_cents.unwrap_or(current.limit_cents);
+        let req_receipt = requires_receipt
+            .map(|b| if b { 1 } else { 0 })
+            .unwrap_or(current.requires_receipt);
+        let gl_code = gl_account_code
+            .map(|s| if s.is_empty() { None } else { Some(s.to_string()) })
+            .unwrap_or(current.gl_account_code.clone());
+
+        sqlx::query(
+            "UPDATE expense_categories SET name = ?, description = ?, limit_cents = ?, requires_receipt = ?, gl_account_code = ? WHERE id = ?",
+        )
+        .bind(name)
+        .bind(description.or(current.description.as_deref()))
+        .bind(limit)
+        .bind(req_receipt)
+        .bind(&gl_code)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        self.get_category(id).await
+    }
+
     pub async fn get_category_spent(&self, category_id: &str) -> AppResult<i64> {
         let total: i64 = sqlx::query_scalar(
             "SELECT COALESCE(SUM(el.amount_cents), 0) FROM expense_lines el INNER JOIN expense_reports er ON el.report_id = er.id WHERE el.category_id = ? AND er.status IN ('draft','submitted','approved')",

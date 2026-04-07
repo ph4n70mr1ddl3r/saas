@@ -34,6 +34,23 @@ impl RecruitingService {
     }
 
     pub async fn update_job(&self, id: &str, input: UpdateJobRequest) -> AppResult<JobPosting> {
+        let existing = self.repo.get_job(id).await?;
+        if let Some(ref new_status) = input.status {
+            let valid_transitions: &[&[&str]] = &[
+                &["open", "closed"],
+                &["open", "filled"],
+                &["closed", "open"],
+            ];
+            let allowed = valid_transitions
+                .iter()
+                .any(|t| t[0] == existing.status && t[1] == *new_status);
+            if !allowed && *new_status != existing.status {
+                return Err(AppError::Validation(format!(
+                    "Cannot transition job '{}' from '{}' to '{}'",
+                    id, existing.status, new_status
+                )));
+            }
+        }
         self.repo.update_job(id, &input).await
     }
 
@@ -64,6 +81,27 @@ impl RecruitingService {
     ) -> AppResult<Application> {
         let existing = self.repo.get_application(id).await?;
         let old_status = existing.status.clone();
+
+        // Validate status transition
+        let valid_transitions: std::collections::HashMap<&str, &[&str]> = [
+            ("applied", &["screening", "rejected"][..]),
+            ("screening", &["interview", "rejected"]),
+            ("interview", &["offer", "rejected"]),
+            ("offer", &["hired", "rejected"]),
+            ("hired", &[]),
+            ("rejected", &[]),
+        ]
+        .iter()
+        .cloned()
+        .collect();
+
+        let allowed_next: &[&str] = valid_transitions.get(old_status.as_str()).copied().unwrap_or(&[]);
+        if !allowed_next.contains(&input.status.as_str()) && input.status != old_status {
+            return Err(AppError::Validation(format!(
+                "Cannot transition application '{}' from '{}' to '{}'. Valid transitions: {:?}",
+                id, old_status, input.status, allowed_next
+            )));
+        }
 
         let app = self
             .repo
@@ -103,6 +141,19 @@ impl RecruitingService {
     pub async fn list_applications_by_job(&self, job_id: &str) -> AppResult<Vec<Application>> {
         let _ = self.repo.get_job(job_id).await?;
         self.repo.list_applications_by_job(job_id).await
+    }
+
+    /// When an employee is terminated, log open job postings for awareness.
+    pub async fn handle_employee_terminated(&self, _employee_id: &str) -> AppResult<()> {
+        let open_jobs = self.repo.list_jobs().await?;
+        let open_count = open_jobs.iter().filter(|j| j.status == "open").count();
+        if open_count > 0 {
+            tracing::info!(
+                "Employee terminated: {} open job posting(s) may need review for backfill",
+                open_count
+            );
+        }
+        Ok(())
     }
 }
 
@@ -426,5 +477,252 @@ mod tests {
             .unwrap();
         assert_eq!(filled.status, "filled");
         assert!(filled.closed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_job_status_transition_validation() {
+        let repo = setup_repo().await;
+        let svc = RecruitingService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let job = repo
+            .create_job(&CreateJobRequest {
+                title: "Test".into(),
+                department_id: "eng".into(),
+                description: None,
+                requirements: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(job.status, "open");
+
+        // Invalid: open -> in_progress (not a valid transition)
+        let result = svc
+            .update_job(
+                &job.id,
+                UpdateJobRequest {
+                    title: None,
+                    department_id: None,
+                    description: None,
+                    requirements: None,
+                    status: Some("in_progress".into()),
+                },
+            )
+            .await;
+        assert!(result.is_err());
+
+        // Valid: open -> closed
+        let closed = svc
+            .update_job(
+                &job.id,
+                UpdateJobRequest {
+                    title: None,
+                    department_id: None,
+                    description: None,
+                    requirements: None,
+                    status: Some("closed".into()),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(closed.status, "closed");
+
+        // Valid: closed -> open (reopen)
+        let reopened = svc
+            .update_job(
+                &job.id,
+                UpdateJobRequest {
+                    title: None,
+                    department_id: None,
+                    description: None,
+                    requirements: None,
+                    status: Some("open".into()),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(reopened.status, "open");
+    }
+
+    #[tokio::test]
+    async fn test_application_status_transition_validation() {
+        let repo = setup_repo().await;
+        let svc = RecruitingService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let job = repo
+            .create_job(&CreateJobRequest {
+                title: "Engineer".into(),
+                department_id: "eng".into(),
+                description: None,
+                requirements: None,
+            })
+            .await
+            .unwrap();
+
+        let app = repo
+            .create_application(&CreateApplicationRequest {
+                job_id: job.id.clone(),
+                candidate_first_name: "John".into(),
+                candidate_last_name: "Doe".into(),
+                candidate_email: "john@example.com".into(),
+                notes: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(app.status, "applied");
+
+        // Invalid: applied -> hired (must go through screening/interview/offer)
+        let result = svc
+            .update_application_status(
+                &app.id,
+                UpdateApplicationStatusRequest {
+                    status: "hired".into(),
+                    notes: None,
+                },
+            )
+            .await;
+        assert!(result.is_err());
+
+        // Valid: applied -> screening
+        let screening = svc
+            .update_application_status(
+                &app.id,
+                UpdateApplicationStatusRequest {
+                    status: "screening".into(),
+                    notes: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(screening.status, "screening");
+
+        // Invalid: screening -> hired (must go through interview/offer)
+        let result = svc
+            .update_application_status(
+                &app.id,
+                UpdateApplicationStatusRequest {
+                    status: "hired".into(),
+                    notes: None,
+                },
+            )
+            .await;
+        assert!(result.is_err());
+
+        // Valid: screening -> interview
+        let interview = svc
+            .update_application_status(
+                &app.id,
+                UpdateApplicationStatusRequest {
+                    status: "interview".into(),
+                    notes: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(interview.status, "interview");
+
+        // Valid: interview -> offer
+        let offer = svc
+            .update_application_status(
+                &app.id,
+                UpdateApplicationStatusRequest {
+                    status: "offer".into(),
+                    notes: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(offer.status, "offer");
+
+        // Valid: offer -> hired
+        let hired = svc
+            .update_application_status(
+                &app.id,
+                UpdateApplicationStatusRequest {
+                    status: "hired".into(),
+                    notes: Some("Strong candidate".into()),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(hired.status, "hired");
+
+        // Invalid: hired -> any (terminal state)
+        let result = svc
+            .update_application_status(
+                &app.id,
+                UpdateApplicationStatusRequest {
+                    status: "applied".into(),
+                    notes: None,
+                },
+            )
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_application_rejection_from_any_stage() {
+        let repo = setup_repo().await;
+        let svc = RecruitingService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let job = repo
+            .create_job(&CreateJobRequest {
+                title: "Manager".into(),
+                department_id: "ops".into(),
+                description: None,
+                requirements: None,
+            })
+            .await
+            .unwrap();
+
+        let app = repo
+            .create_application(&CreateApplicationRequest {
+                job_id: job.id.clone(),
+                candidate_first_name: "Bob".into(),
+                candidate_last_name: "Smith".into(),
+                candidate_email: "bob@example.com".into(),
+                notes: None,
+            })
+            .await
+            .unwrap();
+
+        // Valid: applied -> rejected
+        let rejected = svc
+            .update_application_status(
+                &app.id,
+                UpdateApplicationStatusRequest {
+                    status: "rejected".into(),
+                    notes: Some("Not a fit".into()),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(rejected.status, "rejected");
+
+        // Invalid: rejected is terminal
+        let result = svc
+            .update_application_status(
+                &app.id,
+                UpdateApplicationStatusRequest {
+                    status: "screening".into(),
+                    notes: None,
+                },
+            )
+            .await;
+        assert!(result.is_err());
     }
 }

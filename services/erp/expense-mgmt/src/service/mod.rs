@@ -38,6 +38,21 @@ impl ExpenseService {
         self.repo.create_category(input).await
     }
 
+    pub async fn update_category(
+        &self,
+        id: &str,
+        input: &UpdateExpenseCategoryRequest,
+    ) -> AppResult<ExpenseCategory> {
+        self.repo.update_category(
+            id,
+            input.name.as_deref(),
+            input.description.as_deref(),
+            input.limit_cents,
+            input.requires_receipt,
+            input.gl_account_code.as_deref(),
+        ).await
+    }
+
     // --- Expense Reports ---
 
     pub async fn list_reports(&self) -> AppResult<Vec<ExpenseReport>> {
@@ -832,5 +847,39 @@ mod tests {
         // Verify report can be submitted
         let report = repo.submit_report(&report.id).await.unwrap();
         assert_eq!(report.status, "submitted");
+    }
+
+    #[tokio::test]
+    async fn test_update_expense_category() {
+        let pool = setup().await;
+        let repo = ExpenseRepo::new(pool);
+
+        let cat = repo
+            .create_category(&CreateExpenseCategoryRequest {
+                name: "Travel".into(),
+                description: Some("Travel expenses".into()),
+                limit_cents: Some(50000),
+                requires_receipt: Some(true),
+            })
+            .await
+            .unwrap();
+
+        let updated = repo
+            .update_category(
+                &cat.id,
+                Some("Business Travel"),
+                Some("All business travel expenses".into()),
+                Some(100000),
+                Some(false),
+                Some("6100".into()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(updated.name, "Business Travel");
+        assert_eq!(updated.description, Some("All business travel expenses".into()));
+        assert_eq!(updated.limit_cents, 100000);
+        assert_eq!(updated.requires_receipt, 0);
+        assert_eq!(updated.gl_account_code, Some("6100".into()));
     }
 }
