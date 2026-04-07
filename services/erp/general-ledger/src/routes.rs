@@ -73,6 +73,10 @@ pub fn build_router(state: AppState) -> Router {
             get(handlers::budget_variance),
         )
         .route(
+            "/api/v1/year-end-close/{fiscal_year}",
+            axum::routing::post(handlers::year_end_close),
+        )
+        .route(
             "/health",
             get(|| async { axum::Json(serde_json::json!({"status": "ok"})) }),
         )

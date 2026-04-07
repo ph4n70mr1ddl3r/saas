@@ -487,4 +487,31 @@ impl LedgerRepo {
         .await?
         .ok_or_else(|| AppError::NotFound(format!("No active '{}' account found", account_type)))
     }
+
+    /// Compute the net balance for an account within a fiscal year's periods.
+    /// Revenue accounts: credits - debits. Expense accounts: debits - credits.
+    pub async fn account_balance_for_fiscal_year(
+        &self,
+        account_id: &str,
+        fiscal_year: i64,
+    ) -> AppResult<i64> {
+        let row: (i64,) = sqlx::query_as(
+            r#"SELECT COALESCE(SUM(
+                CASE
+                    WHEN a.account_type IN ('asset', 'expense') THEN jl.debit_cents - jl.credit_cents
+                    ELSE jl.credit_cents - jl.debit_cents
+                END
+            ), 0)
+            FROM journal_lines jl
+            JOIN journal_entries je ON je.id = jl.entry_id AND je.status = 'posted'
+            JOIN periods p ON p.id = je.period_id AND p.fiscal_year = ?
+            JOIN accounts a ON a.id = jl.account_id
+            WHERE jl.account_id = ?"#,
+        )
+        .bind(fiscal_year)
+        .bind(account_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.0)
+    }
 }

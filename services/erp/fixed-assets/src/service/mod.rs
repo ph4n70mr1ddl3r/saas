@@ -77,6 +77,16 @@ impl FixedAssetsService {
 
         // Publish disposal event if asset was disposed
         if input.status.as_deref() == Some("disposed") {
+            // Look up accumulated depreciation from the schedule
+            let accumulated_depreciation_cents = self
+                .repo
+                .get_last_depreciation(&asset.id)
+                .await
+                .ok()
+                .flatten()
+                .map(|d| d.accumulated_cents)
+                .unwrap_or(0);
+
             if let Err(e) = self
                 .bus
                 .publish(
@@ -85,6 +95,8 @@ impl FixedAssetsService {
                         asset_id: asset.id.clone(),
                         name: asset.name.clone(),
                         asset_number: asset.asset_number.clone(),
+                        cost_cents: asset.purchase_cost_cents,
+                        accumulated_depreciation_cents,
                     },
                 )
                 .await

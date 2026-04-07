@@ -138,6 +138,15 @@ impl OrderManagementService {
         self.return_repo.list().await
     }
 
+    // Fulfillments
+    pub async fn list_fulfillments(&self) -> AppResult<Vec<crate::models::fulfillment::FulfillmentResponse>> {
+        self.fulfillment_repo.list_all().await
+    }
+
+    pub async fn list_fulfillments_by_order(&self, order_id: &str) -> AppResult<Vec<crate::models::fulfillment::FulfillmentResponse>> {
+        self.fulfillment_repo.list_by_order(order_id).await
+    }
+
     pub async fn get_return(&self, id: &str) -> AppResult<ReturnResponse> {
         self.return_repo.get_by_id(id).await
     }

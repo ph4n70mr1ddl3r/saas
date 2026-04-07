@@ -22,8 +22,8 @@ async fn main() -> anyhow::Result<()> {
     let pool = create_pool(&database_url).await?;
     run_migrations(&pool, "./migrations").await?;
     let bus = NatsBus::connect(&nats_url, "saas-scm-order-management").await?;
-    events::register(&bus, pool.clone()).await?;
-    let service = service::OrderManagementService::new(pool, bus);
+    let service = service::OrderManagementService::new(pool, bus.clone());
+    events::register(&bus, service.clone()).await?;
     let app = routes::build_router(routes::AppState { service })
         .layer(saas_common::middleware::create_cors_layer())
         .layer(saas_common::middleware::create_trace_layer());

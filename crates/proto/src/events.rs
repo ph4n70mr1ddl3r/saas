@@ -90,6 +90,17 @@ pub struct StockReceived {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ItemBelowReorderPoint {
+    pub item_id: String,
+    pub item_name: String,
+    pub sku: String,
+    pub warehouse_id: String,
+    pub available_quantity: i64,
+    pub reorder_point: i64,
+    pub suggested_order_quantity: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StockReserved {
     pub item_id: String,
     pub warehouse_id: String,
@@ -225,6 +236,8 @@ pub struct AssetDisposed {
     pub asset_id: String,
     pub name: String,
     pub asset_number: String,
+    pub cost_cents: i64,
+    pub accumulated_depreciation_cents: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

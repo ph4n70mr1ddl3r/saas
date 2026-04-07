@@ -31,6 +31,14 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/v1/returns/{id}", get(handlers::get_return))
         .route(
+            "/api/v1/fulfillments",
+            get(handlers::list_fulfillments),
+        )
+        .route(
+            "/api/v1/fulfillments/order/{order_id}",
+            get(handlers::list_fulfillments_by_order),
+        )
+        .route(
             "/health",
             get(|| async { axum::Json(serde_json::json!({"status": "ok"})) }),
         )

@@ -134,9 +134,11 @@ pub async fn register(bus: &NatsBus, service: &LedgerService) -> AppResult<()> {
         let svc = svc.clone();
         let asset_id = envelope.payload.asset_id.clone();
         let name = envelope.payload.name.clone();
+        let cost_cents = envelope.payload.cost_cents;
+        let accumulated_depreciation_cents = envelope.payload.accumulated_depreciation_cents;
         async move {
             tracing::info!("Asset disposed: {} ({})", name, asset_id);
-            if let Err(e) = svc.handle_asset_disposed(&asset_id, &name).await {
+            if let Err(e) = svc.handle_asset_disposed(&asset_id, &name, cost_cents, accumulated_depreciation_cents).await {
                 tracing::error!("Failed to create auto-JE for asset disposal {}: {}", asset_id, e);
             }
         }

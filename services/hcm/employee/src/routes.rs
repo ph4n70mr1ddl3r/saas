@@ -27,6 +27,10 @@ pub fn build_router(state: AppState) -> Router {
             get(handlers::get_direct_reports),
         )
         .route(
+            "/api/v1/employees/{id}/employment-history",
+            get(handlers::list_employment_history),
+        )
+        .route(
             "/api/v1/departments",
             get(handlers::list_departments).post(handlers::create_department),
         )

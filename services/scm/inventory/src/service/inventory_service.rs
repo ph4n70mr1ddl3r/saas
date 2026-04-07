@@ -282,6 +282,50 @@ impl InventoryService {
             reference_id: Some(order_id.to_string()),
         };
         self.stock_movement_repo.create(&movement).await?;
+
+        // Check if item dropped below reorder point
+        if let Err(e) = self.check_and_publish_reorder_alert(item_id, warehouse_id).await {
+            tracing::warn!("Failed to check reorder point for item {}: {}", item_id, e);
+        }
+
+        Ok(())
+    }
+
+    /// Check if an item's available stock is below its reorder point and publish an alert.
+    async fn check_and_publish_reorder_alert(&self, item_id: &str, warehouse_id: &str) -> AppResult<()> {
+        let levels = self.stock_level_repo.get_by_item(item_id).await?;
+        let level = match levels.iter().find(|l| l.warehouse_id == warehouse_id) {
+            Some(l) => l,
+            None => return Ok(()),
+        };
+
+        let item = match self.item_repo.get_by_id(item_id).await {
+            Ok(i) => i,
+            Err(_) => return Ok(()),
+        };
+
+        let reorder_point = item.reorder_point;
+        if reorder_point > 0 && level.quantity_available <= reorder_point {
+            let suggested_qty = if item.economic_order_qty > 0 {
+                item.economic_order_qty
+            } else {
+                reorder_point * 2
+            };
+            if let Err(e) = self.bus.publish(
+                "scm.inventory.item.below_reorder",
+                saas_proto::events::ItemBelowReorderPoint {
+                    item_id: item_id.to_string(),
+                    item_name: item.name.clone(),
+                    sku: item.sku.clone(),
+                    warehouse_id: warehouse_id.to_string(),
+                    available_quantity: level.quantity_available,
+                    reorder_point,
+                    suggested_order_quantity: suggested_qty,
+                },
+            ).await {
+                tracing::error!("Failed to publish reorder alert for item {}: {}", item_id, e);
+            }
+        }
         Ok(())
     }
 

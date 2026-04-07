@@ -106,6 +106,42 @@ impl ManufacturingService {
             .map_err(|e| saas_common::error::AppError::Validation(e.to_string()))?;
         self.bom_repo.create(&input).await
     }
+
+    /// Handle sales order confirmed by auto-creating a work order if a BOM exists for the item.
+    pub async fn handle_order_confirmed(
+        &self,
+        order_id: &str,
+        item_id: &str,
+        quantity: i64,
+    ) -> AppResult<Option<WorkOrderResponse>> {
+        // Check if a BOM exists for this item
+        let boms = self.bom_repo.list().await?;
+        let bom = match boms.iter().find(|b| b.finished_item_id == item_id) {
+            Some(b) => b,
+            None => return Ok(None), // No BOM, not a manufactured item
+        };
+
+        let now = chrono::Utc::now();
+        let planned_start = now.format("%Y-%m-%dT%H:%M:%S").to_string();
+        let planned_end = (now + chrono::Duration::days(7)).format("%Y-%m-%dT%H:%M:%S").to_string();
+
+        let bom_qty = if bom.quantity > 0 { bom.quantity } else { 1 };
+        let wo_quantity = (quantity + bom_qty - 1) / bom_qty * bom_qty; // Round up to BOM multiples
+
+        let input = CreateWorkOrder {
+            item_id: item_id.to_string(),
+            quantity: wo_quantity,
+            planned_start: Some(planned_start),
+            planned_end: Some(planned_end),
+        };
+
+        tracing::info!(
+            "Auto-creating work order for item {} (order {}) qty {} based on BOM {}",
+            item_id, order_id, wo_quantity, bom.id
+        );
+        let wo = self.create_work_order(input).await?;
+        Ok(Some(wo))
+    }
 }
 
 #[cfg(test)]

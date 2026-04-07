@@ -218,3 +218,13 @@ pub async fn budget_variance(
     let report = state.service.budget_variance(&id).await?;
     Ok(Json(ApiResponse::new(report)))
 }
+
+pub async fn year_end_close(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Path(fiscal_year): Path<i64>,
+) -> Result<Json<ApiResponse<JournalEntryWithLines>>, AppError> {
+    rbac::require_admin(&user.roles, "erp").map_err(|e| AppError::Forbidden(e))?;
+    let entry = state.service.year_end_close(fiscal_year).await?;
+    Ok(Json(ApiResponse::new(entry)))
+}

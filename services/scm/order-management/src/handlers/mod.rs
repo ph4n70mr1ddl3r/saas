@@ -123,3 +123,30 @@ pub async fn create_return(
         axum::Json(saas_common::response::ApiResponse::new(ret)),
     ))
 }
+
+pub async fn list_fulfillments(
+    _user: saas_auth_core::extractor::AuthUser,
+    axum::extract::State(state): axum::extract::State<crate::routes::AppState>,
+) -> Result<
+    axum::Json<
+        saas_common::response::ApiResponse<Vec<crate::models::fulfillment::FulfillmentResponse>>,
+    >,
+    saas_common::error::AppError,
+> {
+    let fulfillments = state.service.list_fulfillments().await?;
+    Ok(axum::Json(saas_common::response::ApiResponse::new(fulfillments)))
+}
+
+pub async fn list_fulfillments_by_order(
+    _user: saas_auth_core::extractor::AuthUser,
+    axum::extract::State(state): axum::extract::State<crate::routes::AppState>,
+    axum::extract::Path(order_id): axum::extract::Path<String>,
+) -> Result<
+    axum::Json<
+        saas_common::response::ApiResponse<Vec<crate::models::fulfillment::FulfillmentResponse>>,
+    >,
+    saas_common::error::AppError,
+> {
+    let fulfillments = state.service.list_fulfillments_by_order(&order_id).await?;
+    Ok(axum::Json(saas_common::response::ApiResponse::new(fulfillments)))
+}

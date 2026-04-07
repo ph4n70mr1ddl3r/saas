@@ -42,6 +42,10 @@ pub fn build_router(state: AppState) -> Router {
             axum::routing::post(handlers::create_deduction),
         )
         .route(
+            "/api/v1/tax-brackets",
+            get(handlers::list_tax_brackets).post(handlers::create_tax_bracket),
+        )
+        .route(
             "/health",
             get(|| async { axum::Json(serde_json::json!({"status": "ok"})) }),
         )

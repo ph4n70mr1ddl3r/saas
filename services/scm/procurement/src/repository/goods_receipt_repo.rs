@@ -33,4 +33,23 @@ impl GoodsReceiptRepo {
         .ok_or_else(|| saas_common::error::AppError::Internal("Failed to fetch goods receipt".into()))?;
         Ok(row)
     }
+
+    pub async fn list_by_po(&self, po_id: &str) -> AppResult<Vec<GoodsReceiptResponse>> {
+        let rows = sqlx::query_as::<_, GoodsReceiptResponse>(
+            "SELECT id, po_id, po_line_id, quantity_received, received_date, created_at FROM goods_receipts WHERE po_id = ? ORDER BY created_at DESC",
+        )
+        .bind(po_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn list_all(&self) -> AppResult<Vec<GoodsReceiptResponse>> {
+        let rows = sqlx::query_as::<_, GoodsReceiptResponse>(
+            "SELECT id, po_id, po_line_id, quantity_received, received_date, created_at FROM goods_receipts ORDER BY created_at DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
 }

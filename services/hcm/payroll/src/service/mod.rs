@@ -93,10 +93,18 @@ impl PayrollService {
         let mut total_net_cents: i64 = 0;
         let mut payslip_count: u32 = 0;
 
-        // Use integer arithmetic for tax: 22% = multiply by 22 / 100 with rounding
+        // Use progressive tax brackets if available, otherwise fall back to flat 22%
+        let brackets = self.repo.list_tax_brackets().await.unwrap_or_default();
+        let use_progressive = !brackets.is_empty();
+
         for comp in &filtered {
             let gross = comp.amount_cents;
-            let tax = (gross * 22 + 50) / 100; // Rounded integer division for 22%
+            let tax = if use_progressive {
+                self.calculate_progressive_tax(gross).await?
+            } else {
+                // Fallback: flat 22% with rounding
+                (gross * 22 + 50) / 100
+            };
             let deductions = self
                 .repo
                 .list_deductions_by_employee(&comp.employee_id)

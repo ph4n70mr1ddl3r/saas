@@ -1,5 +1,6 @@
 use crate::models::purchase_order::*;
 use crate::models::supplier::*;
+use crate::repository::goods_receipt_repo::GoodsReceiptRepo;
 use crate::repository::purchase_order_repo::PurchaseOrderRepo;
 use crate::repository::supplier_repo::SupplierRepo;
 use saas_common::error::{AppError, AppResult};
@@ -12,6 +13,7 @@ pub struct ProcurementService {
     pool: SqlitePool,
     supplier_repo: SupplierRepo,
     po_repo: PurchaseOrderRepo,
+    goods_receipt_repo: GoodsReceiptRepo,
     bus: NatsBus,
 }
 
@@ -20,7 +22,8 @@ impl ProcurementService {
         Self {
             pool: pool.clone(),
             supplier_repo: SupplierRepo::new(pool.clone()),
-            po_repo: PurchaseOrderRepo::new(pool),
+            po_repo: PurchaseOrderRepo::new(pool.clone()),
+            goods_receipt_repo: GoodsReceiptRepo::new(pool),
             bus,
         }
     }
@@ -179,6 +182,47 @@ impl ProcurementService {
             );
         }
         self.get_purchase_order(id).await
+    }
+
+    // Goods Receipts
+    pub async fn list_goods_receipts(&self) -> AppResult<Vec<crate::models::goods_receipt::GoodsReceiptResponse>> {
+        self.goods_receipt_repo.list_all().await
+    }
+
+    pub async fn list_goods_receipts_by_po(&self, po_id: &str) -> AppResult<Vec<crate::models::goods_receipt::GoodsReceiptResponse>> {
+        self.goods_receipt_repo.list_by_po(po_id).await
+    }
+
+    /// Handle inventory reorder alert by auto-creating a draft purchase order.
+    pub async fn handle_item_below_reorder(
+        &self,
+        item_id: &str,
+        item_name: &str,
+        suggested_quantity: i64,
+    ) -> AppResult<PurchaseOrderResponse> {
+        // Find the first active supplier to use as default
+        let suppliers = self.supplier_repo.list().await?;
+        let supplier = match suppliers.iter().find(|s| s.is_active) {
+            Some(s) => s,
+            None => return Err(AppError::Validation("No active suppliers available for auto-PO".into())),
+        };
+
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let input = CreatePurchaseOrder {
+            supplier_id: supplier.id.clone(),
+            order_date: today,
+            lines: vec![CreatePurchaseOrderLine {
+                item_id: item_id.to_string(),
+                quantity: suggested_quantity,
+                unit_price_cents: 1000, // default unit price; should be updated from item master
+            }],
+        };
+
+        tracing::info!(
+            "Auto-creating PO for item {} ({}) qty {} to supplier {}",
+            item_id, item_name, suggested_quantity, supplier.id
+        );
+        self.create_purchase_order(input).await
     }
 }
 

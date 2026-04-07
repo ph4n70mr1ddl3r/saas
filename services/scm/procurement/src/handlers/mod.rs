@@ -164,3 +164,30 @@ pub async fn receive_purchase_order(
     let order = state.service.receive_purchase_order(&id, input).await?;
     Ok(axum::Json(saas_common::response::ApiResponse::new(order)))
 }
+
+pub async fn list_goods_receipts(
+    _user: saas_auth_core::extractor::AuthUser,
+    axum::extract::State(state): axum::extract::State<crate::routes::AppState>,
+) -> Result<
+    axum::Json<
+        saas_common::response::ApiResponse<Vec<crate::models::goods_receipt::GoodsReceiptResponse>>,
+    >,
+    saas_common::error::AppError,
+> {
+    let receipts = state.service.list_goods_receipts().await?;
+    Ok(axum::Json(saas_common::response::ApiResponse::new(receipts)))
+}
+
+pub async fn list_goods_receipts_by_po(
+    _user: saas_auth_core::extractor::AuthUser,
+    axum::extract::State(state): axum::extract::State<crate::routes::AppState>,
+    axum::extract::Path(po_id): axum::extract::Path<String>,
+) -> Result<
+    axum::Json<
+        saas_common::response::ApiResponse<Vec<crate::models::goods_receipt::GoodsReceiptResponse>>,
+    >,
+    saas_common::error::AppError,
+> {
+    let receipts = state.service.list_goods_receipts_by_po(&po_id).await?;
+    Ok(axum::Json(saas_common::response::ApiResponse::new(receipts)))
+}

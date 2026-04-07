@@ -115,3 +115,21 @@ pub async fn create_deduction(
     let deduction = state.service.create_deduction(input).await?;
     Ok(Json(ApiResponse::new(deduction)))
 }
+
+pub async fn list_tax_brackets(
+    _user: AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<ApiResponse<Vec<TaxBracket>>>, AppError> {
+    let list = state.service.list_tax_brackets().await?;
+    Ok(Json(ApiResponse::new(list)))
+}
+
+pub async fn create_tax_bracket(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Json(input): Json<CreateTaxBracketRequest>,
+) -> Result<Json<ApiResponse<TaxBracket>>, AppError> {
+    rbac::require_admin(&user.roles, "hcm").map_err(|e| AppError::Forbidden(e))?;
+    let bracket = state.service.create_tax_bracket(input).await?;
+    Ok(Json(ApiResponse::new(bracket)))
+}

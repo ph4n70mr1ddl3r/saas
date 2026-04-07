@@ -24,8 +24,8 @@ async fn main() -> anyhow::Result<()> {
     let pool = create_pool(&database_url).await?;
     run_migrations(&pool, "./migrations").await?;
     let bus = NatsBus::connect(&nats_url, "saas-scm-manufacturing").await?;
-    events::register(&bus, pool.clone()).await?;
-    let service = service::ManufacturingService::new(pool, bus);
+    let service = service::ManufacturingService::new(pool, bus.clone());
+    events::register(&bus, service.clone()).await?;
     let cors_origin =
         env::var("CORS_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".to_string());
     let cors_origin =

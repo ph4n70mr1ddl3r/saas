@@ -42,4 +42,23 @@ impl FulfillmentRepo {
             .await?;
         Ok(())
     }
+
+    pub async fn list_by_order(&self, order_id: &str) -> AppResult<Vec<FulfillmentResponse>> {
+        let rows = sqlx::query_as::<_, FulfillmentResponse>(
+            "SELECT id, order_id, order_line_id, quantity, warehouse_id, shipped_date, tracking_number, status FROM fulfillments WHERE order_id = ? ORDER BY id",
+        )
+        .bind(order_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn list_all(&self) -> AppResult<Vec<FulfillmentResponse>> {
+        let rows = sqlx::query_as::<_, FulfillmentResponse>(
+            "SELECT id, order_id, order_line_id, quantity, warehouse_id, shipped_date, tracking_number, status FROM fulfillments ORDER BY id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
 }

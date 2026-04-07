@@ -168,3 +168,17 @@ pub async fn get_org_chart(
     let chart = state.service.get_org_chart().await?;
     Ok(axum::Json(saas_common::response::ApiResponse::new(chart)))
 }
+
+pub async fn list_employment_history(
+    _user: saas_auth_core::extractor::AuthUser,
+    axum::extract::State(state): axum::extract::State<crate::routes::AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<
+    axum::Json<
+        saas_common::response::ApiResponse<Vec<crate::models::employment_history::EmploymentHistory>>,
+    >,
+    saas_common::error::AppError,
+> {
+    let history = state.service.list_employment_history(&id).await?;
+    Ok(axum::Json(saas_common::response::ApiResponse::new(history)))
+}
