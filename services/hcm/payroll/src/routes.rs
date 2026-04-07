@@ -26,6 +26,10 @@ pub fn build_router(state: AppState) -> Router {
             get(handlers::list_pay_runs).post(handlers::create_pay_run),
         )
         .route(
+            "/api/v1/pay-runs/{id}",
+            get(handlers::get_pay_run),
+        )
+        .route(
             "/api/v1/pay-runs/{id}/process",
             axum::routing::post(handlers::process_pay_run),
         )
@@ -42,8 +46,16 @@ pub fn build_router(state: AppState) -> Router {
             axum::routing::post(handlers::create_deduction),
         )
         .route(
+            "/api/v1/deductions/{id}",
+            get(handlers::get_deduction),
+        )
+        .route(
             "/api/v1/tax-brackets",
             get(handlers::list_tax_brackets).post(handlers::create_tax_bracket),
+        )
+        .route(
+            "/api/v1/tax-brackets/{id}",
+            get(handlers::get_tax_bracket),
         )
         .route(
             "/health",

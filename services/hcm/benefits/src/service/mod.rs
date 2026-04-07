@@ -85,6 +85,10 @@ impl BenefitsService {
         self.repo.list_enrollments().await
     }
 
+    pub async fn get_enrollment(&self, id: &str) -> AppResult<Enrollment> {
+        self.repo.get_enrollment(id).await
+    }
+
     pub async fn create_enrollment(&self, input: CreateEnrollmentRequest) -> AppResult<Enrollment> {
         let plan = self.repo.get_plan(&input.plan_id).await?;
         if !plan.is_active {
@@ -625,5 +629,45 @@ mod tests {
         // Verify all cancelled
         let updated = repo.list_enrollments_by_employee("emp-term").await.unwrap();
         assert!(updated.iter().all(|e| e.status == "cancelled"));
+    }
+
+    #[tokio::test]
+    async fn test_get_enrollment() {
+        let repo = setup_repo().await;
+        let svc = BenefitsService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let plan = repo
+            .create_plan(&CreatePlanRequest {
+                name: "Test Plan".into(),
+                plan_type: "medical".into(),
+                description: None,
+                employer_contribution_cents: None,
+                employee_contribution_cents: None,
+                is_active: Some(true),
+            })
+            .await
+            .unwrap();
+
+        let enrollment = svc
+            .create_enrollment(CreateEnrollmentRequest {
+                employee_id: "emp-get".into(),
+                plan_id: plan.id.clone(),
+            })
+            .await
+            .unwrap();
+
+        let fetched = svc.get_enrollment(&enrollment.id).await.unwrap();
+        assert_eq!(fetched.id, enrollment.id);
+        assert_eq!(fetched.status, "active");
+        assert_eq!(fetched.employee_id, "emp-get");
+
+        // Not found
+        let result = svc.get_enrollment("nonexistent").await;
+        assert!(result.is_err());
     }
 }

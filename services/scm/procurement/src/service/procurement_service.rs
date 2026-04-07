@@ -41,6 +41,14 @@ impl ProcurementService {
         input
             .validate()
             .map_err(|e| saas_common::error::AppError::Validation(e.to_string()))?;
+        // Check for duplicate supplier name
+        let existing = self.supplier_repo.list().await?;
+        if existing.iter().any(|s| s.name.to_lowercase() == input.name.to_lowercase()) {
+            return Err(AppError::Validation(format!(
+                "Supplier with name '{}' already exists",
+                input.name
+            )));
+        }
         self.supplier_repo.create(&input).await
     }
 
@@ -645,5 +653,51 @@ mod tests {
         let repo = SupplierRepo::new(pool);
         let result = repo.get_by_id("nonexistent").await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_supplier_name_uniqueness() {
+        let pool = setup().await;
+        let svc = ProcurementService {
+            pool: pool.clone(),
+            supplier_repo: SupplierRepo::new(pool.clone()),
+            po_repo: PurchaseOrderRepo::new(pool.clone()),
+            goods_receipt_repo: GoodsReceiptRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        svc.create_supplier(CreateSupplier {
+            name: "Acme Corp".into(),
+            email: None,
+            phone: None,
+            address: None,
+        })
+        .await
+        .unwrap();
+
+        // Duplicate name (case-insensitive) should fail
+        let result = svc.create_supplier(CreateSupplier {
+            name: "ACME CORP".into(),
+            email: None,
+            phone: None,
+            address: None,
+        })
+        .await;
+        assert!(result.is_err());
+
+        // Different name should succeed
+        svc.create_supplier(CreateSupplier {
+            name: "Beta Corp".into(),
+            email: None,
+            phone: None,
+            address: None,
+        })
+        .await
+        .unwrap();
+
+        let suppliers = svc.supplier_repo.list().await.unwrap();
+        assert_eq!(suppliers.len(), 2);
     }
 }

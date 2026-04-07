@@ -38,4 +38,22 @@ impl ReturnRepo {
         .execute(&self.pool).await?;
         self.get_by_id(&id).await
     }
+
+    pub async fn update_status(&self, id: &str, status: &str) -> AppResult<ReturnResponse> {
+        sqlx::query("UPDATE returns SET status = ? WHERE id = ?")
+            .bind(status)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        self.get_by_id(id).await
+    }
+
+    pub async fn update_refund_amount(&self, id: &str, refund_amount_cents: i64) -> AppResult<ReturnResponse> {
+        sqlx::query("UPDATE returns SET refund_amount_cents = ? WHERE id = ?")
+            .bind(refund_amount_cents)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        self.get_by_id(id).await
+    }
 }

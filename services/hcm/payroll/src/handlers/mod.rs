@@ -65,6 +65,15 @@ pub async fn list_pay_runs(
     Ok(Json(ApiResponse::new(list)))
 }
 
+pub async fn get_pay_run(
+    _user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<PayRun>>, AppError> {
+    let run = state.service.get_pay_run(&id).await?;
+    Ok(Json(ApiResponse::new(run)))
+}
+
 pub async fn create_pay_run(
     user: AuthUser,
     State(state): State<AppState>,
@@ -116,6 +125,15 @@ pub async fn create_deduction(
     Ok(Json(ApiResponse::new(deduction)))
 }
 
+pub async fn get_deduction(
+    _user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<Deduction>>, AppError> {
+    let deduction = state.service.get_deduction(&id).await?;
+    Ok(Json(ApiResponse::new(deduction)))
+}
+
 pub async fn list_tax_brackets(
     _user: AuthUser,
     State(state): State<AppState>,
@@ -131,5 +149,14 @@ pub async fn create_tax_bracket(
 ) -> Result<Json<ApiResponse<TaxBracket>>, AppError> {
     rbac::require_admin(&user.roles, "hcm").map_err(|e| AppError::Forbidden(e))?;
     let bracket = state.service.create_tax_bracket(input).await?;
+    Ok(Json(ApiResponse::new(bracket)))
+}
+
+pub async fn get_tax_bracket(
+    _user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<TaxBracket>>, AppError> {
+    let bracket = state.service.get_tax_bracket(&id).await?;
     Ok(Json(ApiResponse::new(bracket)))
 }

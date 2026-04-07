@@ -225,6 +225,16 @@ impl PayrollRepo {
         .ok_or_else(|| AppError::Internal("Failed to read created deduction".into()))
     }
 
+    pub async fn get_deduction(&self, id: &str) -> AppResult<Deduction> {
+        sqlx::query_as::<_, Deduction>(
+            "SELECT id, employee_id, code, amount_cents, recurring, start_date, end_date FROM deductions WHERE id = ?"
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Deduction '{}' not found", id)))
+    }
+
     // --- Tax Brackets ---
 
     pub async fn list_tax_brackets(&self) -> AppResult<Vec<TaxBracket>> {
@@ -258,5 +268,15 @@ impl PayrollRepo {
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| AppError::Internal("Failed to read created tax bracket".into()))
+    }
+
+    pub async fn get_tax_bracket(&self, id: &str) -> AppResult<TaxBracket> {
+        sqlx::query_as::<_, TaxBracket>(
+            "SELECT id, name, min_income_cents, max_income_cents, rate_percent, created_at FROM tax_brackets WHERE id = ?"
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Tax bracket '{}' not found", id)))
     }
 }

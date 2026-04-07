@@ -72,6 +72,10 @@ impl CashManagementService {
         self.repo.list_bank_transactions().await
     }
 
+    pub async fn get_bank_transaction(&self, id: &str) -> AppResult<BankTransaction> {
+        self.repo.get_bank_transaction(id).await
+    }
+
     pub async fn create_bank_transaction(
         &self,
         input: &CreateBankTransactionRequest,
@@ -99,6 +103,10 @@ impl CashManagementService {
 
     pub async fn list_reconciliations(&self) -> AppResult<Vec<Reconciliation>> {
         self.repo.list_reconciliations().await
+    }
+
+    pub async fn get_reconciliation(&self, id: &str) -> AppResult<Reconciliation> {
+        self.repo.get_reconciliation(id).await
     }
 
     pub async fn create_reconciliation(
@@ -1038,6 +1046,90 @@ mod tests {
 
         // Any transaction attempt would fail because no bank account exists
         let result = repo.get_bank_account("nonexistent").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_bank_transaction() {
+        let repo = setup_repo().await;
+        let svc = CashManagementService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let acct = repo
+            .create_bank_account(&CreateBankAccountRequest {
+                name: "TXN Get".into(),
+                bank_name: "Bank TXN".into(),
+                account_number: "txn1111".into(),
+                routing_number: None,
+                balance_cents: Some(100_000),
+                currency: Some("USD".into()),
+            })
+            .await
+            .unwrap();
+
+        let tx = svc
+            .create_bank_transaction(&CreateBankTransactionRequest {
+                bank_account_id: acct.id.clone(),
+                amount_cents: 15_000,
+                transaction_date: "2025-07-01".into(),
+                description: Some("Test deposit".into()),
+                r#type: "deposit".into(),
+                reference: None,
+            })
+            .await
+            .unwrap();
+
+        let fetched = svc.get_bank_transaction(&tx.id).await.unwrap();
+        assert_eq!(fetched.id, tx.id);
+        assert_eq!(fetched.amount_cents, 15_000);
+
+        // Not found
+        let result = svc.get_bank_transaction("nonexistent").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_reconciliation() {
+        let repo = setup_repo().await;
+        let svc = CashManagementService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let acct = repo
+            .create_bank_account(&CreateBankAccountRequest {
+                name: "Recon Get".into(),
+                bank_name: "Bank RGN".into(),
+                account_number: "rgn1111".into(),
+                routing_number: None,
+                balance_cents: Some(50_000),
+                currency: Some("USD".into()),
+            })
+            .await
+            .unwrap();
+
+        let recon = svc
+            .create_reconciliation(&CreateReconciliationRequest {
+                bank_account_id: acct.id.clone(),
+                period_start: "2025-07-01".into(),
+                period_end: "2025-07-31".into(),
+                statement_balance_cents: 50_000,
+            })
+            .await
+            .unwrap();
+
+        let fetched = svc.get_reconciliation(&recon.id).await.unwrap();
+        assert_eq!(fetched.id, recon.id);
+        assert_eq!(fetched.status, "completed");
+
+        // Not found
+        let result = svc.get_reconciliation("nonexistent").await;
         assert!(result.is_err());
     }
 }

@@ -26,6 +26,10 @@ pub fn build_router(state: AppState) -> Router {
             get(handlers::list_enrollments).post(handlers::create_enrollment),
         )
         .route(
+            "/api/v1/benefits/enrollments/{id}",
+            get(handlers::get_enrollment),
+        )
+        .route(
             "/api/v1/benefits/enrollments/employee/{employee_id}",
             get(handlers::list_enrollments_by_employee),
         )

@@ -57,6 +57,16 @@ pub async fn list_bank_transactions(
     Ok(Json(ApiResponse::new(transactions)))
 }
 
+pub async fn get_bank_transaction(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<BankTransaction>>, AppError> {
+    let _ = &user;
+    let transaction = state.service.get_bank_transaction(&id).await?;
+    Ok(Json(ApiResponse::new(transaction)))
+}
+
 pub async fn create_bank_transaction(
     user: AuthUser,
     State(state): State<AppState>,
@@ -74,6 +84,16 @@ pub async fn list_reconciliations(
     let _ = &user;
     let reconciliations = state.service.list_reconciliations().await?;
     Ok(Json(ApiResponse::new(reconciliations)))
+}
+
+pub async fn get_reconciliation(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<Reconciliation>>, AppError> {
+    let _ = &user;
+    let reconciliation = state.service.get_reconciliation(&id).await?;
+    Ok(Json(ApiResponse::new(reconciliation)))
 }
 
 pub async fn create_reconciliation(

@@ -36,8 +36,16 @@ pub fn build_router(state: AppState) -> Router {
             axum::routing::post(handlers::transfer),
         )
         .route(
+            "/api/v1/bank-transactions/{id}",
+            get(handlers::get_bank_transaction),
+        )
+        .route(
             "/api/v1/reconciliations",
             get(handlers::list_reconciliations).post(handlers::create_reconciliation),
+        )
+        .route(
+            "/api/v1/reconciliations/{id}",
+            get(handlers::get_reconciliation),
         )
         .route(
             "/api/v1/cash-flow-statement",

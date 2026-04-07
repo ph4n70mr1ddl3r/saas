@@ -96,6 +96,16 @@ impl CashManagementRepo {
         Ok(rows)
     }
 
+    pub async fn get_bank_transaction(&self, id: &str) -> AppResult<BankTransaction> {
+        sqlx::query_as::<_, BankTransaction>(
+            "SELECT id, bank_account_id, amount_cents, transaction_date, description, type, reference, created_at FROM bank_transactions WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Bank transaction '{}' not found", id)))
+    }
+
     pub async fn create_bank_transaction(
         &self,
         input: &CreateBankTransactionRequest,
@@ -191,6 +201,16 @@ impl CashManagementRepo {
         .fetch_all(&self.pool)
         .await?;
         Ok(rows)
+    }
+
+    pub async fn get_reconciliation(&self, id: &str) -> AppResult<Reconciliation> {
+        sqlx::query_as::<_, Reconciliation>(
+            "SELECT id, bank_account_id, period_start, period_end, statement_balance_cents, book_balance_cents, difference_cents, status, created_at FROM reconciliations WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Reconciliation '{}' not found", id)))
     }
 
     pub async fn create_reconciliation(

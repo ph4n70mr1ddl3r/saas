@@ -224,6 +224,42 @@ impl OrderManagementService {
         }
         Ok(ret)
     }
+
+    pub async fn approve_return(&self, id: &str) -> AppResult<ReturnResponse> {
+        let ret = self.return_repo.get_by_id(id).await?;
+        if ret.status != "requested" {
+            return Err(saas_common::error::AppError::Validation(
+                "Only requested returns can be approved".into(),
+            ));
+        }
+        self.return_repo.update_status(id, "approved").await
+    }
+
+    pub async fn reject_return(&self, id: &str) -> AppResult<ReturnResponse> {
+        let ret = self.return_repo.get_by_id(id).await?;
+        if ret.status != "requested" {
+            return Err(saas_common::error::AppError::Validation(
+                "Only requested returns can be rejected".into(),
+            ));
+        }
+        self.return_repo.update_status(id, "rejected").await
+    }
+
+    pub async fn process_return(&self, id: &str, refund_amount_cents: i64) -> AppResult<ReturnResponse> {
+        let ret = self.return_repo.get_by_id(id).await?;
+        if ret.status != "approved" {
+            return Err(saas_common::error::AppError::Validation(
+                "Only approved returns can be processed".into(),
+            ));
+        }
+        if refund_amount_cents < 0 {
+            return Err(saas_common::error::AppError::Validation(
+                "Refund amount must be non-negative".into(),
+            ));
+        }
+        self.return_repo.update_refund_amount(id, refund_amount_cents).await?;
+        self.return_repo.update_status(id, "processed").await
+    }
 }
 
 #[cfg(test)]
@@ -578,5 +614,200 @@ mod tests {
         assert_eq!(ret.order_id, order.id);
         assert_eq!(ret.quantity, 3);
         assert_eq!(ret.status, "requested");
+    }
+
+    #[tokio::test]
+    async fn test_return_lifecycle_approve_process() {
+        let pool = setup().await;
+        let svc = OrderManagementService {
+            order_repo: SalesOrderRepo::new(pool.clone()),
+            fulfillment_repo: FulfillmentRepo::new(pool.clone()),
+            return_repo: ReturnRepo::new(pool.clone()),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let order = svc.order_repo.create(&CreateSalesOrder {
+            customer_id: "CUST-LC".into(),
+            order_date: "2025-11-01".into(),
+            shipping_address: None,
+            notes: None,
+            lines: vec![CreateSalesOrderLine {
+                item_id: "ITEM-LC".into(),
+                quantity: 10,
+                unit_price_cents: 5000,
+            }],
+        }).await.unwrap();
+        let lines = svc.order_repo.get_lines(&order.id).await.unwrap();
+
+        let ret = svc.create_return(CreateReturn {
+            order_id: order.id.clone(),
+            order_line_id: lines[0].id.clone(),
+            quantity: 4,
+            reason: Some("Damaged".into()),
+        }).await.unwrap();
+        assert_eq!(ret.status, "requested");
+
+        // Approve
+        let approved = svc.approve_return(&ret.id).await.unwrap();
+        assert_eq!(approved.status, "approved");
+
+        // Process with refund
+        let processed = svc.process_return(&ret.id, 20000).await.unwrap();
+        assert_eq!(processed.status, "processed");
+        assert_eq!(processed.refund_amount_cents, Some(20000));
+    }
+
+    #[tokio::test]
+    async fn test_return_reject_from_requested() {
+        let pool = setup().await;
+        let svc = OrderManagementService {
+            order_repo: SalesOrderRepo::new(pool.clone()),
+            fulfillment_repo: FulfillmentRepo::new(pool.clone()),
+            return_repo: ReturnRepo::new(pool.clone()),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let order = svc.order_repo.create(&CreateSalesOrder {
+            customer_id: "CUST-REJ".into(),
+            order_date: "2025-12-01".into(),
+            shipping_address: None,
+            notes: None,
+            lines: vec![CreateSalesOrderLine {
+                item_id: "ITEM-REJ".into(),
+                quantity: 2,
+                unit_price_cents: 1000,
+            }],
+        }).await.unwrap();
+        let lines = svc.order_repo.get_lines(&order.id).await.unwrap();
+
+        let ret = svc.create_return(CreateReturn {
+            order_id: order.id,
+            order_line_id: lines[0].id.clone(),
+            quantity: 1,
+            reason: None,
+        }).await.unwrap();
+
+        let rejected = svc.reject_return(&ret.id).await.unwrap();
+        assert_eq!(rejected.status, "rejected");
+    }
+
+    #[tokio::test]
+    async fn test_return_approve_blocks_non_requested() {
+        let pool = setup().await;
+        let svc = OrderManagementService {
+            order_repo: SalesOrderRepo::new(pool.clone()),
+            fulfillment_repo: FulfillmentRepo::new(pool.clone()),
+            return_repo: ReturnRepo::new(pool.clone()),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let order = svc.order_repo.create(&CreateSalesOrder {
+            customer_id: "CUST-BLK".into(),
+            order_date: "2025-12-15".into(),
+            shipping_address: None,
+            notes: None,
+            lines: vec![CreateSalesOrderLine {
+                item_id: "ITEM-BLK".into(),
+                quantity: 3,
+                unit_price_cents: 500,
+            }],
+        }).await.unwrap();
+        let lines = svc.order_repo.get_lines(&order.id).await.unwrap();
+
+        let ret = svc.create_return(CreateReturn {
+            order_id: order.id,
+            order_line_id: lines[0].id.clone(),
+            quantity: 1,
+            reason: None,
+        }).await.unwrap();
+
+        // Approve it first
+        svc.approve_return(&ret.id).await.unwrap();
+
+        // Try to approve again - should fail
+        let result = svc.approve_return(&ret.id).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_return_process_blocks_non_approved() {
+        let pool = setup().await;
+        let svc = OrderManagementService {
+            order_repo: SalesOrderRepo::new(pool.clone()),
+            fulfillment_repo: FulfillmentRepo::new(pool.clone()),
+            return_repo: ReturnRepo::new(pool.clone()),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let order = svc.order_repo.create(&CreateSalesOrder {
+            customer_id: "CUST-PRO".into(),
+            order_date: "2026-01-01".into(),
+            shipping_address: None,
+            notes: None,
+            lines: vec![CreateSalesOrderLine {
+                item_id: "ITEM-PRO".into(),
+                quantity: 1,
+                unit_price_cents: 100,
+            }],
+        }).await.unwrap();
+        let lines = svc.order_repo.get_lines(&order.id).await.unwrap();
+
+        let ret = svc.create_return(CreateReturn {
+            order_id: order.id,
+            order_line_id: lines[0].id.clone(),
+            quantity: 1,
+            reason: Some("Test".into()),
+        }).await.unwrap();
+
+        // Process without approval should fail
+        let result = svc.process_return(&ret.id, 100).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_return_process_negative_refund_blocked() {
+        let pool = setup().await;
+        let svc = OrderManagementService {
+            order_repo: SalesOrderRepo::new(pool.clone()),
+            fulfillment_repo: FulfillmentRepo::new(pool.clone()),
+            return_repo: ReturnRepo::new(pool.clone()),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let order = svc.order_repo.create(&CreateSalesOrder {
+            customer_id: "CUST-NEG".into(),
+            order_date: "2026-01-15".into(),
+            shipping_address: None,
+            notes: None,
+            lines: vec![CreateSalesOrderLine {
+                item_id: "ITEM-NEG".into(),
+                quantity: 1,
+                unit_price_cents: 100,
+            }],
+        }).await.unwrap();
+        let lines = svc.order_repo.get_lines(&order.id).await.unwrap();
+
+        let ret = svc.create_return(CreateReturn {
+            order_id: order.id,
+            order_line_id: lines[0].id.clone(),
+            quantity: 1,
+            reason: None,
+        }).await.unwrap();
+
+        svc.approve_return(&ret.id).await.unwrap();
+
+        // Negative refund should fail
+        let result = svc.process_return(&ret.id, -500).await;
+        assert!(result.is_err());
     }
 }

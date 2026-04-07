@@ -165,3 +165,48 @@ pub async fn list_fulfillments_by_order(
     let fulfillments = state.service.list_fulfillments_by_order(&order_id).await?;
     Ok(axum::Json(saas_common::response::ApiResponse::new(fulfillments)))
 }
+
+pub async fn approve_return(
+    user: saas_auth_core::extractor::AuthUser,
+    axum::extract::State(state): axum::extract::State<crate::routes::AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<
+    axum::Json<saas_common::response::ApiResponse<crate::models::return_model::ReturnResponse>>,
+    saas_common::error::AppError,
+> {
+    rbac::require_admin(&user.roles, "scm").map_err(|e| AppError::Forbidden(e))?;
+    let ret = state.service.approve_return(&id).await?;
+    Ok(axum::Json(saas_common::response::ApiResponse::new(ret)))
+}
+
+pub async fn reject_return(
+    user: saas_auth_core::extractor::AuthUser,
+    axum::extract::State(state): axum::extract::State<crate::routes::AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<
+    axum::Json<saas_common::response::ApiResponse<crate::models::return_model::ReturnResponse>>,
+    saas_common::error::AppError,
+> {
+    rbac::require_admin(&user.roles, "scm").map_err(|e| AppError::Forbidden(e))?;
+    let ret = state.service.reject_return(&id).await?;
+    Ok(axum::Json(saas_common::response::ApiResponse::new(ret)))
+}
+
+#[derive(serde::Deserialize)]
+pub struct ProcessReturnRequest {
+    pub refund_amount_cents: i64,
+}
+
+pub async fn process_return(
+    user: saas_auth_core::extractor::AuthUser,
+    axum::extract::State(state): axum::extract::State<crate::routes::AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::Json(input): axum::Json<ProcessReturnRequest>,
+) -> Result<
+    axum::Json<saas_common::response::ApiResponse<crate::models::return_model::ReturnResponse>>,
+    saas_common::error::AppError,
+> {
+    rbac::require_admin(&user.roles, "scm").map_err(|e| AppError::Forbidden(e))?;
+    let ret = state.service.process_return(&id, input.refund_amount_cents).await?;
+    Ok(axum::Json(saas_common::response::ApiResponse::new(ret)))
+}

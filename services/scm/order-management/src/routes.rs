@@ -35,6 +35,18 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/v1/returns/{id}", get(handlers::get_return))
         .route(
+            "/api/v1/returns/{id}/approve",
+            post(handlers::approve_return),
+        )
+        .route(
+            "/api/v1/returns/{id}/reject",
+            post(handlers::reject_return),
+        )
+        .route(
+            "/api/v1/returns/{id}/process",
+            post(handlers::process_return),
+        )
+        .route(
             "/api/v1/fulfillments",
             get(handlers::list_fulfillments),
         )

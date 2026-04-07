@@ -63,6 +63,15 @@ pub async fn create_enrollment(
     Ok(Json(ApiResponse::new(enrollment)))
 }
 
+pub async fn get_enrollment(
+    _user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<Enrollment>>, AppError> {
+    let enrollment = state.service.get_enrollment(&id).await?;
+    Ok(Json(ApiResponse::new(enrollment)))
+}
+
 pub async fn list_enrollments_by_employee(
     _user: AuthUser,
     State(state): State<AppState>,

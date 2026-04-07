@@ -62,6 +62,10 @@ impl PayrollService {
         self.repo.list_pay_runs().await
     }
 
+    pub async fn get_pay_run(&self, id: &str) -> AppResult<PayRun> {
+        self.repo.get_pay_run(id).await
+    }
+
     pub async fn create_pay_run(&self, input: CreatePayRunRequest) -> AppResult<PayRun> {
         self.repo.create_pay_run(&input).await
     }
@@ -173,6 +177,10 @@ impl PayrollService {
         self.repo.create_deduction(&input).await
     }
 
+    pub async fn get_deduction(&self, id: &str) -> AppResult<Deduction> {
+        self.repo.get_deduction(id).await
+    }
+
     // --- Event handlers ---
 
     pub async fn handle_employee_created(&self, employee_id: &str) -> AppResult<Compensation> {
@@ -230,6 +238,10 @@ impl PayrollService {
 
     pub async fn list_tax_brackets(&self) -> AppResult<Vec<TaxBracket>> {
         self.repo.list_tax_brackets().await
+    }
+
+    pub async fn get_tax_bracket(&self, id: &str) -> AppResult<TaxBracket> {
+        self.repo.get_tax_bracket(id).await
     }
 
     pub async fn create_tax_bracket(&self, input: CreateTaxBracketRequest) -> AppResult<TaxBracket> {
@@ -902,6 +914,86 @@ mod tests {
                 rate_percent: 10.0,
             })
             .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_pay_run() {
+        let repo = setup_repo().await;
+        let svc = PayrollService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let pay_run = svc.create_pay_run(CreatePayRunRequest {
+            period_start: "2025-07-01".into(),
+            period_end: "2025-07-31".into(),
+            pay_date: "2025-08-01".into(),
+        }).await.unwrap();
+
+        let fetched = svc.get_pay_run(&pay_run.id).await.unwrap();
+        assert_eq!(fetched.id, pay_run.id);
+        assert_eq!(fetched.status, "draft");
+
+        // Not found
+        let result = svc.get_pay_run("nonexistent").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_deduction() {
+        let repo = setup_repo().await;
+        let svc = PayrollService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let deduction = svc.create_deduction(CreateDeductionRequest {
+            employee_id: "emp-get".into(),
+            code: "TEST".into(),
+            amount_cents: 5_000_00,
+            recurring: Some(true),
+            start_date: "2025-01-01".into(),
+            end_date: None,
+        }).await.unwrap();
+
+        let fetched = svc.get_deduction(&deduction.id).await.unwrap();
+        assert_eq!(fetched.id, deduction.id);
+        assert_eq!(fetched.code, "TEST");
+
+        // Not found
+        let result = svc.get_deduction("nonexistent").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_tax_bracket() {
+        let repo = setup_repo().await;
+        let svc = PayrollService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let bracket = svc.create_tax_bracket(CreateTaxBracketRequest {
+            name: "Get Test".into(),
+            min_income_cents: 0,
+            max_income_cents: None,
+            rate_percent: 15.0,
+        }).await.unwrap();
+
+        let fetched = svc.get_tax_bracket(&bracket.id).await.unwrap();
+        assert_eq!(fetched.id, bracket.id);
+        assert_eq!(fetched.name, "Get Test");
+        assert_eq!(fetched.rate_percent, 15.0);
+
+        // Not found
+        let result = svc.get_tax_bracket("nonexistent").await;
         assert!(result.is_err());
     }
 }
