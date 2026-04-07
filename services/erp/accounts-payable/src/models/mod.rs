@@ -36,6 +36,7 @@ pub struct ApInvoice {
     pub invoice_date: String,
     pub due_date: String,
     pub total_cents: i64,
+    pub tax_amount_cents: i64,
     pub status: String,
     pub created_at: String,
 }
@@ -47,6 +48,7 @@ pub struct CreateApInvoiceRequest {
     pub invoice_date: String,
     pub due_date: String,
     pub lines: Vec<CreateApInvoiceLineRequest>,
+    pub tax_code: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

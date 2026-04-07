@@ -19,7 +19,7 @@ pub struct CreateAccountRequest {
     pub parent_id: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
 pub struct Period {
     pub id: String,
     pub name: String,

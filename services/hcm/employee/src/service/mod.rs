@@ -5,8 +5,10 @@ pub use employee_service::EmployeeService;
 mod tests {
     use crate::models::department::*;
     use crate::models::employee::*;
+    use crate::models::employment_history::*;
     use crate::repository::department_repo::DepartmentRepo;
     use crate::repository::employee_repo::EmployeeRepo;
+    use crate::repository::employment_history_repo::EmploymentHistoryRepo;
     use saas_common::pagination::PaginationParams;
     use saas_db::test_helpers::create_test_pool;
     use sqlx::SqlitePool;
@@ -16,10 +18,12 @@ mod tests {
         let sql_files = [
             include_str!("../../migrations/001_create_departments.sql"),
             include_str!("../../migrations/002_create_employees.sql"),
+            include_str!("../../migrations/003_create_employment_history.sql"),
         ];
         let migration_names = [
             "001_create_departments.sql",
             "002_create_employees.sql",
+            "003_create_employment_history.sql",
         ];
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS _migrations (filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)",
@@ -780,5 +784,112 @@ mod tests {
 
         let terminated = emp_repo.get_by_id(&emp.id).await.unwrap();
         assert_eq!(terminated.status, "terminated");
+    }
+
+    #[tokio::test]
+    async fn test_employment_history_tracks_job_title_change() {
+        let pool = setup().await;
+        let dept_repo = DepartmentRepo::new(pool.clone());
+        let emp_repo = EmployeeRepo::new(pool.clone());
+        let hist_repo = EmploymentHistoryRepo::new(pool);
+
+        let dept = dept_repo
+            .create(&CreateDepartment {
+                name: "Eng".into(),
+                parent_id: None,
+                manager_id: None,
+                cost_center: None,
+            })
+            .await
+            .unwrap();
+
+        let emp = emp_repo
+            .create(&CreateEmployee {
+                first_name: "Hist".into(),
+                last_name: "Test".into(),
+                email: "hist@example.com".into(),
+                phone: None,
+                hire_date: "2025-01-01".into(),
+                department_id: dept.id.clone(),
+                reports_to: None,
+                job_title: "Engineer".into(),
+                employee_number: "EMP-H1".into(),
+            })
+            .await
+            .unwrap();
+
+        // Record history for job title change
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        hist_repo
+            .create(&CreateEmploymentHistoryRequest {
+                employee_id: emp.id.clone(),
+                field_name: "job_title".to_string(),
+                old_value: Some("Engineer".to_string()),
+                new_value: Some("Senior Engineer".to_string()),
+                effective_date: today,
+            })
+            .await
+            .unwrap();
+
+        let history = hist_repo.list_by_employee(&emp.id).await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].field_name, "job_title");
+        assert_eq!(history[0].old_value, Some("Engineer".to_string()));
+        assert_eq!(history[0].new_value, Some("Senior Engineer".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_employment_history_tracks_department_transfer() {
+        let pool = setup().await;
+        let hist_repo = EmploymentHistoryRepo::new(pool);
+
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+
+        // Record a department transfer
+        hist_repo
+            .create(&CreateEmploymentHistoryRequest {
+                employee_id: "emp-xfer".to_string(),
+                field_name: "department_id".to_string(),
+                old_value: Some("dept-eng".to_string()),
+                new_value: Some("dept-product".to_string()),
+                effective_date: today,
+            })
+            .await
+            .unwrap();
+
+        let history = hist_repo.list_by_employee("emp-xfer").await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].field_name, "department_id");
+    }
+
+    #[tokio::test]
+    async fn test_employment_history_multiple_entries() {
+        let pool = setup().await;
+        let hist_repo = EmploymentHistoryRepo::new(pool);
+
+        hist_repo
+            .create(&CreateEmploymentHistoryRequest {
+                employee_id: "emp-multi".to_string(),
+                field_name: "job_title".to_string(),
+                old_value: Some("Junior".to_string()),
+                new_value: Some("Mid".to_string()),
+                effective_date: "2025-01-01".to_string(),
+            })
+            .await
+            .unwrap();
+
+        hist_repo
+            .create(&CreateEmploymentHistoryRequest {
+                employee_id: "emp-multi".to_string(),
+                field_name: "job_title".to_string(),
+                old_value: Some("Mid".to_string()),
+                new_value: Some("Senior".to_string()),
+                effective_date: "2025-06-01".to_string(),
+            })
+            .await
+            .unwrap();
+
+        let history = hist_repo.list_by_employee("emp-multi").await.unwrap();
+        assert_eq!(history.len(), 2);
     }
 }

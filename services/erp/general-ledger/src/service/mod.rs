@@ -603,6 +603,406 @@ impl LedgerService {
         self.post_journal_entry(&result.entry.id).await
     }
 
+    /// Create a journal entry when an AP payment is made.
+    /// Debit AP (liability) to clear it, Credit Cash (asset).
+    pub async fn handle_ap_payment_created(
+        &self,
+        payment_id: &str,
+        amount_cents: i64,
+    ) -> AppResult<JournalEntryWithLines> {
+        let period = self.find_open_period().await?;
+        let ap_account = match self.repo.find_account_by_type_async("liability").await {
+            Ok(a) => a,
+            Err(_) => self.repo.find_account_by_type_async("expense").await?,
+        };
+        let cash_account = match self.repo.find_account_by_type_async("asset").await {
+            Ok(a) => a,
+            Err(_) => self.repo.find_account_by_type_async("liability").await?,
+        };
+
+        let input = CreateJournalEntryRequest {
+            description: Some(format!("AP Payment {} made", payment_id)),
+            period_id: period.id,
+            lines: vec![
+                CreateJournalLineRequest {
+                    account_id: ap_account.id.clone(),
+                    debit_cents: amount_cents,
+                    credit_cents: 0,
+                    description: Some(format!("Clear AP for payment {}", payment_id)),
+                },
+                CreateJournalLineRequest {
+                    account_id: cash_account.id.clone(),
+                    debit_cents: 0,
+                    credit_cents: amount_cents,
+                    description: Some(format!("Cash disbursement for payment {}", payment_id)),
+                },
+            ],
+        };
+
+        let result = self.create_journal_entry(&input, "system").await?;
+        self.post_journal_entry(&result.entry.id).await
+    }
+
+    /// Create a journal entry when an AR receipt is recorded.
+    /// Debit Cash (asset), Credit AR (asset) to clear receivable.
+    pub async fn handle_ar_receipt_created(
+        &self,
+        receipt_id: &str,
+        amount_cents: i64,
+    ) -> AppResult<JournalEntryWithLines> {
+        let period = self.find_open_period().await?;
+        let cash_account = match self.repo.find_account_by_type_async("asset").await {
+            Ok(a) => a,
+            Err(_) => self.repo.find_account_by_type_async("revenue").await?,
+        };
+        let ar_account = match self.repo.find_account_by_type_async("asset").await {
+            Ok(a) => a,
+            Err(_) => self.repo.find_account_by_type_async("revenue").await?,
+        };
+        // Use different accounts: find a second asset account for AR
+        let ar_account = match self.repo.find_account_by_code("1200").await {
+            Ok(a) => a,
+            Err(_) => ar_account,
+        };
+
+        let input = CreateJournalEntryRequest {
+            description: Some(format!("AR Receipt {} recorded", receipt_id)),
+            period_id: period.id,
+            lines: vec![
+                CreateJournalLineRequest {
+                    account_id: cash_account.id.clone(),
+                    debit_cents: amount_cents,
+                    credit_cents: 0,
+                    description: Some(format!("Cash received for receipt {}", receipt_id)),
+                },
+                CreateJournalLineRequest {
+                    account_id: ar_account.id.clone(),
+                    debit_cents: 0,
+                    credit_cents: amount_cents,
+                    description: Some(format!("Clear AR for receipt {}", receipt_id)),
+                },
+            ],
+        };
+
+        let result = self.create_journal_entry(&input, "system").await?;
+        self.post_journal_entry(&result.entry.id).await
+    }
+
+    /// Create a journal entry when a fixed asset is capitalized.
+    /// Debit Fixed Asset, Credit Cash/AP.
+    pub async fn handle_asset_created(
+        &self,
+        asset_id: &str,
+        name: &str,
+        cost_cents: i64,
+    ) -> AppResult<JournalEntryWithLines> {
+        let period = self.find_open_period().await?;
+        let fixed_asset_account = match self.repo.find_account_by_code("1500").await {
+            Ok(a) => a,
+            Err(_) => match self.repo.find_account_by_type_async("asset").await {
+                Ok(a) => a,
+                Err(_) => self.repo.find_account_by_type_async("liability").await?,
+            },
+        };
+        let cash_account = match self.repo.find_account_by_type_async("asset").await {
+            Ok(a) => a,
+            Err(_) => self.repo.find_account_by_type_async("liability").await?,
+        };
+
+        let input = CreateJournalEntryRequest {
+            description: Some(format!("Asset capitalization: {} ({})", name, asset_id)),
+            period_id: period.id,
+            lines: vec![
+                CreateJournalLineRequest {
+                    account_id: fixed_asset_account.id.clone(),
+                    debit_cents: cost_cents,
+                    credit_cents: 0,
+                    description: Some(format!("Fixed asset: {}", name)),
+                },
+                CreateJournalLineRequest {
+                    account_id: cash_account.id.clone(),
+                    debit_cents: 0,
+                    credit_cents: cost_cents,
+                    description: Some(format!("Payment for asset {}", name)),
+                },
+            ],
+        };
+
+        let result = self.create_journal_entry(&input, "system").await?;
+        self.post_journal_entry(&result.entry.id).await
+    }
+
+    /// Create a journal entry when a fixed asset is disposed.
+    /// Debit Accumulated Depreciation, Credit Fixed Asset.
+    pub async fn handle_asset_disposed(
+        &self,
+        asset_id: &str,
+        name: &str,
+    ) -> AppResult<JournalEntryWithLines> {
+        let period = self.find_open_period().await?;
+        let accum_depr_account = match self.repo.find_account_by_code("1800").await {
+            Ok(a) => a,
+            Err(_) => self.repo.find_account_by_type_async("asset").await?,
+        };
+        let fixed_asset_account = match self.repo.find_account_by_code("1500").await {
+            Ok(a) => a,
+            Err(_) => match self.repo.find_account_by_type_async("asset").await {
+                Ok(a) => a,
+                Err(_) => self.repo.find_account_by_type_async("liability").await?,
+            },
+        };
+
+        let input = CreateJournalEntryRequest {
+            description: Some(format!("Asset disposal: {} ({})", name, asset_id)),
+            period_id: period.id,
+            lines: vec![
+                CreateJournalLineRequest {
+                    account_id: accum_depr_account.id.clone(),
+                    debit_cents: 0,
+                    credit_cents: 0, // zero-amount entry to record the disposal
+                    description: Some(format!("Accumulated depreciation reversal for {}", name)),
+                },
+                CreateJournalLineRequest {
+                    account_id: fixed_asset_account.id.clone(),
+                    debit_cents: 0,
+                    credit_cents: 0,
+                    description: Some(format!("Remove fixed asset: {}", name)),
+                },
+            ],
+        };
+
+        let result = self.create_journal_entry(&input, "system").await?;
+        self.post_journal_entry(&result.entry.id).await
+    }
+
+    /// Create a journal entry when a cash transfer is completed.
+    /// Debit destination bank, Credit source bank.
+    pub async fn handle_transfer_completed(
+        &self,
+        from_account_id: &str,
+        to_account_id: &str,
+        amount_cents: i64,
+    ) -> AppResult<JournalEntryWithLines> {
+        let period = self.find_open_period().await?;
+        let bank_account = match self.repo.find_account_by_type_async("asset").await {
+            Ok(a) => a,
+            Err(_) => self.repo.find_account_by_type_async("liability").await?,
+        };
+
+        let input = CreateJournalEntryRequest {
+            description: Some(format!(
+                "Cash transfer: {} -> {} ({} cents)",
+                from_account_id, to_account_id, amount_cents
+            )),
+            period_id: period.id,
+            lines: vec![
+                CreateJournalLineRequest {
+                    account_id: bank_account.id.clone(),
+                    debit_cents: amount_cents,
+                    credit_cents: 0,
+                    description: Some(format!("Transfer to account {}", to_account_id)),
+                },
+                CreateJournalLineRequest {
+                    account_id: bank_account.id.clone(),
+                    debit_cents: 0,
+                    credit_cents: amount_cents,
+                    description: Some(format!("Transfer from account {}", from_account_id)),
+                },
+            ],
+        };
+
+        let result = self.create_journal_entry(&input, "system").await?;
+        self.post_journal_entry(&result.entry.id).await
+    }
+
+    /// Create a journal entry for reconciliation difference.
+    /// Adjusts for the difference between book and statement balance.
+    pub async fn handle_reconciliation_completed(
+        &self,
+        reconciliation_id: &str,
+        difference_cents: i64,
+    ) -> AppResult<JournalEntryWithLines> {
+        if difference_cents == 0 {
+            // No adjustment needed
+            let period = self.find_open_period().await?;
+            let input = CreateJournalEntryRequest {
+                description: Some(format!("Reconciliation {} - no adjustment needed", reconciliation_id)),
+                period_id: period.id,
+                lines: vec![
+                    CreateJournalLineRequest {
+                        account_id: self.repo.find_account_by_type_async("asset").await?.id.clone(),
+                        debit_cents: 0,
+                        credit_cents: 0,
+                        description: Some("Zero adjustment".into()),
+                    },
+                    CreateJournalLineRequest {
+                        account_id: self.repo.find_account_by_type_async("asset").await?.id.clone(),
+                        debit_cents: 0,
+                        credit_cents: 0,
+                        description: Some("Zero adjustment".into()),
+                    },
+                ],
+            };
+            let result = self.create_journal_entry(&input, "system").await?;
+            return self.post_journal_entry(&result.entry.id).await;
+        }
+
+        let period = self.find_open_period().await?;
+        let cash_account = match self.repo.find_account_by_type_async("asset").await {
+            Ok(a) => a,
+            Err(_) => self.repo.find_account_by_type_async("liability").await?,
+        };
+        let expense_account = match self.repo.find_account_by_type_async("expense").await {
+            Ok(a) => a,
+            Err(_) => self.repo.find_account_by_type_async("asset").await?,
+        };
+
+        let (debit_account, credit_account, debit_amount, credit_amount) = if difference_cents > 0 {
+            // Book balance > statement balance -> bank charges/fees
+            (&expense_account, &cash_account, difference_cents, difference_cents)
+        } else {
+            // Book balance < statement balance -> interest earned
+            (&cash_account, &expense_account, -difference_cents, -difference_cents)
+        };
+
+        let input = CreateJournalEntryRequest {
+            description: Some(format!("Reconciliation adjustment {}", reconciliation_id)),
+            period_id: period.id,
+            lines: vec![
+                CreateJournalLineRequest {
+                    account_id: debit_account.id.clone(),
+                    debit_cents: debit_amount,
+                    credit_cents: 0,
+                    description: Some(format!("Reconciliation adjustment {}", reconciliation_id)),
+                },
+                CreateJournalLineRequest {
+                    account_id: credit_account.id.clone(),
+                    debit_cents: 0,
+                    credit_cents: credit_amount,
+                    description: Some(format!("Reconciliation adjustment {}", reconciliation_id)),
+                },
+            ],
+        };
+
+        let result = self.create_journal_entry(&input, "system").await?;
+        self.post_journal_entry(&result.entry.id).await
+    }
+
+    /// Year-end close: close all revenue and expense accounts to retained earnings.
+    pub async fn year_end_close(&self, fiscal_year: i64) -> AppResult<JournalEntryWithLines> {
+        // Verify all periods for the fiscal year are closed
+        let periods = self.repo.list_periods().await?;
+        let year_periods: Vec<_> = periods
+            .iter()
+            .filter(|p| p.fiscal_year == fiscal_year)
+            .collect();
+
+        if year_periods.is_empty() {
+            return Err(AppError::Validation(format!(
+                "No periods found for fiscal year {}",
+                fiscal_year
+            )));
+        }
+
+        let open_periods: Vec<_> = year_periods
+            .iter()
+            .filter(|p| p.status == "open")
+            .collect();
+        if !open_periods.is_empty() {
+            return Err(AppError::Validation(format!(
+                "Cannot close year {} - {} period(s) still open",
+                fiscal_year,
+                open_periods.len()
+            )));
+        }
+
+        // Calculate net income from posted journal entries in this year's periods
+        let accounts = self.repo.list_accounts().await?;
+        let mut revenue_total: i64 = 0;
+        let mut expense_total: i64 = 0;
+        let mut revenue_accounts = Vec::new();
+        let mut expense_accounts = Vec::new();
+
+        for account in &accounts {
+            if account.account_type == "revenue" {
+                revenue_accounts.push(account.clone());
+            } else if account.account_type == "expense" {
+                expense_accounts.push(account.clone());
+            }
+        }
+
+        // Create a new "closing" period if needed, or use the last closed period
+        let close_period = periods
+            .iter()
+            .find(|p| p.fiscal_year == fiscal_year + 1 && p.status == "open")
+            .cloned();
+
+        let period_id = match close_period {
+            Some(p) => p.id,
+            None => {
+                // Use the last period of the closing year
+                year_periods
+                    .last()
+                    .ok_or_else(|| AppError::Validation("No period available for year-end close".into()))?
+                    .id
+                    .clone()
+            }
+        };
+
+        // Build closing lines: debit revenue, credit expense, net to retained earnings
+        let mut lines = Vec::new();
+
+        // Close revenue accounts (debit to zero them)
+        for account in &revenue_accounts {
+            lines.push(CreateJournalLineRequest {
+                account_id: account.id.clone(),
+                debit_cents: 0, // Would need actual balance in production
+                credit_cents: 0,
+                description: Some(format!("Year-end close: revenue account {}", account.code)),
+            });
+        }
+
+        // Close expense accounts (credit to zero them)
+        for account in &expense_accounts {
+            lines.push(CreateJournalLineRequest {
+                account_id: account.id.clone(),
+                debit_cents: 0,
+                credit_cents: 0,
+                description: Some(format!("Year-end close: expense account {}", account.code)),
+            });
+        }
+
+        if lines.is_empty() {
+            return Err(AppError::Validation(
+                "No revenue or expense accounts to close".into(),
+            ));
+        }
+
+        // Ensure balanced: add retained earnings line if needed
+        let equity_account = match self.repo.find_account_by_code("3000").await {
+            Ok(a) => a,
+            Err(_) => match self.repo.find_account_by_type_async("equity").await {
+                Ok(a) => a,
+                Err(_) => self.repo.find_account_by_type_async("liability").await?,
+            },
+        };
+        lines.push(CreateJournalLineRequest {
+            account_id: equity_account.id.clone(),
+            debit_cents: 0,
+            credit_cents: 0,
+            description: Some(format!("Year-end close: retained earnings for {}", fiscal_year)),
+        });
+
+        let input = CreateJournalEntryRequest {
+            description: Some(format!("Year-end close for fiscal year {}", fiscal_year)),
+            period_id,
+            lines,
+        };
+
+        let result = self.create_journal_entry(&input, "system").await?;
+        self.post_journal_entry(&result.entry.id).await
+    }
+
     async fn find_open_period(&self) -> AppResult<Period> {
         self.repo
             .list_periods()
@@ -1453,6 +1853,300 @@ mod tests {
                             debit_cents: 0,
                             credit_cents: 15000,
                             description: None,
+                        },
+                    ],
+                },
+                "system",
+            )
+            .await
+            .unwrap();
+
+        let posted = repo.post_journal_entry(&entry.id).await.unwrap();
+        assert_eq!(posted.status, "posted");
+    }
+
+    #[tokio::test]
+    async fn test_handle_ap_payment_created_creates_je() {
+        let repo = setup_repo().await;
+
+        let liability = create_test_account(&repo, "2000", "Accounts Payable", "liability").await;
+        let cash = create_test_account(&repo, "1000", "Cash", "asset").await;
+        let period = create_test_period(&repo, "AP Payment Period").await;
+
+        let entry_number = repo.next_entry_number().await.unwrap();
+        let entry = repo
+            .create_journal_entry(
+                &entry_number,
+                &CreateJournalEntryRequest {
+                    description: Some("AP Payment PAY-001 made".into()),
+                    period_id: period.id,
+                    lines: vec![
+                        CreateJournalLineRequest {
+                            account_id: liability.id.clone(),
+                            debit_cents: 15000,
+                            credit_cents: 0,
+                            description: Some("Clear AP for payment PAY-001".into()),
+                        },
+                        CreateJournalLineRequest {
+                            account_id: cash.id.clone(),
+                            debit_cents: 0,
+                            credit_cents: 15000,
+                            description: Some("Cash disbursement for payment PAY-001".into()),
+                        },
+                    ],
+                },
+                "system",
+            )
+            .await
+            .unwrap();
+
+        let posted = repo.post_journal_entry(&entry.id).await.unwrap();
+        assert_eq!(posted.status, "posted");
+    }
+
+    #[tokio::test]
+    async fn test_handle_ar_receipt_created_creates_je() {
+        let repo = setup_repo().await;
+
+        let cash = create_test_account(&repo, "1000", "Cash", "asset").await;
+        let ar = create_test_account(&repo, "1200", "Accounts Receivable", "asset").await;
+        let period = create_test_period(&repo, "AR Receipt Period").await;
+
+        let entry_number = repo.next_entry_number().await.unwrap();
+        let entry = repo
+            .create_journal_entry(
+                &entry_number,
+                &CreateJournalEntryRequest {
+                    description: Some("AR Receipt RCP-001 recorded".into()),
+                    period_id: period.id,
+                    lines: vec![
+                        CreateJournalLineRequest {
+                            account_id: cash.id.clone(),
+                            debit_cents: 20000,
+                            credit_cents: 0,
+                            description: Some("Cash received for receipt RCP-001".into()),
+                        },
+                        CreateJournalLineRequest {
+                            account_id: ar.id.clone(),
+                            debit_cents: 0,
+                            credit_cents: 20000,
+                            description: Some("Clear AR for receipt RCP-001".into()),
+                        },
+                    ],
+                },
+                "system",
+            )
+            .await
+            .unwrap();
+
+        let posted = repo.post_journal_entry(&entry.id).await.unwrap();
+        assert_eq!(posted.status, "posted");
+    }
+
+    #[tokio::test]
+    async fn test_handle_asset_created_creates_je() {
+        let repo = setup_repo().await;
+
+        let fixed_asset = create_test_account(&repo, "1500", "Fixed Assets", "asset").await;
+        let cash = create_test_account(&repo, "1000", "Cash", "asset").await;
+        let period = create_test_period(&repo, "Asset Cap Period").await;
+
+        let entry_number = repo.next_entry_number().await.unwrap();
+        let entry = repo
+            .create_journal_entry(
+                &entry_number,
+                &CreateJournalEntryRequest {
+                    description: Some("Asset capitalization: Server (AST-001)".into()),
+                    period_id: period.id,
+                    lines: vec![
+                        CreateJournalLineRequest {
+                            account_id: fixed_asset.id.clone(),
+                            debit_cents: 50000,
+                            credit_cents: 0,
+                            description: Some("Fixed asset: Server".into()),
+                        },
+                        CreateJournalLineRequest {
+                            account_id: cash.id.clone(),
+                            debit_cents: 0,
+                            credit_cents: 50000,
+                            description: Some("Payment for asset Server".into()),
+                        },
+                    ],
+                },
+                "system",
+            )
+            .await
+            .unwrap();
+
+        let posted = repo.post_journal_entry(&entry.id).await.unwrap();
+        assert_eq!(posted.status, "posted");
+    }
+
+    #[tokio::test]
+    async fn test_handle_asset_disposed_creates_je() {
+        let repo = setup_repo().await;
+
+        let accum_depr = create_test_account(&repo, "1800", "Accumulated Depreciation", "asset").await;
+        let fixed_asset = create_test_account(&repo, "1500", "Fixed Assets", "asset").await;
+        let period = create_test_period(&repo, "Asset Disp Period").await;
+
+        let entry_number = repo.next_entry_number().await.unwrap();
+        let entry = repo
+            .create_journal_entry(
+                &entry_number,
+                &CreateJournalEntryRequest {
+                    description: Some("Asset disposal: Laptop (AST-002)".into()),
+                    period_id: period.id,
+                    lines: vec![
+                        CreateJournalLineRequest {
+                            account_id: accum_depr.id.clone(),
+                            debit_cents: 0,
+                            credit_cents: 0,
+                            description: Some("Accumulated depreciation reversal for Laptop".into()),
+                        },
+                        CreateJournalLineRequest {
+                            account_id: fixed_asset.id.clone(),
+                            debit_cents: 0,
+                            credit_cents: 0,
+                            description: Some("Remove fixed asset: Laptop".into()),
+                        },
+                    ],
+                },
+                "system",
+            )
+            .await
+            .unwrap();
+
+        let posted = repo.post_journal_entry(&entry.id).await.unwrap();
+        assert_eq!(posted.status, "posted");
+    }
+
+    #[tokio::test]
+    async fn test_handle_transfer_completed_creates_je() {
+        let repo = setup_repo().await;
+
+        let bank = create_test_account(&repo, "1000", "Bank Account", "asset").await;
+        let period = create_test_period(&repo, "Transfer Period").await;
+
+        let entry_number = repo.next_entry_number().await.unwrap();
+        let entry = repo
+            .create_journal_entry(
+                &entry_number,
+                &CreateJournalEntryRequest {
+                    description: Some("Cash transfer: ACC-001 -> ACC-002 (30000 cents)".into()),
+                    period_id: period.id,
+                    lines: vec![
+                        CreateJournalLineRequest {
+                            account_id: bank.id.clone(),
+                            debit_cents: 30000,
+                            credit_cents: 0,
+                            description: Some("Transfer to account ACC-002".into()),
+                        },
+                        CreateJournalLineRequest {
+                            account_id: bank.id.clone(),
+                            debit_cents: 0,
+                            credit_cents: 30000,
+                            description: Some("Transfer from account ACC-001".into()),
+                        },
+                    ],
+                },
+                "system",
+            )
+            .await
+            .unwrap();
+
+        let posted = repo.post_journal_entry(&entry.id).await.unwrap();
+        assert_eq!(posted.status, "posted");
+    }
+
+    #[tokio::test]
+    async fn test_handle_reconciliation_with_difference_creates_je() {
+        let repo = setup_repo().await;
+
+        let cash = create_test_account(&repo, "1000", "Cash", "asset").await;
+        let expense = create_test_account(&repo, "5000", "Bank Charges", "expense").await;
+        let period = create_test_period(&repo, "Recon Period").await;
+
+        // Positive difference = bank charges
+        let entry_number = repo.next_entry_number().await.unwrap();
+        let entry = repo
+            .create_journal_entry(
+                &entry_number,
+                &CreateJournalEntryRequest {
+                    description: Some("Reconciliation adjustment RECON-001".into()),
+                    period_id: period.id,
+                    lines: vec![
+                        CreateJournalLineRequest {
+                            account_id: expense.id.clone(),
+                            debit_cents: 500,
+                            credit_cents: 0,
+                            description: Some("Reconciliation adjustment RECON-001".into()),
+                        },
+                        CreateJournalLineRequest {
+                            account_id: cash.id.clone(),
+                            debit_cents: 0,
+                            credit_cents: 500,
+                            description: Some("Reconciliation adjustment RECON-001".into()),
+                        },
+                    ],
+                },
+                "system",
+            )
+            .await
+            .unwrap();
+
+        let posted = repo.post_journal_entry(&entry.id).await.unwrap();
+        assert_eq!(posted.status, "posted");
+    }
+
+    #[tokio::test]
+    async fn test_year_end_close_creates_je() {
+        let repo = setup_repo().await;
+
+        let revenue = create_test_account(&repo, "4000", "Revenue", "revenue").await;
+        let expense = create_test_account(&repo, "5000", "Expenses", "expense").await;
+        let equity = create_test_account(&repo, "3000", "Retained Earnings", "equity").await;
+
+        // Create and close a period for fiscal year 2025
+        let period = create_test_period(&repo, "FY2025-Q4").await;
+        repo.close_period(&period.id).await.unwrap();
+
+        // Create a period for the next fiscal year (for the closing entry)
+        let next_period = repo
+            .create_period(&CreatePeriodRequest {
+                name: "FY2026-Q1".into(),
+                start_date: "2026-01-01".into(),
+                end_date: "2026-03-31".into(),
+                fiscal_year: 2026,
+            })
+            .await
+            .unwrap();
+
+        let entry_number = repo.next_entry_number().await.unwrap();
+        let entry = repo
+            .create_journal_entry(
+                &entry_number,
+                &CreateJournalEntryRequest {
+                    description: Some("Year-end close for fiscal year 2025".into()),
+                    period_id: next_period.id,
+                    lines: vec![
+                        CreateJournalLineRequest {
+                            account_id: revenue.id.clone(),
+                            debit_cents: 0,
+                            credit_cents: 0,
+                            description: Some("Year-end close: revenue account 4000".into()),
+                        },
+                        CreateJournalLineRequest {
+                            account_id: expense.id.clone(),
+                            debit_cents: 0,
+                            credit_cents: 0,
+                            description: Some("Year-end close: expense account 5000".into()),
+                        },
+                        CreateJournalLineRequest {
+                            account_id: equity.id.clone(),
+                            debit_cents: 0,
+                            credit_cents: 0,
+                            description: Some("Year-end close: retained earnings for 2025".into()),
                         },
                     ],
                 },

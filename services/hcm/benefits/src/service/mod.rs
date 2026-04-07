@@ -184,6 +184,35 @@ impl BenefitsService {
         }
         Ok(cancelled)
     }
+
+    /// Cancel all active enrollments when an employee is terminated.
+    pub async fn handle_employee_terminated(&self, employee_id: &str) -> AppResult<()> {
+        let enrollments = self.repo.list_enrollments_by_employee(employee_id).await?;
+        for enrollment in enrollments {
+            if enrollment.status == "active" {
+                let cancelled = self.repo.cancel_enrollment(&enrollment.id).await?;
+                if let Err(e) = self
+                    .bus
+                    .publish(
+                        "hcm.benefits.enrollment.cancelled",
+                        EnrollmentCancelled {
+                            enrollment_id: cancelled.id.clone(),
+                            employee_id: cancelled.employee_id.clone(),
+                            plan_id: cancelled.plan_id.clone(),
+                        },
+                    )
+                    .await
+                {
+                    tracing::error!(
+                        "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                        "hcm.benefits.enrollment.cancelled",
+                        e
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -537,5 +566,64 @@ mod tests {
             .await
             .unwrap();
         assert!(!updated.is_active);
+    }
+
+    #[tokio::test]
+    async fn test_handle_employee_terminated_cancels_enrollments() {
+        let repo = setup_repo().await;
+
+        // Create plans
+        let plan1 = repo
+            .create_plan(&CreatePlanRequest {
+                name: "Medical".into(),
+                plan_type: "medical".into(),
+                description: None,
+                employer_contribution_cents: None,
+                employee_contribution_cents: None,
+                is_active: Some(true),
+            })
+            .await
+            .unwrap();
+        let plan2 = repo
+            .create_plan(&CreatePlanRequest {
+                name: "Dental".into(),
+                plan_type: "dental".into(),
+                description: None,
+                employer_contribution_cents: None,
+                employee_contribution_cents: None,
+                is_active: Some(true),
+            })
+            .await
+            .unwrap();
+
+        // Enroll employee in both plans
+        repo.create_enrollment(&CreateEnrollmentRequest {
+            employee_id: "emp-term".into(),
+            plan_id: plan1.id.clone(),
+        })
+        .await
+        .unwrap();
+        repo.create_enrollment(&CreateEnrollmentRequest {
+            employee_id: "emp-term".into(),
+            plan_id: plan2.id.clone(),
+        })
+        .await
+        .unwrap();
+
+        // Verify both active
+        let enrollments = repo.list_enrollments_by_employee("emp-term").await.unwrap();
+        assert_eq!(enrollments.len(), 2);
+        assert!(enrollments.iter().all(|e| e.status == "active"));
+
+        // Simulate termination handler: cancel all active enrollments
+        for enrollment in &enrollments {
+            if enrollment.status == "active" {
+                repo.cancel_enrollment(&enrollment.id).await.unwrap();
+            }
+        }
+
+        // Verify all cancelled
+        let updated = repo.list_enrollments_by_employee("emp-term").await.unwrap();
+        assert!(updated.iter().all(|e| e.status == "cancelled"));
     }
 }

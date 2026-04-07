@@ -1,0 +1,1 @@
+ALTER TABLE ap_invoices ADD COLUMN tax_amount_cents INTEGER NOT NULL DEFAULT 0;

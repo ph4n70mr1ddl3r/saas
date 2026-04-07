@@ -66,6 +66,10 @@ impl InventoryService {
         self.item_repo.create(&input).await
     }
 
+    pub async fn list_items_below_reorder_point(&self) -> AppResult<Vec<ItemResponse>> {
+        self.item_repo.list_items_below_reorder_point().await
+    }
+
     pub async fn get_item_stock(&self, item_id: &str) -> AppResult<Vec<StockLevelResponse>> {
         self.stock_level_repo.get_by_item(item_id).await
     }
@@ -248,6 +252,114 @@ impl InventoryService {
         Ok(())
     }
 
+    /// Deduct stock when a sales order is fulfilled (pick and ship).
+    /// Also releases the reservation that was created on order confirmation.
+    pub async fn handle_order_fulfilled(
+        &self,
+        order_id: &str,
+        item_id: &str,
+        warehouse_id: &str,
+        quantity: i64,
+    ) -> AppResult<()> {
+        // Deduct on-hand stock
+        self.stock_level_repo
+            .deduct(item_id, warehouse_id, quantity)
+            .await?;
+
+        // Release the reservation for this order/item
+        self.stock_level_repo
+            .release_reservation(item_id, warehouse_id, quantity)
+            .await?;
+
+        // Record the stock movement
+        let movement = CreateStockMovement {
+            item_id: item_id.to_string(),
+            from_warehouse_id: Some(warehouse_id.to_string()),
+            to_warehouse_id: warehouse_id.to_string(), // staging in same warehouse
+            quantity,
+            movement_type: "pick".to_string(),
+            reference_type: Some("sales_order".to_string()),
+            reference_id: Some(order_id.to_string()),
+        };
+        self.stock_movement_repo.create(&movement).await?;
+        Ok(())
+    }
+
+    /// Add finished goods to inventory when a manufacturing work order completes.
+    pub async fn handle_work_order_completed(
+        &self,
+        work_order_id: &str,
+        item_id: &str,
+        quantity: i64,
+    ) -> AppResult<()> {
+        // Find the first warehouse to place finished goods
+        let warehouse_id = match self.stock_level_repo.get_first_warehouse_for_item(item_id).await? {
+            Some(sl) => sl.warehouse_id.clone(),
+            None => {
+                // Default to first warehouse in the system
+                let warehouses = self.warehouse_repo.list().await?;
+                warehouses
+                    .first()
+                    .ok_or_else(|| AppError::Validation("No warehouse available for finished goods".into()))?
+                    .id
+                    .clone()
+            }
+        };
+
+        self.stock_level_repo
+            .upsert_receipt(item_id, &warehouse_id, quantity)
+            .await?;
+
+        let movement = CreateStockMovement {
+            item_id: item_id.to_string(),
+            from_warehouse_id: None,
+            to_warehouse_id: warehouse_id,
+            quantity,
+            movement_type: "receipt".to_string(),
+            reference_type: Some("work_order".to_string()),
+            reference_id: Some(work_order_id.to_string()),
+        };
+        self.stock_movement_repo.create(&movement).await?;
+        Ok(())
+    }
+
+    /// Add returned items back to inventory when a customer return is processed.
+    pub async fn handle_return_created(
+        &self,
+        return_id: &str,
+        item_id: &str,
+        quantity: i64,
+    ) -> AppResult<()> {
+        // Find the first warehouse with this item to restock
+        let warehouse_id = match self.stock_level_repo.get_first_warehouse_for_item(item_id).await? {
+            Some(sl) => sl.warehouse_id.clone(),
+            None => {
+                let warehouses = self.warehouse_repo.list().await?;
+                warehouses
+                    .first()
+                    .ok_or_else(|| AppError::Validation("No warehouse available for returns".into()))?
+                    .id
+                    .clone()
+            }
+        };
+
+        self.stock_level_repo
+            .upsert_receipt(item_id, &warehouse_id, quantity)
+            .await?;
+
+        let movement = CreateStockMovement {
+            item_id: item_id.to_string(),
+            from_warehouse_id: None,
+            to_warehouse_id: warehouse_id,
+            quantity,
+            movement_type: "return".to_string(),
+            reference_type: Some("sales_return".to_string()),
+            reference_id: Some(return_id.to_string()),
+        };
+        self.stock_movement_repo.create(&movement).await?;
+        Ok(())
+    }
+
     // Cycle Count
     pub async fn create_cycle_count_session(
         &self,
@@ -389,9 +501,32 @@ impl InventoryService {
                 "Session must be in approved status to post".to_string(),
             ));
         }
-        self.cycle_count_repo
+        let lines = self.cycle_count_repo.get_cycle_count_lines(id).await?;
+        let adjustment_count = lines.iter().filter(|l| l.variance.unwrap_or(0) != 0).count() as u32;
+
+        let posted = self.cycle_count_repo
             .post_cycle_count(id, approved_by)
+            .await?;
+
+        if let Err(e) = self
+            .bus
+            .publish(
+                "scm.inventory.cycle_count.posted",
+                saas_proto::events::CycleCountPosted {
+                    session_id: id.to_string(),
+                    warehouse_id: posted.warehouse_id.clone(),
+                    adjustment_count,
+                },
+            )
             .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "scm.inventory.cycle_count.posted",
+                e
+            );
+        }
+        Ok(posted)
     }
 }
 
@@ -411,6 +546,7 @@ mod tests {
             include_str!("../../migrations/005_create_reservations.sql"),
             include_str!("../../migrations/006_create_cycle_count_sessions.sql"),
             include_str!("../../migrations/007_create_cycle_count_lines.sql"),
+            include_str!("../../migrations/008_add_reorder_fields.sql"),
         ];
         let migration_names = [
             "001_create_warehouses.sql",
@@ -420,6 +556,7 @@ mod tests {
             "005_create_reservations.sql",
             "006_create_cycle_count_sessions.sql",
             "007_create_cycle_count_lines.sql",
+            "008_add_reorder_fields.sql",
         ];
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS _migrations (filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)",
@@ -522,6 +659,9 @@ mod tests {
                 description: Some("A fine widget".into()),
                 unit_of_measure: Some("EA".into()),
                 item_type: "finished".into(),
+                reorder_point: 0,
+                safety_stock: 0,
+                economic_order_qty: 0,
             })
             .await
             .unwrap();
@@ -542,6 +682,9 @@ mod tests {
                 description: None,
                 unit_of_measure: None,
                 item_type: "raw_material".into(),
+                reorder_point: 0,
+                safety_stock: 0,
+                economic_order_qty: 0,
             })
             .await
             .unwrap();
@@ -566,6 +709,9 @@ mod tests {
                 description: None,
                 unit_of_measure: None,
                 item_type: "component".into(),
+                reorder_point: 0,
+                safety_stock: 0,
+                economic_order_qty: 0,
             })
             .await
             .unwrap();
@@ -610,6 +756,9 @@ mod tests {
                 description: None,
                 unit_of_measure: None,
                 item_type: "finished".into(),
+                reorder_point: 0,
+                safety_stock: 0,
+                economic_order_qty: 0,
             })
             .await
             .unwrap();
@@ -652,6 +801,9 @@ mod tests {
                 description: None,
                 unit_of_measure: None,
                 item_type: "component".into(),
+                reorder_point: 0,
+                safety_stock: 0,
+                economic_order_qty: 0,
             })
             .await
             .unwrap();
@@ -699,6 +851,9 @@ mod tests {
                 description: None,
                 unit_of_measure: None,
                 item_type: "raw_material".into(),
+                reorder_point: 0,
+                safety_stock: 0,
+                economic_order_qty: 0,
             })
             .await
             .unwrap();
@@ -749,6 +904,9 @@ mod tests {
                 description: None,
                 unit_of_measure: None,
                 item_type: "component".into(),
+                reorder_point: 0,
+                safety_stock: 0,
+                economic_order_qty: 0,
             })
             .await
             .unwrap();
@@ -857,6 +1015,9 @@ mod tests {
                 description: None,
                 unit_of_measure: None,
                 item_type: "finished".into(),
+                reorder_point: 0,
+                safety_stock: 0,
+                economic_order_qty: 0,
             })
             .await
             .unwrap();
@@ -867,6 +1028,9 @@ mod tests {
                 description: None,
                 unit_of_measure: None,
                 item_type: "finished".into(),
+                reorder_point: 0,
+                safety_stock: 0,
+                economic_order_qty: 0,
             })
             .await
             .unwrap();
@@ -887,5 +1051,397 @@ mod tests {
 
         let lines = cc_repo.get_cycle_count_lines(&session.id).await.unwrap();
         assert_eq!(lines.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_stock_deduction() {
+        let (wh_repo, item_repo, sl_repo, sm_repo, _, _) = setup_repos().await;
+
+        let wh = wh_repo
+            .create(&CreateWarehouse {
+                name: "WH-DED".into(),
+                address: None,
+            })
+            .await
+            .unwrap();
+        let item = item_repo
+            .create(&CreateItem {
+                sku: "SKU-DED".into(),
+                name: "Deductible".into(),
+                description: None,
+                unit_of_measure: None,
+                item_type: "finished".into(),
+                reorder_point: 0,
+                safety_stock: 0,
+                economic_order_qty: 0,
+            })
+            .await
+            .unwrap();
+
+        // Receive 100 units
+        sl_repo
+            .upsert_receipt(&item.id, &wh.id, 100)
+            .await
+            .unwrap();
+
+        // Deduct 30 units
+        let sl = sl_repo.deduct(&item.id, &wh.id, 30).await.unwrap();
+        assert_eq!(sl.quantity_on_hand, 70);
+
+        // Record the movement
+        let movement = sm_repo
+            .create(&CreateStockMovement {
+                item_id: item.id.clone(),
+                from_warehouse_id: Some(wh.id.clone()),
+                to_warehouse_id: wh.id.clone(),
+                quantity: 30,
+                movement_type: "pick".into(),
+                reference_type: Some("sales_order".into()),
+                reference_id: Some("SO-001".into()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(movement.movement_type, "pick");
+        assert_eq!(movement.quantity, 30);
+    }
+
+    #[tokio::test]
+    async fn test_order_fulfilled_deducts_and_releases() {
+        let (wh_repo, item_repo, sl_repo, sm_repo, res_repo, _) = setup_repos().await;
+
+        let wh = wh_repo
+            .create(&CreateWarehouse {
+                name: "WH-FUL".into(),
+                address: None,
+            })
+            .await
+            .unwrap();
+        let item = item_repo
+            .create(&CreateItem {
+                sku: "SKU-FUL".into(),
+                name: "Fulfillable".into(),
+                description: None,
+                unit_of_measure: None,
+                item_type: "finished".into(),
+                reorder_point: 0,
+                safety_stock: 0,
+                economic_order_qty: 0,
+            })
+            .await
+            .unwrap();
+
+        // Receive 100 units
+        sl_repo
+            .upsert_receipt(&item.id, &wh.id, 100)
+            .await
+            .unwrap();
+
+        // Reserve 40 for the order
+        sl_repo.reserve(&item.id, &wh.id, 40).await.unwrap();
+        res_repo
+            .create(&CreateReservation {
+                item_id: item.id.clone(),
+                warehouse_id: wh.id.clone(),
+                quantity: 40,
+                reference_type: "sales_order".into(),
+                reference_id: "SO-FUL".into(),
+            })
+            .await
+            .unwrap();
+
+        // Simulate fulfillment: deduct 40 and release reservation
+        sl_repo.deduct(&item.id, &wh.id, 40).await.unwrap();
+        sl_repo.release_reservation(&item.id, &wh.id, 40).await.unwrap();
+
+        // Record the pick movement
+        sm_repo
+            .create(&CreateStockMovement {
+                item_id: item.id.clone(),
+                from_warehouse_id: Some(wh.id.clone()),
+                to_warehouse_id: wh.id.clone(),
+                quantity: 40,
+                movement_type: "pick".into(),
+                reference_type: Some("sales_order".into()),
+                reference_id: Some("SO-FUL".into()),
+            })
+            .await
+            .unwrap();
+
+        let sl = sl_repo
+            .get_by_item_warehouse(&item.id, &wh.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(sl.quantity_on_hand, 60);
+        assert_eq!(sl.quantity_reserved, 0);
+        assert_eq!(sl.quantity_available, 60);
+
+        // Verify movement recorded
+        let movements = sm_repo.list().await.unwrap();
+        assert!(!movements.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_work_order_completion_adds_stock() {
+        let (wh_repo, item_repo, sl_repo, sm_repo, _, _) = setup_repos().await;
+
+        let wh = wh_repo
+            .create(&CreateWarehouse {
+                name: "WH-MFG".into(),
+                address: None,
+            })
+            .await
+            .unwrap();
+        let item = item_repo
+            .create(&CreateItem {
+                sku: "SKU-MFG".into(),
+                name: "Finished Good".into(),
+                description: None,
+                unit_of_measure: None,
+                item_type: "finished".into(),
+                reorder_point: 0,
+                safety_stock: 0,
+                economic_order_qty: 0,
+            })
+            .await
+            .unwrap();
+
+        // Before: no stock
+        let levels = sl_repo.get_by_item(&item.id).await.unwrap();
+        assert!(levels.is_empty());
+
+        // Simulate work order completion: add 50 units to first warehouse
+        sl_repo
+            .upsert_receipt(&item.id, &wh.id, 50)
+            .await
+            .unwrap();
+
+        let movement = sm_repo
+            .create(&CreateStockMovement {
+                item_id: item.id.clone(),
+                from_warehouse_id: None,
+                to_warehouse_id: wh.id.clone(),
+                quantity: 50,
+                movement_type: "receipt".into(),
+                reference_type: Some("work_order".into()),
+                reference_id: Some("WO-001".into()),
+            })
+            .await
+            .unwrap();
+
+        let sl = sl_repo
+            .get_by_item_warehouse(&item.id, &wh.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(sl.quantity_on_hand, 50);
+        assert_eq!(movement.reference_type, Some("work_order".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_return_restocks_inventory() {
+        let (wh_repo, item_repo, sl_repo, sm_repo, _, _) = setup_repos().await;
+
+        let wh = wh_repo
+            .create(&CreateWarehouse {
+                name: "WH-RET".into(),
+                address: None,
+            })
+            .await
+            .unwrap();
+        let item = item_repo
+            .create(&CreateItem {
+                sku: "SKU-RET".into(),
+                name: "Returnable".into(),
+                description: None,
+                unit_of_measure: None,
+                item_type: "finished".into(),
+                reorder_point: 0,
+                safety_stock: 0,
+                economic_order_qty: 0,
+            })
+            .await
+            .unwrap();
+
+        // Start with 100 units
+        sl_repo
+            .upsert_receipt(&item.id, &wh.id, 100)
+            .await
+            .unwrap();
+
+        // Deduct 10 (sold)
+        sl_repo.deduct(&item.id, &wh.id, 10).await.unwrap();
+
+        // Return: add 10 back
+        sl_repo
+            .upsert_receipt(&item.id, &wh.id, 10)
+            .await
+            .unwrap();
+        sm_repo
+            .create(&CreateStockMovement {
+                item_id: item.id.clone(),
+                from_warehouse_id: None,
+                to_warehouse_id: wh.id.clone(),
+                quantity: 10,
+                movement_type: "return".into(),
+                reference_type: Some("sales_return".into()),
+                reference_id: Some("RET-001".into()),
+            })
+            .await
+            .unwrap();
+
+        let sl = sl_repo
+            .get_by_item_warehouse(&item.id, &wh.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(sl.quantity_on_hand, 100);
+    }
+
+    #[tokio::test]
+    async fn test_get_first_warehouse_for_item() {
+        let (wh_repo, item_repo, sl_repo, _, _, _) = setup_repos().await;
+
+        // No stock for nonexistent item
+        let result = sl_repo.get_first_warehouse_for_item("nonexistent").await.unwrap();
+        assert!(result.is_none());
+
+        let wh = wh_repo
+            .create(&CreateWarehouse {
+                name: "WH-LOOKUP".into(),
+                address: None,
+            })
+            .await
+            .unwrap();
+        let item = item_repo
+            .create(&CreateItem {
+                sku: "SKU-LOOKUP".into(),
+                name: "Lookup Item".into(),
+                description: None,
+                unit_of_measure: None,
+                item_type: "finished".into(),
+                reorder_point: 0,
+                safety_stock: 0,
+                economic_order_qty: 0,
+            })
+            .await
+            .unwrap();
+
+        sl_repo
+            .upsert_receipt(&item.id, &wh.id, 50)
+            .await
+            .unwrap();
+
+        let result = sl_repo.get_first_warehouse_for_item(&item.id).await.unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().warehouse_id, wh.id);
+    }
+
+    #[tokio::test]
+    async fn test_item_creation_with_reorder_fields() {
+        let (_, item_repo, _, _, _, _) = setup_repos().await;
+
+        let item = item_repo
+            .create(&CreateItem {
+                sku: "SKU-REO".into(),
+                name: "Reorder Item".into(),
+                description: Some("Needs reorder tracking".into()),
+                unit_of_measure: Some("EA".into()),
+                item_type: "finished".into(),
+                reorder_point: 50,
+                safety_stock: 20,
+                economic_order_qty: 100,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(item.sku, "SKU-REO");
+        assert_eq!(item.reorder_point, 50);
+        assert_eq!(item.safety_stock, 20);
+        assert_eq!(item.economic_order_qty, 100);
+
+        // Verify fields persist after retrieval
+        let fetched = item_repo.get_by_id(&item.id).await.unwrap();
+        assert_eq!(fetched.reorder_point, 50);
+        assert_eq!(fetched.safety_stock, 20);
+        assert_eq!(fetched.economic_order_qty, 100);
+    }
+
+    #[tokio::test]
+    async fn test_items_below_reorder_point() {
+        let (wh_repo, item_repo, sl_repo, _, _, _) = setup_repos().await;
+
+        let wh = wh_repo
+            .create(&CreateWarehouse {
+                name: "WH-REO".into(),
+                address: None,
+            })
+            .await
+            .unwrap();
+
+        // Item with reorder_point = 50, on_hand = 30 (below reorder point)
+        let item_low = item_repo
+            .create(&CreateItem {
+                sku: "SKU-LOW".into(),
+                name: "Low Stock Item".into(),
+                description: None,
+                unit_of_measure: None,
+                item_type: "finished".into(),
+                reorder_point: 50,
+                safety_stock: 10,
+                economic_order_qty: 100,
+            })
+            .await
+            .unwrap();
+        sl_repo
+            .upsert_receipt(&item_low.id, &wh.id, 30)
+            .await
+            .unwrap();
+
+        // Item with reorder_point = 50, on_hand = 60 (above reorder point)
+        let item_ok = item_repo
+            .create(&CreateItem {
+                sku: "SKU-OK".into(),
+                name: "OK Stock Item".into(),
+                description: None,
+                unit_of_measure: None,
+                item_type: "finished".into(),
+                reorder_point: 50,
+                safety_stock: 10,
+                economic_order_qty: 100,
+            })
+            .await
+            .unwrap();
+        sl_repo
+            .upsert_receipt(&item_ok.id, &wh.id, 60)
+            .await
+            .unwrap();
+
+        // Item with reorder_point = 0 (should not appear in results)
+        let item_no_reorder = item_repo
+            .create(&CreateItem {
+                sku: "SKU-NOREO".into(),
+                name: "No Reorder Item".into(),
+                description: None,
+                unit_of_measure: None,
+                item_type: "finished".into(),
+                reorder_point: 0,
+                safety_stock: 0,
+                economic_order_qty: 0,
+            })
+            .await
+            .unwrap();
+        sl_repo
+            .upsert_receipt(&item_no_reorder.id, &wh.id, 5)
+            .await
+            .unwrap();
+
+        // Query items below reorder point
+        let below = item_repo.list_items_below_reorder_point().await.unwrap();
+
+        // Only item_low should be returned
+        assert_eq!(below.len(), 1);
+        assert_eq!(below[0].sku, "SKU-LOW");
+        assert_eq!(below[0].reorder_point, 50);
     }
 }

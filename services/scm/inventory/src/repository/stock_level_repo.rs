@@ -83,4 +83,32 @@ impl StockLevelRepo {
         .execute(&self.pool).await?;
         Ok(())
     }
+
+    pub async fn deduct(
+        &self,
+        item_id: &str,
+        warehouse_id: &str,
+        quantity: i64,
+    ) -> AppResult<StockLevelResponse> {
+        sqlx::query(
+            "UPDATE stock_levels SET quantity_on_hand = quantity_on_hand - ?, quantity_available = quantity_on_hand - ? - quantity_reserved, updated_at = datetime('now') WHERE item_id = ? AND warehouse_id = ? AND quantity_on_hand >= ?"
+        )
+        .bind(quantity).bind(quantity).bind(item_id).bind(warehouse_id).bind(quantity)
+        .execute(&self.pool).await?;
+        self.get_by_item_warehouse(item_id, warehouse_id)
+            .await?
+            .ok_or_else(|| AppError::Internal("Failed to deduct stock level".into()))
+    }
+
+    pub async fn get_first_warehouse_for_item(
+        &self,
+        item_id: &str,
+    ) -> AppResult<Option<StockLevelResponse>> {
+        let row = sqlx::query_as::<_, StockLevelResponse>(
+            "SELECT id, item_id, warehouse_id, quantity_on_hand, quantity_reserved, quantity_available, updated_at FROM stock_levels WHERE item_id = ? LIMIT 1"
+        )
+        .bind(item_id)
+        .fetch_optional(&self.pool).await?;
+        Ok(row)
+    }
 }

@@ -65,9 +65,30 @@ impl ApService {
             }
         }
 
-        let invoice = self.repo.create_invoice(input).await?;
+        // Calculate tax amount based on the tax code
+        let tax_amount_cents = self.calculate_invoice_tax(input).await?;
+
+        let invoice = self.repo.create_invoice(input, tax_amount_cents).await?;
         let lines = self.repo.get_invoice_lines(&invoice.id).await?;
         Ok(ApInvoiceWithLines { invoice, lines })
+    }
+
+    /// Calculate tax for an invoice by looking up the tax code rate and
+    /// applying it to the sum of line amounts. Returns 0 if no tax code
+    /// is specified.
+    pub async fn calculate_invoice_tax(
+        &self,
+        input: &CreateApInvoiceRequest,
+    ) -> AppResult<i64> {
+        let tax_code = match &input.tax_code {
+            Some(code) => code,
+            None => return Ok(0),
+        };
+
+        let tc = self.repo.get_tax_code_by_code(tax_code).await?;
+        let subtotal: i64 = input.lines.iter().map(|l| l.amount_cents).sum();
+        let tax_amount = (subtotal as f64 * tc.rate).round() as i64;
+        Ok(tax_amount)
     }
 
     pub async fn approve_invoice(&self, id: &str) -> AppResult<ApInvoiceWithLines> {
@@ -208,6 +229,7 @@ impl ApService {
             invoice_date: today,
             due_date,
             lines: invoice_lines,
+            tax_code: None,
         };
 
         let result = self.create_invoice(&input).await?;
@@ -279,6 +301,7 @@ mod tests {
             include_str!("../../migrations/003_create_ap_invoice_lines.sql"),
             include_str!("../../migrations/004_create_payments.sql"),
             include_str!("../../migrations/005_create_tax_codes.sql"),
+            include_str!("../../migrations/006_add_tax_amount_to_invoices.sql"),
         ];
         let migration_names = [
             "001_create_vendors.sql",
@@ -286,6 +309,7 @@ mod tests {
             "003_create_ap_invoice_lines.sql",
             "004_create_payments.sql",
             "005_create_tax_codes.sql",
+            "006_add_tax_amount_to_invoices.sql",
         ];
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS _migrations (filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)",
@@ -348,7 +372,8 @@ mod tests {
                 account_code: "5000".into(),
                 amount_cents,
             }],
-        })
+            tax_code: None,
+        }, 0)
         .await
         .unwrap()
     }
@@ -537,7 +562,8 @@ mod tests {
                     account_code: "5000".into(),
                     amount_cents: 3000,
                 }],
-            })
+                tax_code: None,
+            }, 0)
             .await
             .unwrap();
         let inv2 = repo
@@ -551,7 +577,8 @@ mod tests {
                     account_code: "5000".into(),
                     amount_cents: 7000,
                 }],
-            })
+                tax_code: None,
+            }, 0)
             .await
             .unwrap();
 
@@ -709,7 +736,8 @@ mod tests {
                 invoice_date: "2025-06-01".into(),
                 due_date: "2025-07-01".into(),
                 lines: invoice_lines,
-            })
+                tax_code: None,
+            }, 0)
             .await
             .unwrap();
 
@@ -755,10 +783,80 @@ mod tests {
                     account_code: "5000".into(),
                     amount_cents: 0,
                 }],
-            })
+                tax_code: None,
+            }, 0)
             .await
             .unwrap();
 
         assert_eq!(invoice.total_cents, 0);
+    }
+
+    #[tokio::test]
+    async fn test_tax_calculation_with_10_percent_rate() {
+        let repo = setup_repo().await;
+        let vendor = create_test_vendor(&repo, "Tax Test Vendor").await;
+
+        // Create a tax code with 10% rate
+        let tax_code = repo
+            .create_tax_code(&CreateTaxCodeRequest {
+                code: "TAX-10".into(),
+                rate: 0.10,
+                description: Some("10% sales tax".into()),
+            })
+            .await
+            .unwrap();
+
+        // Create an invoice with tax code applied
+        let invoice = repo
+            .create_invoice(&CreateApInvoiceRequest {
+                vendor_id: vendor.id.clone(),
+                invoice_number: "INV-TAX-001".into(),
+                invoice_date: "2025-01-15".into(),
+                due_date: "2025-02-15".into(),
+                lines: vec![
+                    CreateApInvoiceLineRequest {
+                        description: Some("Line 1".into()),
+                        account_code: "5000".into(),
+                        amount_cents: 5000,
+                    },
+                    CreateApInvoiceLineRequest {
+                        description: Some("Line 2".into()),
+                        account_code: "5000".into(),
+                        amount_cents: 5000,
+                    },
+                ],
+                tax_code: Some("TAX-10".into()),
+            }, 1000) // 10% of 10000 = 1000
+            .await
+            .unwrap();
+
+        assert_eq!(invoice.total_cents, 10000);
+        assert_eq!(invoice.tax_amount_cents, 1000);
+    }
+
+    #[tokio::test]
+    async fn test_tax_calculation_zero_when_no_tax_code() {
+        let repo = setup_repo().await;
+        let vendor = create_test_vendor(&repo, "No Tax Vendor").await;
+
+        // Create invoice without a tax code
+        let invoice = repo
+            .create_invoice(&CreateApInvoiceRequest {
+                vendor_id: vendor.id.clone(),
+                invoice_number: "INV-NOTAX-001".into(),
+                invoice_date: "2025-01-15".into(),
+                due_date: "2025-02-15".into(),
+                lines: vec![CreateApInvoiceLineRequest {
+                    description: Some("Some item".into()),
+                    account_code: "5000".into(),
+                    amount_cents: 25000,
+                }],
+                tax_code: None,
+            }, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(invoice.total_cents, 25000);
+        assert_eq!(invoice.tax_amount_cents, 0);
     }
 }

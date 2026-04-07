@@ -224,4 +224,39 @@ impl PayrollRepo {
         .await?
         .ok_or_else(|| AppError::Internal("Failed to read created deduction".into()))
     }
+
+    // --- Tax Brackets ---
+
+    pub async fn list_tax_brackets(&self) -> AppResult<Vec<TaxBracket>> {
+        let rows = sqlx::query_as::<_, TaxBracket>(
+            "SELECT id, name, min_income_cents, max_income_cents, rate_percent, created_at FROM tax_brackets ORDER BY min_income_cents ASC"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn create_tax_bracket(
+        &self,
+        input: &CreateTaxBracketRequest,
+    ) -> AppResult<TaxBracket> {
+        let id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO tax_brackets (id, name, min_income_cents, max_income_cents, rate_percent) VALUES (?, ?, ?, ?, ?)"
+        )
+        .bind(&id)
+        .bind(&input.name)
+        .bind(input.min_income_cents)
+        .bind(input.max_income_cents)
+        .bind(input.rate_percent)
+        .execute(&self.pool)
+        .await?;
+        sqlx::query_as::<_, TaxBracket>(
+            "SELECT id, name, min_income_cents, max_income_cents, rate_percent, created_at FROM tax_brackets WHERE id = ?"
+        )
+        .bind(&id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::Internal("Failed to read created tax bracket".into()))
+    }
 }

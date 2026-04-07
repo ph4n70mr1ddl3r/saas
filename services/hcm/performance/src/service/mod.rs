@@ -2,6 +2,7 @@ use crate::models::*;
 use crate::repository::PerformanceRepo;
 use saas_common::error::{AppError, AppResult};
 use saas_nats_bus::NatsBus;
+use saas_proto::events::{ReviewCycleActivated, ReviewSubmitted};
 use sqlx::SqlitePool;
 
 #[derive(Clone)]
@@ -43,7 +44,25 @@ impl PerformanceService {
                 id, cycle.status
             )));
         }
-        self.repo.update_cycle_status(id, "active").await
+        let activated = self.repo.update_cycle_status(id, "active").await?;
+        if let Err(e) = self
+            .bus
+            .publish(
+                "hcm.performance.cycle.activated",
+                ReviewCycleActivated {
+                    cycle_id: activated.id.clone(),
+                    name: activated.name.clone(),
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "hcm.performance.cycle.activated",
+                e
+            );
+        }
+        Ok(activated)
     }
 
     pub async fn close_review_cycle(&self, id: &str) -> AppResult<ReviewCycle> {
@@ -159,7 +178,30 @@ impl PerformanceService {
         }
         self.repo
             .submit_review_assignment(id, input.rating, input.comments.as_deref())
+            .await?;
+
+        let updated = self.repo.get_review_assignment(id).await?;
+        if let Err(e) = self
+            .bus
+            .publish(
+                "hcm.performance.review.submitted",
+                ReviewSubmitted {
+                    assignment_id: updated.id.clone(),
+                    cycle_id: updated.cycle_id.clone(),
+                    employee_id: updated.employee_id.clone(),
+                    reviewer_id: updated.reviewer_id.clone(),
+                    rating: input.rating,
+                },
+            )
             .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "hcm.performance.review.submitted",
+                e
+            );
+        }
+        Ok(updated)
     }
 
     // --- Feedback ---

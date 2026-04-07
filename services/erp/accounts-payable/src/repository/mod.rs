@@ -75,7 +75,7 @@ impl ApRepo {
 
     pub async fn list_invoices(&self) -> AppResult<Vec<ApInvoice>> {
         let rows = sqlx::query_as::<_, ApInvoice>(
-            "SELECT id, vendor_id, invoice_number, invoice_date, due_date, total_cents, status, created_at FROM ap_invoices ORDER BY created_at DESC",
+            "SELECT id, vendor_id, invoice_number, invoice_date, due_date, total_cents, tax_amount_cents, status, created_at FROM ap_invoices ORDER BY created_at DESC",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -84,7 +84,7 @@ impl ApRepo {
 
     pub async fn get_invoice(&self, id: &str) -> AppResult<ApInvoice> {
         sqlx::query_as::<_, ApInvoice>(
-            "SELECT id, vendor_id, invoice_number, invoice_date, due_date, total_cents, status, created_at FROM ap_invoices WHERE id = ?",
+            "SELECT id, vendor_id, invoice_number, invoice_date, due_date, total_cents, tax_amount_cents, status, created_at FROM ap_invoices WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -103,14 +103,14 @@ impl ApRepo {
     }
 
     /// Create invoice header + lines inside a database transaction.
-    pub async fn create_invoice(&self, input: &CreateApInvoiceRequest) -> AppResult<ApInvoice> {
+    pub async fn create_invoice(&self, input: &CreateApInvoiceRequest, tax_amount_cents: i64) -> AppResult<ApInvoice> {
         let id = uuid::Uuid::new_v4().to_string();
         let total_cents: i64 = input.lines.iter().map(|l| l.amount_cents).sum();
 
         let mut tx = self.pool.begin().await?;
 
         sqlx::query(
-            "INSERT INTO ap_invoices (id, vendor_id, invoice_number, invoice_date, due_date, total_cents) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO ap_invoices (id, vendor_id, invoice_number, invoice_date, due_date, total_cents, tax_amount_cents) VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&input.vendor_id)
@@ -118,6 +118,7 @@ impl ApRepo {
         .bind(&input.invoice_date)
         .bind(&input.due_date)
         .bind(total_cents)
+        .bind(tax_amount_cents)
         .execute(&mut *tx)
         .await?;
 
@@ -169,7 +170,7 @@ impl ApRepo {
 
         // Read the invoice within the transaction for consistent view
         let invoice: ApInvoice = sqlx::query_as::<_, ApInvoice>(
-            "SELECT id, vendor_id, invoice_number, invoice_date, due_date, total_cents, status, created_at FROM ap_invoices WHERE id = ?",
+            "SELECT id, vendor_id, invoice_number, invoice_date, due_date, total_cents, tax_amount_cents, status, created_at FROM ap_invoices WHERE id = ?",
         )
         .bind(&input.invoice_id)
         .fetch_optional(&mut *tx)
@@ -263,6 +264,16 @@ impl ApRepo {
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("Tax code '{}' not found", id)))
+    }
+
+    pub async fn get_tax_code_by_code(&self, code: &str) -> AppResult<TaxCode> {
+        sqlx::query_as::<_, TaxCode>(
+            "SELECT id, code, rate, description, is_active, created_at FROM tax_codes WHERE code = ? AND is_active = 1",
+        )
+        .bind(code)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Tax code '{}' not found or inactive", code)))
     }
 
     // --- Aging Report ---

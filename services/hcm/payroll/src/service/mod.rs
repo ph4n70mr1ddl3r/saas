@@ -178,6 +178,75 @@ impl PayrollService {
         };
         self.repo.create_compensation(&input).await
     }
+
+    /// Set end_date on all active compensation records when an employee is terminated.
+    pub async fn handle_employee_terminated(&self, employee_id: &str, termination_date: &str) -> AppResult<()> {
+        let compensations = self.repo.list_compensation_by_employee(employee_id).await?;
+        for comp in compensations {
+            if comp.end_date.is_none() {
+                self.repo.update_compensation(
+                    &comp.id,
+                    &UpdateCompensationRequest {
+                        end_date: Some(termination_date.to_string()),
+                        ..Default::default()
+                    },
+                ).await?;
+            }
+        }
+        Ok(())
+    }
+
+    // --- Tax Brackets ---
+
+    pub async fn list_tax_brackets(&self) -> AppResult<Vec<TaxBracket>> {
+        self.repo.list_tax_brackets().await
+    }
+
+    pub async fn create_tax_bracket(&self, input: CreateTaxBracketRequest) -> AppResult<TaxBracket> {
+        if input.rate_percent < 0.0 || input.rate_percent > 100.0 {
+            return Err(AppError::Validation(
+                "rate_percent must be between 0 and 100".into(),
+            ));
+        }
+        if input.min_income_cents < 0 {
+            return Err(AppError::Validation(
+                "min_income_cents must be non-negative".into(),
+            ));
+        }
+        if let Some(max) = input.max_income_cents {
+            if max <= input.min_income_cents {
+                return Err(AppError::Validation(
+                    "max_income_cents must be greater than min_income_cents".into(),
+                ));
+            }
+        }
+        self.repo.create_tax_bracket(&input).await
+    }
+
+    /// Calculate progressive tax by applying brackets in order.
+    /// Each bracket taxes only the income that falls within its range.
+    pub async fn calculate_progressive_tax(&self, gross_cents: i64) -> AppResult<i64> {
+        let brackets = self.repo.list_tax_brackets().await?;
+        let mut total_tax: i64 = 0;
+        let mut remaining = gross_cents;
+
+        for bracket in &brackets {
+            if remaining <= 0 {
+                break;
+            }
+            let bracket_ceiling = bracket.max_income_cents.unwrap_or(i64::MAX);
+            let taxable_in_bracket = std::cmp::min(remaining, bracket_ceiling - bracket.min_income_cents);
+            if taxable_in_bracket > 0 {
+                // rate_percent is a percentage (e.g. 22.0 means 22%)
+                // Use integer arithmetic: (taxable * rate_percent * 100 + 5000) / 10000 for rounding
+                let tax_in_bracket = (taxable_in_bracket as f64 * bracket.rate_percent / 100.0).round() as i64;
+                total_tax += tax_in_bracket;
+            }
+            remaining -= taxable_in_bracket;
+        }
+
+        Ok(total_tax)
+    }
 }
 
 #[cfg(test)]
@@ -193,12 +262,14 @@ mod tests {
             include_str!("../../migrations/002_create_pay_runs.sql"),
             include_str!("../../migrations/003_create_payslips.sql"),
             include_str!("../../migrations/004_create_deductions.sql"),
+            include_str!("../../migrations/005_create_tax_brackets.sql"),
         ];
         let migration_names = [
             "001_create_compensation.sql",
             "002_create_pay_runs.sql",
             "003_create_payslips.sql",
             "004_create_deductions.sql",
+            "005_create_tax_brackets.sql",
         ];
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS _migrations (filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)",
@@ -482,5 +553,201 @@ mod tests {
 
         let payslips = repo.list_payslips_for_run(&pay_run.id).await.unwrap();
         assert_eq!(payslips.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_handle_employee_terminated_sets_end_date() {
+        let repo = setup_repo().await;
+
+        // Create active compensation for employee
+        let comp = repo
+            .create_compensation(&CreateCompensationRequest {
+                employee_id: "emp-term-001".into(),
+                salary_type: "salaried".into(),
+                amount_cents: 75_000_00,
+                currency: Some("USD".into()),
+                effective_date: "2025-01-01".into(),
+                end_date: None,
+            })
+            .await
+            .unwrap();
+        assert!(comp.end_date.is_none());
+
+        // Simulate termination: set end_date
+        let updated = repo
+            .update_compensation(
+                &comp.id,
+                &UpdateCompensationRequest {
+                    end_date: Some("2025-06-30".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.end_date, Some("2025-06-30".to_string()));
+        assert_eq!(updated.amount_cents, 75_000_00); // other fields preserved
+    }
+
+    #[tokio::test]
+    async fn test_termination_handles_multiple_compensations() {
+        let repo = setup_repo().await;
+
+        // Create two active compensation records
+        repo.create_compensation(&CreateCompensationRequest {
+            employee_id: "emp-term-002".into(),
+            salary_type: "salaried".into(),
+            amount_cents: 50_000_00,
+            currency: Some("USD".into()),
+            effective_date: "2025-01-01".into(),
+            end_date: None,
+        })
+        .await
+        .unwrap();
+
+        repo.create_compensation(&CreateCompensationRequest {
+            employee_id: "emp-term-002".into(),
+            salary_type: "hourly".into(),
+            amount_cents: 10_000_00,
+            currency: Some("USD".into()),
+            effective_date: "2025-03-01".into(),
+            end_date: None,
+        })
+        .await
+        .unwrap();
+
+        // Simulate termination handler: set end_date on all active comps
+        let comps = repo.list_compensation_by_employee("emp-term-002").await.unwrap();
+        assert_eq!(comps.len(), 2);
+
+        for comp in &comps {
+            if comp.end_date.is_none() {
+                repo.update_compensation(
+                    &comp.id,
+                    &UpdateCompensationRequest {
+                        end_date: Some("2025-06-30".into()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            }
+        }
+
+        let updated = repo.list_compensation_by_employee("emp-term-002").await.unwrap();
+        assert!(updated.iter().all(|c| c.end_date == Some("2025-06-30".to_string())));
+    }
+
+    #[tokio::test]
+    async fn test_progressive_tax_with_two_brackets() {
+        let repo = setup_repo().await;
+
+        // Create two brackets: 10% up to 100000 cents ($1,000), 22% above
+        repo.create_tax_bracket(&CreateTaxBracketRequest {
+            name: "Low".into(),
+            min_income_cents: 0,
+            max_income_cents: Some(100_000_00),
+            rate_percent: 10.0,
+        })
+        .await
+        .unwrap();
+
+        repo.create_tax_bracket(&CreateTaxBracketRequest {
+            name: "High".into(),
+            min_income_cents: 100_000_00,
+            max_income_cents: None,
+            rate_percent: 22.0,
+        })
+        .await
+        .unwrap();
+
+        // Verify brackets created
+        let brackets = repo.list_tax_brackets().await.unwrap();
+        assert_eq!(brackets.len(), 2);
+
+        // Test: gross = 20000000 cents ($200,000)
+        // First 10000000 at 10% = 1000000
+        // Next 10000000 at 22% = 2200000
+        // Total tax = 3200000
+        let brackets_list = repo.list_tax_brackets().await.unwrap();
+        let gross = 200_000_00i64;
+        let mut total_tax: i64 = 0;
+        let mut remaining = gross;
+        for bracket in &brackets_list {
+            if remaining <= 0 {
+                break;
+            }
+            let ceiling = bracket.max_income_cents.unwrap_or(i64::MAX);
+            let taxable = std::cmp::min(remaining, ceiling - bracket.min_income_cents);
+            if taxable > 0 {
+                total_tax += (taxable as f64 * bracket.rate_percent / 100.0).round() as i64;
+            }
+            remaining -= taxable;
+        }
+        assert_eq!(total_tax, 3_200_000); // 10% of 10M + 22% of 10M = 1M + 2.2M = 3.2M cents
+    }
+
+    #[tokio::test]
+    async fn test_progressive_tax_zero_income() {
+        let repo = setup_repo().await;
+
+        repo.create_tax_bracket(&CreateTaxBracketRequest {
+            name: "Low".into(),
+            min_income_cents: 0,
+            max_income_cents: Some(100_000_00),
+            rate_percent: 10.0,
+        })
+        .await
+        .unwrap();
+
+        let brackets = repo.list_tax_brackets().await.unwrap();
+        let gross = 0i64;
+        let mut total_tax: i64 = 0;
+        let mut remaining = gross;
+        for bracket in &brackets {
+            if remaining <= 0 {
+                break;
+            }
+            let ceiling = bracket.max_income_cents.unwrap_or(i64::MAX);
+            let taxable = std::cmp::min(remaining, ceiling - bracket.min_income_cents);
+            if taxable > 0 {
+                total_tax += (taxable as f64 * bracket.rate_percent / 100.0).round() as i64;
+            }
+            remaining -= taxable;
+        }
+        assert_eq!(total_tax, 0);
+    }
+
+    #[tokio::test]
+    async fn test_progressive_tax_single_bracket() {
+        let repo = setup_repo().await;
+
+        // Single bracket: 22% on all income
+        repo.create_tax_bracket(&CreateTaxBracketRequest {
+            name: "Flat".into(),
+            min_income_cents: 0,
+            max_income_cents: None,
+            rate_percent: 22.0,
+        })
+        .await
+        .unwrap();
+
+        let brackets = repo.list_tax_brackets().await.unwrap();
+        assert_eq!(brackets.len(), 1);
+
+        let gross = 60_000_00i64;
+        let mut total_tax: i64 = 0;
+        let mut remaining = gross;
+        for bracket in &brackets {
+            if remaining <= 0 {
+                break;
+            }
+            let ceiling = bracket.max_income_cents.unwrap_or(i64::MAX);
+            let taxable = std::cmp::min(remaining, ceiling - bracket.min_income_cents);
+            if taxable > 0 {
+                total_tax += (taxable as f64 * bracket.rate_percent / 100.0).round() as i64;
+            }
+            remaining -= taxable;
+        }
+        assert_eq!(total_tax, 13_200_00); // 22% of 60k
     }
 }

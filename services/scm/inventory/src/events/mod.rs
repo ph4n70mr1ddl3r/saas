@@ -1,6 +1,9 @@
 use crate::service::InventoryService;
 use saas_nats_bus::NatsBus;
-use saas_proto::events::{PurchaseOrderReceived, SalesOrderConfirmed};
+use saas_proto::events::{
+    OrderFulfilled, OrderFulfilledLine, PurchaseOrderReceived, ReturnCreated,
+    SalesOrderConfirmed, WorkOrderCompleted,
+};
 
 pub async fn register(bus: &NatsBus, service: InventoryService) -> anyhow::Result<()> {
     let svc = service.clone();
@@ -46,6 +49,66 @@ pub async fn register(bus: &NatsBus, service: InventoryService) -> anyhow::Resul
             }
         }
     }).await?;
+
+    // Order fulfilled -> deduct stock from inventory
+    let svc = service.clone();
+    bus.subscribe::<OrderFulfilled, _, _>("scm.orders.order.fulfilled", move |envelope| {
+        let svc = svc.clone();
+        async move {
+            for line in &envelope.payload.lines {
+                tracing::info!(
+                    "Processing order fulfilled: order_id={}, item={}, warehouse={}, qty={}",
+                    envelope.payload.order_id, line.item_id, line.warehouse_id, line.quantity
+                );
+                if let Err(e) = svc.handle_order_fulfilled(
+                    &envelope.payload.order_id,
+                    &line.item_id,
+                    &line.warehouse_id,
+                    line.quantity,
+                ).await {
+                    tracing::error!("Failed to handle order fulfilled for item {}: {}", line.item_id, e);
+                }
+            }
+        }
+    }).await.ok();
+
+    // Work order completed -> add finished goods to inventory
+    let svc = service.clone();
+    bus.subscribe::<WorkOrderCompleted, _, _>("scm.manufacturing.work_order.completed", move |envelope| {
+        let svc = svc.clone();
+        async move {
+            tracing::info!(
+                "Processing work order completed: wo_id={}, item={}, qty={}",
+                envelope.payload.work_order_id, envelope.payload.item_id, envelope.payload.quantity
+            );
+            if let Err(e) = svc.handle_work_order_completed(
+                &envelope.payload.work_order_id,
+                &envelope.payload.item_id,
+                envelope.payload.quantity,
+            ).await {
+                tracing::error!("Failed to handle work order completed: {}", e);
+            }
+        }
+    }).await.ok();
+
+    // Return created -> restock items in inventory
+    let svc = service.clone();
+    bus.subscribe::<ReturnCreated, _, _>("scm.orders.return.created", move |envelope| {
+        let svc = svc.clone();
+        async move {
+            tracing::info!(
+                "Processing return: return_id={}, order_id={}, item={}, qty={}",
+                envelope.payload.return_id, envelope.payload.order_id, envelope.payload.item_id, envelope.payload.quantity
+            );
+            if let Err(e) = svc.handle_return_created(
+                &envelope.payload.return_id,
+                &envelope.payload.item_id,
+                envelope.payload.quantity,
+            ).await {
+                tracing::error!("Failed to handle return created: {}", e);
+            }
+        }
+    }).await.ok();
 
     Ok(())
 }

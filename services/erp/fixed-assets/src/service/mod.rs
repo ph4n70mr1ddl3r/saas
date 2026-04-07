@@ -107,6 +107,55 @@ impl FixedAssetsService {
         self.repo.get_depreciation_schedule(asset_id).await
     }
 
+    // --- Pure Depreciation Calculations ---
+
+    /// Calculate annual depreciation using the declining balance method.
+    ///
+    /// `rate_percent` is the declining balance rate as a percentage of the straight-line
+    /// rate (e.g., 200.0 for double-declining balance).
+    /// Returns the depreciation amount for one year in cents.
+    pub fn calculate_declining_balance(
+        cost_cents: i64,
+        salvage_value_cents: i64,
+        useful_life_years: i32,
+        rate_percent: f64,
+    ) -> i64 {
+        if useful_life_years <= 0 || rate_percent <= 0.0 {
+            return 0;
+        }
+        let straight_line_rate = 1.0 / useful_life_years as f64;
+        let declining_rate = straight_line_rate * (rate_percent / 100.0);
+        let depreciation = (cost_cents as f64 * declining_rate).round() as i64;
+        // Don't depreciate below salvage value
+        let max_depreciation = (cost_cents - salvage_value_cents).max(0);
+        depreciation.min(max_depreciation)
+    }
+
+    /// Calculate annual depreciation using the sum-of-years-digits method.
+    ///
+    /// `current_year` is 1-based (year 1 is the first year).
+    /// Returns the depreciation amount for the given year in cents.
+    pub fn calculate_sum_of_years_digits(
+        cost_cents: i64,
+        salvage_value_cents: i64,
+        useful_life_years: i32,
+        current_year: i32,
+    ) -> i64 {
+        if useful_life_years <= 0 || current_year < 1 || current_year > useful_life_years {
+            return 0;
+        }
+        let depreciable_amount = (cost_cents - salvage_value_cents).max(0);
+        let sum_of_years = (useful_life_years * (useful_life_years + 1)) / 2;
+        if sum_of_years == 0 {
+            return 0;
+        }
+        let remaining_life = useful_life_years - current_year + 1;
+        let depreciation =
+            (depreciable_amount as f64 * remaining_life as f64 / sum_of_years as f64).round()
+                as i64;
+        depreciation.max(0)
+    }
+
     /// Run depreciation for a given period. Uses a database-level check
     /// inside a transaction to prevent concurrent runs for the same period.
     pub async fn run_depreciation(&self, period: &str) -> AppResult<Vec<DepreciationSchedule>> {
@@ -574,5 +623,84 @@ mod tests {
         // Full schedule should have 3 entries
         let schedule = repo.get_depreciation_schedule(&asset.id).await.unwrap();
         assert_eq!(schedule.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_declining_balance_double_rate() {
+        // Asset: cost=100000, salvage=10000, life=5 years, 200% declining balance
+        // Straight-line rate = 1/5 = 0.2, declining rate = 0.2 * 2.0 = 0.4
+        // Year 1 depreciation = 100000 * 0.4 = 40000
+        let dep = FixedAssetsService::calculate_declining_balance(100_000, 10_000, 5, 200.0);
+        assert_eq!(dep, 40_000);
+    }
+
+    #[tokio::test]
+    async fn test_declining_balance_respects_salvage() {
+        // Asset: cost=20000, salvage=15000, life=5 years, 200% rate
+        // Max depreciable = 20000 - 15000 = 5000
+        // Calculated = 20000 * 0.4 = 8000, clamped to 5000
+        let dep = FixedAssetsService::calculate_declining_balance(20_000, 15_000, 5, 200.0);
+        assert_eq!(dep, 5_000);
+    }
+
+    #[tokio::test]
+    async fn test_declining_balance_zero_life() {
+        let dep = FixedAssetsService::calculate_declining_balance(100_000, 0, 0, 200.0);
+        assert_eq!(dep, 0);
+    }
+
+    #[tokio::test]
+    async fn test_sum_of_years_digits_year_1() {
+        // Asset: cost=100000, salvage=10000, life=5 years
+        // Sum of years = 5+4+3+2+1 = 15
+        // Depreciable amount = 90000
+        // Year 1: 90000 * 5/15 = 30000
+        let dep = FixedAssetsService::calculate_sum_of_years_digits(100_000, 10_000, 5, 1);
+        assert_eq!(dep, 30_000);
+    }
+
+    #[tokio::test]
+    async fn test_sum_of_years_digits_year_2() {
+        // Year 2: 90000 * 4/15 = 24000
+        let dep = FixedAssetsService::calculate_sum_of_years_digits(100_000, 10_000, 5, 2);
+        assert_eq!(dep, 24_000);
+    }
+
+    #[tokio::test]
+    async fn test_sum_of_years_digits_year_3() {
+        // Year 3: 90000 * 3/15 = 18000
+        let dep = FixedAssetsService::calculate_sum_of_years_digits(100_000, 10_000, 5, 3);
+        assert_eq!(dep, 18_000);
+    }
+
+    #[tokio::test]
+    async fn test_sum_of_years_digits_year_4() {
+        // Year 4: 90000 * 2/15 = 12000
+        let dep = FixedAssetsService::calculate_sum_of_years_digits(100_000, 10_000, 5, 4);
+        assert_eq!(dep, 12_000);
+    }
+
+    #[tokio::test]
+    async fn test_sum_of_years_digits_year_5() {
+        // Year 5: 90000 * 1/15 = 6000
+        let dep = FixedAssetsService::calculate_sum_of_years_digits(100_000, 10_000, 5, 5);
+        assert_eq!(dep, 6_000);
+    }
+
+    #[tokio::test]
+    async fn test_sum_of_years_digits_all_years_sum_to_depreciable() {
+        // Verify all years sum to the total depreciable amount
+        let total: i64 = (1..=5)
+            .map(|y| {
+                FixedAssetsService::calculate_sum_of_years_digits(100_000, 10_000, 5, y)
+            })
+            .sum();
+        assert_eq!(total, 90_000); // cost - salvage
+    }
+
+    #[tokio::test]
+    async fn test_sum_of_years_digits_invalid_year() {
+        let dep = FixedAssetsService::calculate_sum_of_years_digits(100_000, 10_000, 5, 6);
+        assert_eq!(dep, 0);
     }
 }

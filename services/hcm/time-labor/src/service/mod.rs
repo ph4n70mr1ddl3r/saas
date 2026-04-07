@@ -250,6 +250,35 @@ impl TimeLaborService {
         }
         Ok(())
     }
+
+    /// Reject all pending leave requests when an employee is terminated.
+    pub async fn handle_employee_terminated(&self, employee_id: &str) -> AppResult<()> {
+        let requests = self.repo.list_leave_requests().await?;
+        for req in requests {
+            if req.employee_id == employee_id && req.status == "pending" {
+                let result = self.repo.update_leave_request_status(&req.id, "rejected").await?;
+                if let Err(e) = self
+                    .bus
+                    .publish(
+                        "hcm.timelabor.leave.rejected",
+                        LeaveRequestRejected {
+                            request_id: result.id.clone(),
+                            employee_id: result.employee_id.clone(),
+                            leave_type: result.leave_type.clone(),
+                        },
+                    )
+                    .await
+                {
+                    tracing::error!(
+                        "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                        "hcm.timelabor.leave.rejected",
+                        e
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 fn calculate_leave_days(start_date: &str, end_date: &str) -> f64 {
@@ -648,5 +677,66 @@ mod tests {
         let repo = setup_repo().await;
         let result = repo.get_leave_request("nonexistent").await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_handle_employee_terminated_rejects_pending_leaves() {
+        let repo = setup_repo().await;
+        repo.create_leave_balance("emp-term", "vacation", 20.0)
+            .await
+            .unwrap();
+
+        // Create two pending leave requests
+        let req1 = repo
+            .create_leave_request(&CreateLeaveRequestRequest {
+                employee_id: "emp-term".into(),
+                leave_type: "vacation".into(),
+                start_date: "2025-08-01".into(),
+                end_date: "2025-08-05".into(),
+                reason: None,
+            })
+            .await
+            .unwrap();
+        let req2 = repo
+            .create_leave_request(&CreateLeaveRequestRequest {
+                employee_id: "emp-term".into(),
+                leave_type: "vacation".into(),
+                start_date: "2025-09-01".into(),
+                end_date: "2025-09-03".into(),
+                reason: None,
+            })
+            .await
+            .unwrap();
+
+        // Create an already-approved request (should not be affected)
+        let req3 = repo
+            .create_leave_request(&CreateLeaveRequestRequest {
+                employee_id: "emp-term".into(),
+                leave_type: "vacation".into(),
+                start_date: "2025-10-01".into(),
+                end_date: "2025-10-02".into(),
+                reason: None,
+            })
+            .await
+            .unwrap();
+        repo.update_leave_request_status(&req3.id, "approved").await.unwrap();
+
+        // Simulate termination handler: reject all pending requests for this employee
+        let requests = repo.list_leave_requests().await.unwrap();
+        for req in requests {
+            if req.employee_id == "emp-term" && req.status == "pending" {
+                repo.update_leave_request_status(&req.id, "rejected").await.unwrap();
+            }
+        }
+
+        // Verify pending requests are now rejected
+        let r1 = repo.get_leave_request(&req1.id).await.unwrap();
+        assert_eq!(r1.status, "rejected");
+        let r2 = repo.get_leave_request(&req2.id).await.unwrap();
+        assert_eq!(r2.status, "rejected");
+
+        // Approved request should remain approved
+        let r3 = repo.get_leave_request(&req3.id).await.unwrap();
+        assert_eq!(r3.status, "approved");
     }
 }

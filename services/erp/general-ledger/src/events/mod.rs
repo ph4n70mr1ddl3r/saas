@@ -1,7 +1,12 @@
 use crate::service::LedgerService;
 use saas_common::error::AppResult;
 use saas_nats_bus::NatsBus;
-use saas_proto::events::{ExpenseReportApproved, PayRunCompleted, VendorInvoiceApproved, CustomerInvoiceCreated, DepreciationRunCompleted};
+use saas_proto::events::{
+    ApPaymentCreated, ArReceiptCreated, AssetCreated, AssetDisposed,
+    DepreciationRunCompleted, ExpenseReportApproved, PayRunCompleted,
+    ReconciliationCompleted, TransferCompleted, VendorInvoiceApproved,
+    CustomerInvoiceCreated,
+};
 
 pub async fn register(bus: &NatsBus, service: &LedgerService) -> AppResult<()> {
     // AP Invoice Approved -> auto-create journal entry
@@ -76,6 +81,92 @@ pub async fn register(bus: &NatsBus, service: &LedgerService) -> AppResult<()> {
             );
             if let Err(e) = svc.handle_depreciation_completed(&period, total_depreciation_cents, asset_count).await {
                 tracing::error!("Failed to create auto-JE for depreciation {}: {}", period, e);
+            }
+        }
+    }).await.ok();
+
+    // AP Payment Created -> auto-create journal entry (clear AP liability)
+    let svc = service.clone();
+    bus.subscribe::<ApPaymentCreated, _, _>("erp.ap.payment.created", move |envelope| {
+        let svc = svc.clone();
+        let payment_id = envelope.payload.payment_id.clone();
+        let amount_cents = envelope.payload.amount_cents;
+        async move {
+            tracing::info!("AP payment created: {} ({} cents)", payment_id, amount_cents);
+            if let Err(e) = svc.handle_ap_payment_created(&payment_id, amount_cents).await {
+                tracing::error!("Failed to create auto-JE for AP payment {}: {}", payment_id, e);
+            }
+        }
+    }).await.ok();
+
+    // AR Receipt Created -> auto-create journal entry (clear AR receivable)
+    let svc = service.clone();
+    bus.subscribe::<ArReceiptCreated, _, _>("erp.ar.receipt.created", move |envelope| {
+        let svc = svc.clone();
+        let receipt_id = envelope.payload.receipt_id.clone();
+        let amount_cents = envelope.payload.amount_cents;
+        async move {
+            tracing::info!("AR receipt created: {} ({} cents)", receipt_id, amount_cents);
+            if let Err(e) = svc.handle_ar_receipt_created(&receipt_id, amount_cents).await {
+                tracing::error!("Failed to create auto-JE for AR receipt {}: {}", receipt_id, e);
+            }
+        }
+    }).await.ok();
+
+    // Asset Created -> auto-create journal entry (capitalize fixed asset)
+    let svc = service.clone();
+    bus.subscribe::<AssetCreated, _, _>("erp.assets.asset.created", move |envelope| {
+        let svc = svc.clone();
+        let asset_id = envelope.payload.asset_id.clone();
+        let name = envelope.payload.name.clone();
+        let cost_cents = envelope.payload.purchase_cost_cents;
+        async move {
+            tracing::info!("Asset created: {} ({} cents)", name, cost_cents);
+            if let Err(e) = svc.handle_asset_created(&asset_id, &name, cost_cents).await {
+                tracing::error!("Failed to create auto-JE for asset {}: {}", asset_id, e);
+            }
+        }
+    }).await.ok();
+
+    // Asset Disposed -> auto-create journal entry
+    let svc = service.clone();
+    bus.subscribe::<AssetDisposed, _, _>("erp.assets.asset.disposed", move |envelope| {
+        let svc = svc.clone();
+        let asset_id = envelope.payload.asset_id.clone();
+        let name = envelope.payload.name.clone();
+        async move {
+            tracing::info!("Asset disposed: {} ({})", name, asset_id);
+            if let Err(e) = svc.handle_asset_disposed(&asset_id, &name).await {
+                tracing::error!("Failed to create auto-JE for asset disposal {}: {}", asset_id, e);
+            }
+        }
+    }).await.ok();
+
+    // Cash Transfer Completed -> auto-create journal entry
+    let svc = service.clone();
+    bus.subscribe::<TransferCompleted, _, _>("erp.cash.transfer.completed", move |envelope| {
+        let svc = svc.clone();
+        let from_account = envelope.payload.from_account_id.clone();
+        let to_account = envelope.payload.to_account_id.clone();
+        let amount_cents = envelope.payload.amount_cents;
+        async move {
+            tracing::info!("Cash transfer: {} -> {} ({} cents)", from_account, to_account, amount_cents);
+            if let Err(e) = svc.handle_transfer_completed(&from_account, &to_account, amount_cents).await {
+                tracing::error!("Failed to create auto-JE for cash transfer: {}", e);
+            }
+        }
+    }).await.ok();
+
+    // Reconciliation Completed -> auto-create adjustment journal entry
+    let svc = service.clone();
+    bus.subscribe::<ReconciliationCompleted, _, _>("erp.cash.reconciliation.completed", move |envelope| {
+        let svc = svc.clone();
+        let recon_id = envelope.payload.reconciliation_id.clone();
+        let difference_cents = envelope.payload.difference_cents;
+        async move {
+            tracing::info!("Reconciliation completed: {} (difference: {} cents)", recon_id, difference_cents);
+            if let Err(e) = svc.handle_reconciliation_completed(&recon_id, difference_cents).await {
+                tracing::error!("Failed to create auto-JE for reconciliation {}: {}", recon_id, e);
             }
         }
     }).await.ok();

@@ -1,7 +1,9 @@
 use crate::models::department::*;
 use crate::models::employee::*;
+use crate::models::employment_history::*;
 use crate::repository::department_repo::DepartmentRepo;
 use crate::repository::employee_repo::EmployeeRepo;
+use crate::repository::employment_history_repo::EmploymentHistoryRepo;
 use saas_common::error::AppResult;
 use saas_common::pagination::PaginationParams;
 use saas_common::response::ApiListResponse;
@@ -14,6 +16,7 @@ use validator::Validate;
 pub struct EmployeeService {
     emp_repo: EmployeeRepo,
     dept_repo: DepartmentRepo,
+    history_repo: EmploymentHistoryRepo,
     bus: NatsBus,
 }
 
@@ -21,7 +24,8 @@ impl EmployeeService {
     pub fn new(pool: SqlitePool, bus: NatsBus) -> Self {
         Self {
             emp_repo: EmployeeRepo::new(pool.clone()),
-            dept_repo: DepartmentRepo::new(pool),
+            dept_repo: DepartmentRepo::new(pool.clone()),
+            history_repo: EmploymentHistoryRepo::new(pool),
             bus,
         }
     }
@@ -87,6 +91,34 @@ impl EmployeeService {
         if input.reports_to.is_some() { changes.push("reports_to".into()); }
         if input.job_title.is_some() { changes.push("job_title".into()); }
         if input.status.is_some() { changes.push("status".into()); }
+
+        // Record employment history for job-relevant fields
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let existing = self.emp_repo.get_by_id(id).await.ok();
+        let track_fields: Vec<(&str, Option<&str>)> = vec![
+            ("job_title", input.job_title.as_deref()),
+            ("department_id", input.department_id.as_deref()),
+            ("reports_to", input.reports_to.as_deref()),
+            ("status", input.status.as_deref()),
+        ];
+        for (field_name, new_val) in &track_fields {
+            if let Some(nv) = new_val {
+                let old_val = existing.as_ref().map(|e| match *field_name {
+                    "job_title" => e.job_title.clone(),
+                    "department_id" => e.department_id.clone(),
+                    "reports_to" => e.reports_to.clone().unwrap_or_default(),
+                    "status" => e.status.clone(),
+                    _ => String::new(),
+                });
+                let _ = self.history_repo.create(&CreateEmploymentHistoryRequest {
+                    employee_id: id.to_string(),
+                    field_name: field_name.to_string(),
+                    old_value: old_val,
+                    new_value: Some(nv.to_string()),
+                    effective_date: today.clone(),
+                }).await;
+            }
+        }
 
         let emp = self
             .emp_repo
@@ -183,6 +215,10 @@ impl EmployeeService {
 
     pub async fn get_org_chart(&self) -> AppResult<Vec<OrgChartNode>> {
         self.emp_repo.get_org_chart().await
+    }
+
+    pub async fn list_employment_history(&self, employee_id: &str) -> AppResult<Vec<EmploymentHistory>> {
+        self.history_repo.list_by_employee(employee_id).await
     }
 
     /// Handle hiring event from recruiting service — auto-create an employee record.

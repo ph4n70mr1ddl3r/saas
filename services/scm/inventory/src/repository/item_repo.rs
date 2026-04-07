@@ -14,7 +14,7 @@ impl ItemRepo {
 
     pub async fn list(&self, filters: &ItemFilters) -> AppResult<Vec<ItemResponse>> {
         let rows = sqlx::query_as::<_, ItemResponse>(
-            "SELECT id, sku, name, description, unit_of_measure, item_type, is_active, created_at FROM items WHERE (? IS NULL OR item_type = ?) AND (? IS NULL OR is_active = ?) ORDER BY name"
+            "SELECT id, sku, name, description, unit_of_measure, item_type, is_active, reorder_point, safety_stock, economic_order_qty, created_at FROM items WHERE (? IS NULL OR item_type = ?) AND (? IS NULL OR is_active = ?) ORDER BY name"
         )
         .bind(&filters.item_type).bind(&filters.item_type)
         .bind(filters.is_active).bind(filters.is_active)
@@ -24,7 +24,7 @@ impl ItemRepo {
 
     pub async fn get_by_id(&self, id: &str) -> AppResult<ItemResponse> {
         sqlx::query_as::<_, ItemResponse>(
-            "SELECT id, sku, name, description, unit_of_measure, item_type, is_active, created_at FROM items WHERE id = ?"
+            "SELECT id, sku, name, description, unit_of_measure, item_type, is_active, reorder_point, safety_stock, economic_order_qty, created_at FROM items WHERE id = ?"
         )
             .bind(id)
             .fetch_optional(&self.pool).await?
@@ -35,10 +35,11 @@ impl ItemRepo {
         let id = uuid::Uuid::new_v4().to_string();
         let uom = input.unit_of_measure.as_deref().unwrap_or("EA");
         sqlx::query(
-            "INSERT INTO items (id, sku, name, description, unit_of_measure, item_type) VALUES (?, ?, ?, ?, ?, ?)"
+            "INSERT INTO items (id, sku, name, description, unit_of_measure, item_type, reorder_point, safety_stock, economic_order_qty) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(&id).bind(&input.sku).bind(&input.name)
         .bind(&input.description).bind(uom).bind(&input.item_type)
+        .bind(input.reorder_point).bind(input.safety_stock).bind(input.economic_order_qty)
         .execute(&self.pool).await?;
         self.get_by_id(&id).await
     }
@@ -64,5 +65,13 @@ impl ItemRepo {
         .bind(id)
         .execute(&self.pool).await?;
         self.get_by_id(id).await
+    }
+
+    pub async fn list_items_below_reorder_point(&self) -> AppResult<Vec<ItemResponse>> {
+        let rows = sqlx::query_as::<_, ItemResponse>(
+            "SELECT i.id, i.sku, i.name, i.description, i.unit_of_measure, i.item_type, i.is_active, i.reorder_point, i.safety_stock, i.economic_order_qty, i.created_at FROM items i INNER JOIN stock_levels sl ON i.id = sl.item_id WHERE i.reorder_point > 0 AND sl.quantity_on_hand <= i.reorder_point ORDER BY i.name"
+        )
+        .fetch_all(&self.pool).await?;
+        Ok(rows)
     }
 }

@@ -22,7 +22,7 @@ pub struct CreateCompensationRequest {
     pub end_date: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 pub struct UpdateCompensationRequest {
     pub salary_type: Option<String>,
     pub amount_cents: Option<i64>,
@@ -80,4 +80,22 @@ pub struct CreateDeductionRequest {
     pub recurring: Option<bool>,
     pub start_date: String,
     pub end_date: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct TaxBracket {
+    pub id: String,
+    pub name: String,
+    pub min_income_cents: i64,
+    pub max_income_cents: Option<i64>,
+    pub rate_percent: f64,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateTaxBracketRequest {
+    pub name: String,
+    pub min_income_cents: i64,
+    pub max_income_cents: Option<i64>,
+    pub rate_percent: f64,
 }
