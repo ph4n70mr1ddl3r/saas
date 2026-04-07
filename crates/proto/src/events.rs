@@ -417,6 +417,30 @@ pub struct ReturnCreated {
     pub quantity: i64,
 }
 
+// IAM Role Events
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoleDeleted {
+    pub role_id: String,
+    pub name: String,
+}
+
+// SCM Order Management Events
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SalesOrderCancelled {
+    pub order_id: String,
+    pub order_number: String,
+    pub customer_id: String,
+    pub reason: Option<String>,
+}
+
+// SCM Procurement Events
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PurchaseOrderCancelled {
+    pub po_id: String,
+    pub supplier_id: String,
+    pub reason: Option<String>,
+}
+
 // ERP Payment Events
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApPaymentCreated {

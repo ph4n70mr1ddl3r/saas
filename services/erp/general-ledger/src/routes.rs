@@ -42,7 +42,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(
             "/api/v1/journal-entries/{id}",
-            get(handlers::get_journal_entry),
+            get(handlers::get_journal_entry).delete(handlers::delete_journal_entry),
         )
         .route(
             "/api/v1/journal-entries/{id}/post",

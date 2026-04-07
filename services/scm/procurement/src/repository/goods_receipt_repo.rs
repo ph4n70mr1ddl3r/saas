@@ -34,6 +34,16 @@ impl GoodsReceiptRepo {
         Ok(row)
     }
 
+    pub async fn get_by_id(&self, id: &str) -> AppResult<GoodsReceiptResponse> {
+        sqlx::query_as::<_, GoodsReceiptResponse>(
+            "SELECT id, po_id, po_line_id, quantity_received, received_date, created_at FROM goods_receipts WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| saas_common::error::AppError::NotFound(format!("Goods receipt {} not found", id)))
+    }
+
     pub async fn list_by_po(&self, po_id: &str) -> AppResult<Vec<GoodsReceiptResponse>> {
         let rows = sqlx::query_as::<_, GoodsReceiptResponse>(
             "SELECT id, po_id, po_line_id, quantity_received, received_date, created_at FROM goods_receipts WHERE po_id = ? ORDER BY created_at DESC",

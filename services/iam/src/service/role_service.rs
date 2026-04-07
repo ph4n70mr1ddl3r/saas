@@ -2,7 +2,7 @@ use crate::models::role::{CreateRole, PermissionResponse, RoleResponse, UpdateRo
 use crate::repository::role_repo::RoleRepo;
 use saas_common::error::{AppError, AppResult};
 use saas_nats_bus::NatsBus;
-use saas_proto::events::{RoleCreated, RoleUpdated, RolePermissionsChanged};
+use saas_proto::events::{RoleCreated, RoleUpdated, RolePermissionsChanged, RoleDeleted};
 use sqlx::SqlitePool;
 use validator::Validate;
 
@@ -122,8 +122,26 @@ impl RoleService {
 
     pub async fn delete(&self, id: &str) -> AppResult<()> {
         // Verify role exists
-        self.repo.get_role(id).await?;
-        self.repo.delete_role(id).await
+        let role = self.repo.get_role(id).await?;
+        self.repo.delete_role(id).await?;
+        if let Err(e) = self
+            .bus
+            .publish(
+                "iam.role.deleted",
+                RoleDeleted {
+                    role_id: role.id.clone(),
+                    name: role.name.clone(),
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "iam.role.deleted",
+                e
+            );
+        }
+        Ok(())
     }
 }
 mod tests {
@@ -341,6 +359,28 @@ mod tests {
         let pool = setup().await;
         let repo = RoleRepo::new(pool);
         let result = repo.delete_role("nonexistent").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_role_delete_publishes_event() {
+        let pool = setup().await;
+        let svc = RoleService {
+            repo: RoleRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let role = svc.create(CreateRole {
+            name: "delete_event_role".into(),
+            description: Some("Testing delete event".into()),
+        }).await.unwrap();
+        assert_eq!(role.name, "delete_event_role");
+
+        svc.delete(&role.id).await.unwrap();
+
+        let result = svc.get(&role.id).await;
         assert!(result.is_err());
     }
 }

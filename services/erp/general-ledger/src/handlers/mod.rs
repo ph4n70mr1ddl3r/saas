@@ -127,6 +127,16 @@ pub async fn reverse_journal_entry(
     Ok(Json(ApiResponse::new(entry)))
 }
 
+pub async fn delete_journal_entry(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    rbac::require_admin(&user.roles, "erp").map_err(|e| AppError::Forbidden(e))?;
+    state.service.delete_journal_entry(&id).await?;
+    Ok(Json(ApiResponse::new(())))
+}
+
 pub async fn trial_balance(
     user: AuthUser,
     State(state): State<AppState>,

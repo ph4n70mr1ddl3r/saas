@@ -55,7 +55,27 @@ impl OrderManagementService {
             ));
         }
         self.order_repo.update_status(id, "cancelled").await?;
-        self.order_repo.get_by_id(id).await
+        let order = self.order_repo.get_by_id(id).await?;
+        if let Err(e) = self
+            .bus
+            .publish(
+                "scm.orders.order.cancelled",
+                saas_proto::events::SalesOrderCancelled {
+                    order_id: order.id.clone(),
+                    order_number: order.order_number.clone(),
+                    customer_id: order.customer_id.clone(),
+                    reason: None,
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "scm.orders.order.cancelled",
+                e
+            );
+        }
+        Ok(order)
     }
 
     pub async fn confirm_sales_order(&self, id: &str) -> AppResult<SalesOrderDetailResponse> {
@@ -157,7 +177,18 @@ impl OrderManagementService {
                 unit_price_cents: order_line.unit_price_cents,
             });
         }
-        self.order_repo.update_status(id, "picking").await?;
+        // Determine if all order lines are fully fulfilled
+        let all_fulfillments = self.fulfillment_repo.list_by_order(id).await?;
+        let all_fulfilled = order_lines.iter().all(|ol| {
+            let fulfilled_qty: i64 = all_fulfillments
+                .iter()
+                .filter(|f| f.order_line_id == ol.id)
+                .map(|f| f.quantity)
+                .sum();
+            fulfilled_qty >= ol.quantity
+        });
+        let new_status = if all_fulfilled { "fulfilled" } else { "picking" };
+        self.order_repo.update_status(id, new_status).await?;
         if let Err(e) = self
             .bus
             .publish(
@@ -202,6 +233,19 @@ impl OrderManagementService {
         input
             .validate()
             .map_err(|e| saas_common::error::AppError::Validation(e.to_string()))?;
+
+        // Validate return quantity doesn't exceed ordered quantity
+        let order_lines = self.order_repo.get_lines(&input.order_id).await?;
+        let order_line = order_lines.iter().find(|ol| ol.id == input.order_line_id);
+        if let Some(ol) = order_line {
+            if input.quantity > ol.quantity {
+                return Err(saas_common::error::AppError::Validation(format!(
+                    "Return quantity ({}) exceeds ordered quantity ({})",
+                    input.quantity, ol.quantity
+                )));
+            }
+        }
+
         let ret = self.return_repo.create(&input).await?;
         if let Err(e) = self
             .bus
@@ -278,12 +322,14 @@ mod tests {
             include_str!("../../migrations/002_create_order_lines.sql"),
             include_str!("../../migrations/003_create_fulfillments.sql"),
             include_str!("../../migrations/004_create_returns.sql"),
+            include_str!("../../migrations/005_add_fulfilled_status.sql"),
         ];
         let migration_names = [
             "001_create_sales_orders.sql",
             "002_create_order_lines.sql",
             "003_create_fulfillments.sql",
             "004_create_returns.sql",
+            "005_add_fulfilled_status.sql",
         ];
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS _migrations (filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)",
@@ -808,6 +854,143 @@ mod tests {
 
         // Negative refund should fail
         let result = svc.process_return(&ret.id, -500).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_fulfill_order_sets_fulfilled_when_all_lines_complete() {
+        let pool = setup().await;
+        let svc = OrderManagementService {
+            order_repo: SalesOrderRepo::new(pool.clone()),
+            fulfillment_repo: FulfillmentRepo::new(pool.clone()),
+            return_repo: ReturnRepo::new(pool.clone()),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let order = svc.order_repo.create(&CreateSalesOrder {
+            customer_id: "CUST-FULFILL".into(),
+            order_date: "2025-07-01".into(),
+            shipping_address: None,
+            notes: None,
+            lines: vec![CreateSalesOrderLine {
+                item_id: "ITEM-FULL".into(),
+                quantity: 5,
+                unit_price_cents: 1000,
+            }],
+        }).await.unwrap();
+        svc.confirm_sales_order(&order.id).await.unwrap();
+
+        // Fulfill all 5 units
+        let lines = svc.order_repo.get_lines(&order.id).await.unwrap();
+        let detail = svc.fulfill_sales_order(&order.id, FulfillRequest {
+            lines: vec![FulfillLine {
+                order_line_id: lines[0].id.clone(),
+                quantity: 5,
+                warehouse_id: "WH-1".into(),
+            }],
+        }).await.unwrap();
+        assert_eq!(detail.order.status, "fulfilled");
+    }
+
+    #[tokio::test]
+    async fn test_fulfill_order_sets_picking_when_partial() {
+        let pool = setup().await;
+        let svc = OrderManagementService {
+            order_repo: SalesOrderRepo::new(pool.clone()),
+            fulfillment_repo: FulfillmentRepo::new(pool.clone()),
+            return_repo: ReturnRepo::new(pool.clone()),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let order = svc.order_repo.create(&CreateSalesOrder {
+            customer_id: "CUST-PICK".into(),
+            order_date: "2025-07-01".into(),
+            shipping_address: None,
+            notes: None,
+            lines: vec![CreateSalesOrderLine {
+                item_id: "ITEM-PARTIAL".into(),
+                quantity: 10,
+                unit_price_cents: 500,
+            }],
+        }).await.unwrap();
+        svc.confirm_sales_order(&order.id).await.unwrap();
+
+        // Fulfill only 3 out of 10
+        let lines = svc.order_repo.get_lines(&order.id).await.unwrap();
+        let detail = svc.fulfill_sales_order(&order.id, FulfillRequest {
+            lines: vec![FulfillLine {
+                order_line_id: lines[0].id.clone(),
+                quantity: 3,
+                warehouse_id: "WH-1".into(),
+            }],
+        }).await.unwrap();
+        assert_eq!(detail.order.status, "picking");
+    }
+
+    #[tokio::test]
+    async fn test_cancel_sales_order_publishes_event() {
+        let pool = setup().await;
+        let svc = OrderManagementService {
+            order_repo: SalesOrderRepo::new(pool.clone()),
+            fulfillment_repo: FulfillmentRepo::new(pool.clone()),
+            return_repo: ReturnRepo::new(pool.clone()),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let order = svc.order_repo.create(&CreateSalesOrder {
+            customer_id: "CUST-CANCEL-EV".into(),
+            order_date: "2025-08-01".into(),
+            shipping_address: None,
+            notes: None,
+            lines: vec![CreateSalesOrderLine {
+                item_id: "ITEM-CANCEL".into(),
+                quantity: 1,
+                unit_price_cents: 100,
+            }],
+        }).await.unwrap();
+
+        let cancelled = svc.cancel_sales_order(&order.id).await.unwrap();
+        assert_eq!(cancelled.status, "cancelled");
+    }
+
+    #[tokio::test]
+    async fn test_return_quantity_exceeds_ordered() {
+        let pool = setup().await;
+        let svc = OrderManagementService {
+            order_repo: SalesOrderRepo::new(pool.clone()),
+            fulfillment_repo: FulfillmentRepo::new(pool.clone()),
+            return_repo: ReturnRepo::new(pool.clone()),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let order = svc.order_repo.create(&CreateSalesOrder {
+            customer_id: "CUST-RETQTY".into(),
+            order_date: "2025-09-01".into(),
+            shipping_address: None,
+            notes: None,
+            lines: vec![CreateSalesOrderLine {
+                item_id: "ITEM-RETQTY".into(),
+                quantity: 3,
+                unit_price_cents: 100,
+            }],
+        }).await.unwrap();
+        let lines = svc.order_repo.get_lines(&order.id).await.unwrap();
+
+        // Return 5 when only 3 ordered
+        let result = svc.create_return(CreateReturn {
+            order_id: order.id,
+            order_line_id: lines[0].id.clone(),
+            quantity: 5,
+            reason: None,
+        }).await;
         assert!(result.is_err());
     }
 }

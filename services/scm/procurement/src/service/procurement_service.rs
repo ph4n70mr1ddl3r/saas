@@ -111,7 +111,26 @@ impl ProcurementService {
             ));
         }
         self.po_repo.update_status(id, "cancelled").await?;
-        self.po_repo.get_by_id(id).await
+        let po = self.po_repo.get_by_id(id).await?;
+        if let Err(e) = self
+            .bus
+            .publish(
+                "scm.procurement.po.cancelled",
+                saas_proto::events::PurchaseOrderCancelled {
+                    po_id: po.id.clone(),
+                    supplier_id: po.supplier_id.clone(),
+                    reason: None,
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "scm.procurement.po.cancelled",
+                e
+            );
+        }
+        Ok(po)
     }
 
     pub async fn receive_purchase_order(
@@ -120,9 +139,9 @@ impl ProcurementService {
         input: ReceivePurchaseOrder,
     ) -> AppResult<PurchaseOrderDetailResponse> {
         let po = self.po_repo.get_by_id(id).await?;
-        if po.status != "approved" {
+        if po.status != "approved" && po.status != "partially_received" {
             return Err(AppError::Validation(
-                "Only approved orders can be received".into(),
+                "Only approved or partially received orders can be received".into(),
             ));
         }
         let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
@@ -174,9 +193,21 @@ impl ProcurementService {
             }
         }
 
+        // Determine if all PO lines are fully received
+        let updated_lines = sqlx::query_as::<_, (String, i64, i64)>(
+            "SELECT id, quantity, quantity_received FROM po_lines WHERE po_id = ?",
+        )
+        .bind(id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let all_received = updated_lines
+            .iter()
+            .all(|(_, qty, qty_received)| qty_received >= qty);
+        let po_status = if all_received { "received" } else { "partially_received" };
+
         // Update PO status
         sqlx::query("UPDATE purchase_orders SET status = ? WHERE id = ?")
-            .bind("received")
+            .bind(po_status)
             .bind(id)
             .execute(&mut *tx)
             .await?;
@@ -207,6 +238,10 @@ impl ProcurementService {
     // Goods Receipts
     pub async fn list_goods_receipts(&self) -> AppResult<Vec<crate::models::goods_receipt::GoodsReceiptResponse>> {
         self.goods_receipt_repo.list_all().await
+    }
+
+    pub async fn get_goods_receipt(&self, id: &str) -> AppResult<crate::models::goods_receipt::GoodsReceiptResponse> {
+        self.goods_receipt_repo.get_by_id(id).await
     }
 
     pub async fn list_goods_receipts_by_po(&self, po_id: &str) -> AppResult<Vec<crate::models::goods_receipt::GoodsReceiptResponse>> {
@@ -262,12 +297,14 @@ mod tests {
             include_str!("../../migrations/002_create_purchase_orders.sql"),
             include_str!("../../migrations/003_create_po_lines.sql"),
             include_str!("../../migrations/004_create_goods_receipts.sql"),
+            include_str!("../../migrations/005_add_partial_received_status.sql"),
         ];
         let migration_names = [
             "001_create_suppliers.sql",
             "002_create_purchase_orders.sql",
             "003_create_po_lines.sql",
             "004_create_goods_receipts.sql",
+            "005_add_partial_received_status.sql",
         ];
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS _migrations (filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)",
@@ -699,5 +736,162 @@ mod tests {
 
         let suppliers = svc.supplier_repo.list().await.unwrap();
         assert_eq!(suppliers.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_po_partial_receipt_status() {
+        let pool = setup().await;
+        let svc = ProcurementService {
+            pool: pool.clone(),
+            supplier_repo: SupplierRepo::new(pool.clone()),
+            po_repo: PurchaseOrderRepo::new(pool.clone()),
+            goods_receipt_repo: GoodsReceiptRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let supplier = svc.create_supplier(CreateSupplier {
+            name: "Partial Receipt Supplier".into(),
+            email: None,
+            phone: None,
+            address: None,
+        }).await.unwrap();
+
+        let po = svc.create_purchase_order(CreatePurchaseOrder {
+            supplier_id: supplier.id.clone(),
+            order_date: "2025-01-01".into(),
+            lines: vec![
+                CreatePurchaseOrderLine {
+                    item_id: "ITEM-PR-1".into(),
+                    quantity: 10,
+                    unit_price_cents: 1000,
+                },
+                CreatePurchaseOrderLine {
+                    item_id: "ITEM-PR-2".into(),
+                    quantity: 5,
+                    unit_price_cents: 2000,
+                },
+            ],
+        }).await.unwrap();
+
+        svc.submit_purchase_order(&po.id).await.unwrap();
+        svc.approve_purchase_order(&po.id).await.unwrap();
+
+        let po_lines = svc.po_repo.get_lines(&po.id).await.unwrap();
+
+        // Receive only partial quantity for first line
+        let detail = svc.receive_purchase_order(&po.id, ReceivePurchaseOrder {
+            lines: vec![ReceiveLine {
+                po_line_id: po_lines[0].id.clone(),
+                quantity_received: 3,
+                warehouse_id: "WH-1".into(),
+            }],
+        }).await.unwrap();
+        assert_eq!(detail.order.status, "partially_received");
+
+        // Receive remaining for first line + all of second line
+        let po_lines = svc.po_repo.get_lines(&po.id).await.unwrap();
+        let detail = svc.receive_purchase_order(&po.id, ReceivePurchaseOrder {
+            lines: vec![
+                ReceiveLine {
+                    po_line_id: po_lines[0].id.clone(),
+                    quantity_received: 7,
+                    warehouse_id: "WH-1".into(),
+                },
+                ReceiveLine {
+                    po_line_id: po_lines[1].id.clone(),
+                    quantity_received: 5,
+                    warehouse_id: "WH-1".into(),
+                },
+            ],
+        }).await.unwrap();
+        assert_eq!(detail.order.status, "received");
+    }
+
+    #[tokio::test]
+    async fn test_get_goods_receipt_by_id() {
+        let pool = setup().await;
+        let svc = ProcurementService {
+            pool: pool.clone(),
+            supplier_repo: SupplierRepo::new(pool.clone()),
+            po_repo: PurchaseOrderRepo::new(pool.clone()),
+            goods_receipt_repo: GoodsReceiptRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let supplier = svc.create_supplier(CreateSupplier {
+            name: "GR Get Supplier".into(),
+            email: None,
+            phone: None,
+            address: None,
+        }).await.unwrap();
+
+        let po = svc.create_purchase_order(CreatePurchaseOrder {
+            supplier_id: supplier.id,
+            order_date: "2025-01-01".into(),
+            lines: vec![CreatePurchaseOrderLine {
+                item_id: "ITEM-GR".into(),
+                quantity: 10,
+                unit_price_cents: 500,
+            }],
+        }).await.unwrap();
+        svc.submit_purchase_order(&po.id).await.unwrap();
+        svc.approve_purchase_order(&po.id).await.unwrap();
+
+        let po_lines = svc.po_repo.get_lines(&po.id).await.unwrap();
+        svc.receive_purchase_order(&po.id, ReceivePurchaseOrder {
+            lines: vec![ReceiveLine {
+                po_line_id: po_lines[0].id.clone(),
+                quantity_received: 10,
+                warehouse_id: "WH-1".into(),
+            }],
+        }).await.unwrap();
+
+        let receipts = svc.list_goods_receipts().await.unwrap();
+        assert_eq!(receipts.len(), 1);
+
+        let receipt = svc.get_goods_receipt(&receipts[0].id).await.unwrap();
+        assert_eq!(receipt.quantity_received, 10);
+
+        // Not found
+        let result = svc.get_goods_receipt("nonexistent").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_cancel_po_publishes_event() {
+        let pool = setup().await;
+        let svc = ProcurementService {
+            pool: pool.clone(),
+            supplier_repo: SupplierRepo::new(pool.clone()),
+            po_repo: PurchaseOrderRepo::new(pool.clone()),
+            goods_receipt_repo: GoodsReceiptRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let supplier = svc.create_supplier(CreateSupplier {
+            name: "Cancel PO Supplier".into(),
+            email: None,
+            phone: None,
+            address: None,
+        }).await.unwrap();
+
+        let po = svc.create_purchase_order(CreatePurchaseOrder {
+            supplier_id: supplier.id,
+            order_date: "2025-01-01".into(),
+            lines: vec![CreatePurchaseOrderLine {
+                item_id: "ITEM-CANCEL".into(),
+                quantity: 5,
+                unit_price_cents: 100,
+            }],
+        }).await.unwrap();
+
+        let cancelled = svc.cancel_purchase_order(&po.id).await.unwrap();
+        assert_eq!(cancelled.status, "cancelled");
     }
 }

@@ -106,6 +106,18 @@ impl ArService {
         self.repo.cancel_invoice(id).await
     }
 
+    pub async fn approve_invoice(&self, id: &str) -> AppResult<ArInvoiceWithLines> {
+        let invoice = self.repo.get_invoice(id).await?;
+        if invoice.status != "sent" {
+            return Err(AppError::Validation(
+                "Only sent invoices can be approved".into(),
+            ));
+        }
+        let invoice = self.repo.mark_invoice_approved(&invoice.id).await?;
+        let lines = self.repo.get_invoice_lines(&invoice.id).await?;
+        Ok(ArInvoiceWithLines { invoice, lines })
+    }
+
     // --- Receipts ---
 
     pub async fn list_receipts(&self) -> AppResult<Vec<Receipt>> {
@@ -122,9 +134,9 @@ impl ArService {
 
         // Validate invoice exists and is in sent or partial status
         let invoice = self.repo.get_invoice(&input.invoice_id).await?;
-        if invoice.status != "sent" && invoice.status != "partial" {
+        if invoice.status != "sent" && invoice.status != "partial" && invoice.status != "approved" {
             return Err(AppError::Validation(
-                "Can only receipt against sent or partially paid invoices".into(),
+                "Can only receipt against sent, approved, or partially paid invoices".into(),
             ));
         }
 
@@ -347,6 +359,7 @@ mod tests {
             include_str!("../../migrations/003_create_ar_invoice_lines.sql"),
             include_str!("../../migrations/004_create_receipts.sql"),
             include_str!("../../migrations/005_create_credit_memos.sql"),
+            include_str!("../../migrations/006_add_approved_status.sql"),
         ];
         let migration_names = [
             "001_create_customers.sql",
@@ -354,6 +367,7 @@ mod tests {
             "003_create_ar_invoice_lines.sql",
             "004_create_receipts.sql",
             "005_create_credit_memos.sql",
+            "006_add_approved_status.sql",
         ];
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS _migrations (filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)",
@@ -959,5 +973,83 @@ mod tests {
         repo.mark_invoice_sent(&invoice2.id).await.unwrap();
         let cancelled2 = svc.cancel_invoice(&invoice2.id).await.unwrap();
         assert_eq!(cancelled2.status, "cancelled");
+    }
+
+    #[tokio::test]
+    async fn test_approve_ar_invoice() {
+        let repo = setup_repo().await;
+        let svc = ArService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let customer = create_test_customer(&repo, "Approve Client").await;
+        let invoice = repo
+            .create_invoice(&CreateArInvoiceRequest {
+                customer_id: customer.id.clone(),
+                invoice_number: "AR-APPROVE-001".into(),
+                invoice_date: "2025-01-01".into(),
+                due_date: "2025-02-01".into(),
+                lines: vec![CreateArInvoiceLineRequest {
+                    description: Some("Service".into()),
+                    amount_cents: 10000,
+                }],
+            })
+            .await
+            .unwrap();
+
+        // Approving a draft invoice should fail
+        let result = svc.approve_invoice(&invoice.id).await;
+        assert!(result.is_err());
+
+        // Mark as sent, then approve
+        repo.mark_invoice_sent(&invoice.id).await.unwrap();
+        let approved = svc.approve_invoice(&invoice.id).await.unwrap();
+        assert_eq!(approved.invoice.status, "approved");
+        assert_eq!(approved.lines.len(), 1);
+
+        // Approving again should fail
+        let result = svc.approve_invoice(&invoice.id).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_receipt_against_approved_invoice() {
+        let repo = setup_repo().await;
+        let svc = ArService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let customer = create_test_customer(&repo, "Approved Pay Client").await;
+        let invoice = repo
+            .create_invoice(&CreateArInvoiceRequest {
+                customer_id: customer.id.clone(),
+                invoice_number: "AR-APPROVE-PAY".into(),
+                invoice_date: "2025-01-01".into(),
+                due_date: "2025-02-01".into(),
+                lines: vec![CreateArInvoiceLineRequest {
+                    description: Some("Consulting".into()),
+                    amount_cents: 20000,
+                }],
+            })
+            .await
+            .unwrap();
+        repo.mark_invoice_sent(&invoice.id).await.unwrap();
+        svc.approve_invoice(&invoice.id).await.unwrap();
+
+        // Receipt against approved invoice should work
+        let receipt = svc.create_receipt(&CreateReceiptRequest {
+            invoice_id: invoice.id.clone(),
+            customer_id: customer.id.clone(),
+            amount_cents: 20000,
+            receipt_date: "2025-02-01".into(),
+            method: Some("wire".into()),
+        }).await.unwrap();
+        assert_eq!(receipt.amount_cents, 20000);
     }
 }

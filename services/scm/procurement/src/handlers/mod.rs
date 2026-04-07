@@ -193,6 +193,20 @@ pub async fn list_goods_receipts(
     Ok(axum::Json(saas_common::response::ApiResponse::new(receipts)))
 }
 
+pub async fn get_goods_receipt(
+    _user: saas_auth_core::extractor::AuthUser,
+    axum::extract::State(state): axum::extract::State<crate::routes::AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<
+    axum::Json<
+        saas_common::response::ApiResponse<crate::models::goods_receipt::GoodsReceiptResponse>,
+    >,
+    saas_common::error::AppError,
+> {
+    let receipt = state.service.get_goods_receipt(&id).await?;
+    Ok(axum::Json(saas_common::response::ApiResponse::new(receipt)))
+}
+
 pub async fn list_goods_receipts_by_po(
     _user: saas_auth_core::extractor::AuthUser,
     axum::extract::State(state): axum::extract::State<crate::routes::AppState>,

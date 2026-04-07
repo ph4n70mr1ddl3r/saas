@@ -152,6 +152,14 @@ impl ArRepo {
         self.get_invoice(id).await
     }
 
+    pub async fn mark_invoice_approved(&self, id: &str) -> AppResult<ArInvoice> {
+        sqlx::query("UPDATE ar_invoices SET status = 'approved' WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        self.get_invoice(id).await
+    }
+
     pub async fn mark_invoice_paid(&self, id: &str) -> AppResult<ArInvoice> {
         sqlx::query("UPDATE ar_invoices SET status = 'paid' WHERE id = ?")
             .bind(id)

@@ -49,6 +49,10 @@ pub fn build_router(state: AppState) -> Router {
             get(handlers::list_goods_receipts),
         )
         .route(
+            "/api/v1/goods-receipts/{id}",
+            get(handlers::get_goods_receipt),
+        )
+        .route(
             "/api/v1/goods-receipts/po/{po_id}",
             get(handlers::list_goods_receipts_by_po),
         )

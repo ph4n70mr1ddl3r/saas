@@ -204,6 +204,12 @@ impl InventoryService {
                     .deduct(&input.item_id, &input.to_warehouse_id, input.quantity)
                     .await?;
             }
+            "return" => {
+                // Return: add stock back to the destination warehouse
+                self.stock_level_repo
+                    .upsert_receipt(&input.item_id, &input.to_warehouse_id, input.quantity)
+                    .await?;
+            }
             _ => {}
         }
         Ok(movement)
@@ -693,6 +699,7 @@ mod tests {
             include_str!("../../migrations/007_create_cycle_count_lines.sql"),
             include_str!("../../migrations/008_add_reorder_fields.sql"),
             include_str!("../../migrations/009_add_unit_price.sql"),
+            include_str!("../../migrations/010_add_issue_movement_type.sql"),
         ];
         let migration_names = [
             "001_create_warehouses.sql",
@@ -704,6 +711,7 @@ mod tests {
             "007_create_cycle_count_lines.sql",
             "008_add_reorder_fields.sql",
             "009_add_unit_price.sql",
+            "010_add_issue_movement_type.sql",
         ];
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS _migrations (filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)",
@@ -1833,5 +1841,75 @@ mod tests {
         assert_eq!(below.len(), 1);
         assert_eq!(below[0].sku, "SKU-LOW");
         assert_eq!(below[0].reorder_point, 50);
+    }
+
+    #[tokio::test]
+    async fn test_return_stock_movement_updates_levels() {
+        let pool = setup().await;
+        let svc = InventoryService::new(
+            pool.clone(),
+            saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        );
+        let item_repo = ItemRepo::new(pool.clone());
+        let wh_repo = WarehouseRepo::new(pool.clone());
+        let sl_repo = StockLevelRepo::new(pool.clone());
+
+        let item = item_repo.create(&CreateItem {
+            name: "Return Test Item".into(),
+            sku: "SKU-RET".into(),
+            description: None,
+            unit_of_measure: None,
+            item_type: "finished".into(),
+            reorder_point: 0,
+            safety_stock: 0,
+            economic_order_qty: 0,
+            unit_price_cents: None,
+        }).await.unwrap();
+
+        let wh = wh_repo.create(&CreateWarehouse {
+            name: "Return WH".into(),
+            address: None,
+        }).await.unwrap();
+
+        // First receipt to establish stock
+        svc.create_stock_movement(CreateStockMovement {
+            item_id: item.id.clone(),
+            to_warehouse_id: wh.id.clone(),
+            from_warehouse_id: None,
+            quantity: 10,
+            movement_type: "receipt".into(),
+            reference_type: None,
+            reference_id: None,
+        }).await.unwrap();
+
+        // Issue 3 units
+        svc.create_stock_movement(CreateStockMovement {
+            item_id: item.id.clone(),
+            to_warehouse_id: wh.id.clone(),
+            from_warehouse_id: None,
+            quantity: 3,
+            movement_type: "issue".into(),
+            reference_type: None,
+            reference_id: None,
+        }).await.unwrap();
+
+        let stock = sl_repo.get_by_item_warehouse(&item.id, &wh.id).await.unwrap().unwrap();
+        assert_eq!(stock.quantity_on_hand, 7); // 10 - 3
+
+        // Return 2 units back
+        svc.create_stock_movement(CreateStockMovement {
+            item_id: item.id.clone(),
+            to_warehouse_id: wh.id.clone(),
+            from_warehouse_id: None,
+            quantity: 2,
+            movement_type: "return".into(),
+            reference_type: None,
+            reference_id: None,
+        }).await.unwrap();
+
+        let stock = sl_repo.get_by_item_warehouse(&item.id, &wh.id).await.unwrap().unwrap();
+        assert_eq!(stock.quantity_on_hand, 9); // 7 + 2
     }
 }
