@@ -99,15 +99,51 @@ impl OrderManagementService {
                 "Only confirmed orders can be fulfilled".into(),
             ));
         }
+
+        // Fetch order lines for quantity validation
+        let order_lines = self.order_repo.get_lines(id).await?;
+
+        // Get existing fulfillments to check cumulative quantities
+        let existing_fulfillments = self.fulfillment_repo.list_by_order(id).await?;
+
         let mut fulfilled_lines = Vec::new();
         for line in &input.lines {
+            // Find the matching order line
+            let order_line = order_lines.iter().find(|ol| ol.id == line.order_line_id);
+            let order_line = match order_line {
+                Some(ol) => ol,
+                None => {
+                    return Err(saas_common::error::AppError::Validation(format!(
+                        "Order line '{}' not found on order '{}'",
+                        line.order_line_id, id
+                    )));
+                }
+            };
+
+            // Calculate already fulfilled quantity for this line
+            let already_fulfilled: i64 = existing_fulfillments
+                .iter()
+                .filter(|f| f.order_line_id == line.order_line_id)
+                .map(|f| f.quantity)
+                .sum();
+
+            // Validate quantity doesn't exceed remaining
+            let remaining = order_line.quantity - already_fulfilled;
+            if line.quantity > remaining {
+                return Err(saas_common::error::AppError::Validation(format!(
+                    "Fulfillment quantity ({}) exceeds remaining order line quantity ({}). Ordered: {}, Already fulfilled: {}",
+                    line.quantity, remaining, order_line.quantity, already_fulfilled
+                )));
+            }
+
             self.fulfillment_repo
                 .create(id, &line.order_line_id, line.quantity, &line.warehouse_id)
                 .await?;
             fulfilled_lines.push(saas_proto::events::OrderFulfilledLine {
-                item_id: line.order_line_id.clone(),
+                item_id: order_line.item_id.clone(),
                 quantity: line.quantity,
                 warehouse_id: line.warehouse_id.clone(),
+                unit_price_cents: order_line.unit_price_cents,
             });
         }
         self.order_repo.update_status(id, "picking").await?;

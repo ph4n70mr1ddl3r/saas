@@ -14,6 +14,7 @@ pub struct CreateItem {
     pub reorder_point: i64,
     pub safety_stock: i64,
     pub economic_order_qty: i64,
+    pub unit_price_cents: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -23,6 +24,7 @@ pub struct UpdateItem {
     pub unit_of_measure: Option<String>,
     pub item_type: Option<String>,
     pub is_active: Option<bool>,
+    pub unit_price_cents: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -37,6 +39,7 @@ pub struct ItemResponse {
     pub reorder_point: i64,
     pub safety_stock: i64,
     pub economic_order_qty: i64,
+    pub unit_price_cents: i64,
     pub created_at: String,
 }
 

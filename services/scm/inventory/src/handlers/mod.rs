@@ -35,6 +35,20 @@ pub async fn create_warehouse(
     ))
 }
 
+pub async fn update_warehouse(
+    user: saas_auth_core::extractor::AuthUser,
+    axum::extract::State(state): axum::extract::State<crate::routes::AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::Json(input): axum::Json<crate::models::warehouse::UpdateWarehouse>,
+) -> Result<
+    axum::Json<saas_common::response::ApiResponse<crate::models::warehouse::WarehouseResponse>>,
+    saas_common::error::AppError,
+> {
+    rbac::require_admin(&user.roles, "scm").map_err(|e| AppError::Forbidden(e))?;
+    let warehouse = state.service.update_warehouse(&id, input).await?;
+    Ok(axum::Json(saas_common::response::ApiResponse::new(warehouse)))
+}
+
 pub async fn list_items(
     _user: saas_auth_core::extractor::AuthUser,
     axum::extract::State(state): axum::extract::State<crate::routes::AppState>,
@@ -76,6 +90,31 @@ pub async fn get_item(
 > {
     let item = state.service.get_item(&id).await?;
     Ok(axum::Json(saas_common::response::ApiResponse::new(item)))
+}
+
+pub async fn update_item(
+    user: saas_auth_core::extractor::AuthUser,
+    axum::extract::State(state): axum::extract::State<crate::routes::AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::Json(input): axum::Json<crate::models::item::UpdateItem>,
+) -> Result<
+    axum::Json<saas_common::response::ApiResponse<crate::models::item::ItemResponse>>,
+    saas_common::error::AppError,
+> {
+    rbac::require_admin(&user.roles, "scm").map_err(|e| AppError::Forbidden(e))?;
+    let item = state.service.update_item(&id, input).await?;
+    Ok(axum::Json(saas_common::response::ApiResponse::new(item)))
+}
+
+pub async fn list_items_below_reorder_point(
+    _user: saas_auth_core::extractor::AuthUser,
+    axum::extract::State(state): axum::extract::State<crate::routes::AppState>,
+) -> Result<
+    axum::Json<saas_common::response::ApiResponse<Vec<crate::models::item::ItemResponse>>>,
+    saas_common::error::AppError,
+> {
+    let items = state.service.list_items_below_reorder_point().await?;
+    Ok(axum::Json(saas_common::response::ApiResponse::new(items)))
 }
 
 pub async fn get_item_stock(

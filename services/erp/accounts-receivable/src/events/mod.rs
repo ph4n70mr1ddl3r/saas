@@ -11,8 +11,8 @@ pub async fn register(bus: &NatsBus, state: &AppState) -> AppResult<()> {
         let order_id = envelope.payload.order_id.clone();
         let order_number = envelope.payload.order_number.clone();
         let customer_id = envelope.payload.customer_id.clone();
-        let lines: Vec<(String, i64)> = envelope.payload.lines.iter()
-            .map(|l| (l.item_id.clone(), l.quantity))
+        let lines: Vec<(String, i64, i64)> = envelope.payload.lines.iter()
+            .map(|l| (l.item_id.clone(), l.quantity, l.unit_price_cents))
             .collect();
         let line_count = lines.len();
         async move {

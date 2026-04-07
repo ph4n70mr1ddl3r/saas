@@ -136,6 +136,7 @@ pub struct PurchaseOrderLineReceived {
     pub item_id: String,
     pub warehouse_id: String,
     pub quantity_received: i64,
+    pub unit_price_cents: i64,
 }
 
 // HCM Performance Events
@@ -390,6 +391,7 @@ pub struct OrderFulfilledLine {
     pub item_id: String,
     pub quantity: i64,
     pub warehouse_id: String,
+    pub unit_price_cents: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

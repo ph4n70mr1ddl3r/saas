@@ -17,10 +17,18 @@ pub fn build_router(state: AppState) -> Router {
             get(handlers::list_warehouses).post(handlers::create_warehouse),
         )
         .route(
+            "/api/v1/warehouses/{id}",
+            put(handlers::update_warehouse),
+        )
+        .route(
             "/api/v1/items",
             get(handlers::list_items).post(handlers::create_item),
         )
-        .route("/api/v1/items/{id}", get(handlers::get_item))
+        .route("/api/v1/items/{id}", get(handlers::get_item).put(handlers::update_item))
+        .route(
+            "/api/v1/items/below-reorder-point",
+            get(handlers::list_items_below_reorder_point),
+        )
         .route("/api/v1/items/{id}/stock", get(handlers::get_item_stock))
         .route(
             "/api/v1/items/{id}/availability",

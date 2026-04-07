@@ -1,0 +1,1 @@
+ALTER TABLE items ADD COLUMN unit_price_cents INTEGER NOT NULL DEFAULT 0;

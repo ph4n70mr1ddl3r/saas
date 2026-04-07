@@ -150,6 +150,7 @@ impl ProcurementService {
                     item_id: po_line.item_id.clone(),
                     warehouse_id: line.warehouse_id.clone(),
                     quantity_received: line.quantity_received,
+                    unit_price_cents: po_line.unit_price_cents,
                 });
             }
         }
@@ -214,7 +215,7 @@ impl ProcurementService {
             lines: vec![CreatePurchaseOrderLine {
                 item_id: item_id.to_string(),
                 quantity: suggested_quantity,
-                unit_price_cents: 1000, // default unit price; should be updated from item master
+                unit_price_cents: 0, // price to be negotiated; updated from item master or supplier quote
             }],
         };
 

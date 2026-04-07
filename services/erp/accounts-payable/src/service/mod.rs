@@ -183,7 +183,7 @@ impl ApService {
         &self,
         po_id: &str,
         supplier_id: &str,
-        po_lines: &[(String, i64)], // (item_id, quantity_received)
+        po_lines: &[(String, i64, i64)], // (item_id, quantity_received, unit_price_cents)
     ) -> AppResult<Option<ApInvoiceWithLines>> {
         // Try to find vendor matching the supplier
         let vendor = match self.repo.get_vendor(supplier_id).await {
@@ -205,16 +205,15 @@ impl ApService {
             return Ok(None);
         }
 
-        let default_unit_price_cents: i64 = 1000; // $10 per unit default
         let invoice_lines: Vec<CreateApInvoiceLineRequest> = po_lines
             .iter()
-            .map(|(item_id, qty)| CreateApInvoiceLineRequest {
+            .map(|(item_id, qty, unit_price)| CreateApInvoiceLineRequest {
                 description: Some(format!(
                     "PO {} - Item {} (qty: {})",
                     po_id, item_id, qty
                 )),
                 account_code: "5000".to_string(),
-                amount_cents: qty * default_unit_price_cents,
+                amount_cents: qty * unit_price,
             })
             .collect();
 

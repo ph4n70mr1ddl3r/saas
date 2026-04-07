@@ -50,6 +50,10 @@ impl InventoryService {
         self.warehouse_repo.create(&input).await
     }
 
+    pub async fn update_warehouse(&self, id: &str, input: UpdateWarehouse) -> AppResult<WarehouseResponse> {
+        self.warehouse_repo.update(id, &input).await
+    }
+
     // Items
     pub async fn list_items(&self, filters: &ItemFilters) -> AppResult<Vec<ItemResponse>> {
         self.item_repo.list(filters).await
@@ -64,6 +68,11 @@ impl InventoryService {
             .validate()
             .map_err(|e| saas_common::error::AppError::Validation(e.to_string()))?;
         self.item_repo.create(&input).await
+    }
+
+    pub async fn update_item(&self, id: &str, input: UpdateItem) -> AppResult<ItemResponse> {
+        self.item_repo.get_by_id(id).await?;
+        self.item_repo.update_item(id, &input).await
     }
 
     pub async fn list_items_below_reorder_point(&self) -> AppResult<Vec<ItemResponse>> {
@@ -92,31 +101,58 @@ impl InventoryService {
             .map_err(|e| saas_common::error::AppError::Validation(e.to_string()))?;
         let movement = self.stock_movement_repo.create(&input).await?;
         // Update stock levels based on movement type
-        if input.movement_type == "receipt" {
-            self.stock_level_repo
-                .upsert_receipt(&input.item_id, &input.to_warehouse_id, input.quantity)
-                .await?;
-            if let Err(e) = self
-                .bus
-                .publish(
-                    "scm.inventory.stock.received",
-                    saas_proto::events::StockReceived {
-                        item_id: input.item_id.clone(),
-                        warehouse_id: input.to_warehouse_id.clone(),
-                        location_id: input.to_warehouse_id.clone(),
-                        quantity: input.quantity,
-                        reference_type: input.reference_type.clone().unwrap_or_default(),
-                        reference_id: input.reference_id.clone().unwrap_or_default(),
-                    },
-                )
-                .await
-            {
-                tracing::error!(
-                    "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
-                    "scm.inventory.stock.received",
-                    e
-                );
+        match input.movement_type.as_str() {
+            "receipt" => {
+                self.stock_level_repo
+                    .upsert_receipt(&input.item_id, &input.to_warehouse_id, input.quantity)
+                    .await?;
+                if let Err(e) = self
+                    .bus
+                    .publish(
+                        "scm.inventory.stock.received",
+                        saas_proto::events::StockReceived {
+                            item_id: input.item_id.clone(),
+                            warehouse_id: input.to_warehouse_id.clone(),
+                            location_id: input.to_warehouse_id.clone(),
+                            quantity: input.quantity,
+                            reference_type: input.reference_type.clone().unwrap_or_default(),
+                            reference_id: input.reference_id.clone().unwrap_or_default(),
+                        },
+                    )
+                    .await
+                {
+                    tracing::error!(
+                        "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                        "scm.inventory.stock.received",
+                        e
+                    );
+                }
             }
+            "transfer" => {
+                // Deduct from source warehouse, add to destination warehouse
+                if let Some(from_wh) = &input.from_warehouse_id {
+                    self.stock_level_repo
+                        .deduct(&input.item_id, from_wh, input.quantity)
+                        .await?;
+                }
+                self.stock_level_repo
+                    .upsert_receipt(&input.item_id, &input.to_warehouse_id, input.quantity)
+                    .await?;
+            }
+            "adjustment" => {
+                // Adjustment: positive quantity increases stock, negative would decrease
+                // For positive adjustments, treat like a receipt to the destination
+                self.stock_level_repo
+                    .upsert_receipt(&input.item_id, &input.to_warehouse_id, input.quantity)
+                    .await?;
+            }
+            "issue" => {
+                // Issue: deduct stock from the destination warehouse (used as "from")
+                self.stock_level_repo
+                    .deduct(&input.item_id, &input.to_warehouse_id, input.quantity)
+                    .await?;
+            }
+            _ => {}
         }
         Ok(movement)
     }
@@ -591,6 +627,7 @@ mod tests {
             include_str!("../../migrations/006_create_cycle_count_sessions.sql"),
             include_str!("../../migrations/007_create_cycle_count_lines.sql"),
             include_str!("../../migrations/008_add_reorder_fields.sql"),
+            include_str!("../../migrations/009_add_unit_price.sql"),
         ];
         let migration_names = [
             "001_create_warehouses.sql",
@@ -601,6 +638,7 @@ mod tests {
             "006_create_cycle_count_sessions.sql",
             "007_create_cycle_count_lines.sql",
             "008_add_reorder_fields.sql",
+            "009_add_unit_price.sql",
         ];
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS _migrations (filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)",
@@ -706,6 +744,7 @@ mod tests {
                 reorder_point: 0,
                 safety_stock: 0,
                 economic_order_qty: 0,
+                unit_price_cents: None,
             })
             .await
             .unwrap();
@@ -729,6 +768,7 @@ mod tests {
                 reorder_point: 0,
                 safety_stock: 0,
                 economic_order_qty: 0,
+                unit_price_cents: None,
             })
             .await
             .unwrap();
@@ -756,6 +796,7 @@ mod tests {
                 reorder_point: 0,
                 safety_stock: 0,
                 economic_order_qty: 0,
+                unit_price_cents: None,
             })
             .await
             .unwrap();
@@ -803,6 +844,7 @@ mod tests {
                 reorder_point: 0,
                 safety_stock: 0,
                 economic_order_qty: 0,
+                unit_price_cents: None,
             })
             .await
             .unwrap();
@@ -848,6 +890,7 @@ mod tests {
                 reorder_point: 0,
                 safety_stock: 0,
                 economic_order_qty: 0,
+                unit_price_cents: None,
             })
             .await
             .unwrap();
@@ -898,6 +941,7 @@ mod tests {
                 reorder_point: 0,
                 safety_stock: 0,
                 economic_order_qty: 0,
+                unit_price_cents: None,
             })
             .await
             .unwrap();
@@ -951,6 +995,7 @@ mod tests {
                 reorder_point: 0,
                 safety_stock: 0,
                 economic_order_qty: 0,
+                unit_price_cents: None,
             })
             .await
             .unwrap();
@@ -1062,6 +1107,7 @@ mod tests {
                 reorder_point: 0,
                 safety_stock: 0,
                 economic_order_qty: 0,
+                unit_price_cents: None,
             })
             .await
             .unwrap();
@@ -1075,6 +1121,7 @@ mod tests {
                 reorder_point: 0,
                 safety_stock: 0,
                 economic_order_qty: 0,
+                unit_price_cents: None,
             })
             .await
             .unwrap();
@@ -1118,6 +1165,7 @@ mod tests {
                 reorder_point: 0,
                 safety_stock: 0,
                 economic_order_qty: 0,
+                unit_price_cents: None,
             })
             .await
             .unwrap();
@@ -1170,6 +1218,7 @@ mod tests {
                 reorder_point: 0,
                 safety_stock: 0,
                 economic_order_qty: 0,
+                unit_price_cents: None,
             })
             .await
             .unwrap();
@@ -1246,6 +1295,7 @@ mod tests {
                 reorder_point: 0,
                 safety_stock: 0,
                 economic_order_qty: 0,
+                unit_price_cents: None,
             })
             .await
             .unwrap();
@@ -1303,6 +1353,7 @@ mod tests {
                 reorder_point: 0,
                 safety_stock: 0,
                 economic_order_qty: 0,
+                unit_price_cents: None,
             })
             .await
             .unwrap();
@@ -1367,6 +1418,7 @@ mod tests {
                 reorder_point: 0,
                 safety_stock: 0,
                 economic_order_qty: 0,
+                unit_price_cents: None,
             })
             .await
             .unwrap();
@@ -1395,6 +1447,7 @@ mod tests {
                 reorder_point: 50,
                 safety_stock: 20,
                 economic_order_qty: 100,
+                unit_price_cents: None,
             })
             .await
             .unwrap();
@@ -1434,6 +1487,7 @@ mod tests {
                 reorder_point: 50,
                 safety_stock: 10,
                 economic_order_qty: 100,
+                unit_price_cents: None,
             })
             .await
             .unwrap();
@@ -1453,6 +1507,7 @@ mod tests {
                 reorder_point: 50,
                 safety_stock: 10,
                 economic_order_qty: 100,
+                unit_price_cents: None,
             })
             .await
             .unwrap();
@@ -1472,6 +1527,7 @@ mod tests {
                 reorder_point: 0,
                 safety_stock: 0,
                 economic_order_qty: 0,
+                unit_price_cents: None,
             })
             .await
             .unwrap();

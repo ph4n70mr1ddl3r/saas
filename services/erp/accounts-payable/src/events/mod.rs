@@ -10,8 +10,8 @@ pub async fn register(bus: &NatsBus, state: &AppState) -> AppResult<()> {
         let svc = svc.clone();
         let po_id = envelope.payload.po_id.clone();
         let supplier_id = envelope.payload.supplier_id.clone();
-        let lines: Vec<(String, i64)> = envelope.payload.lines.iter()
-            .map(|l| (l.item_id.clone(), l.quantity_received))
+        let lines: Vec<(String, i64, i64)> = envelope.payload.lines.iter()
+            .map(|l| (l.item_id.clone(), l.quantity_received, l.unit_price_cents))
             .collect();
         let line_count = lines.len();
         async move {

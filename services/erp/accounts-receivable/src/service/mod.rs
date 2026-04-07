@@ -117,6 +117,21 @@ impl ArService {
             ));
         }
 
+        // Check for overpayment: receipt amount must not exceed remaining invoice balance
+        let existing_receipts = self.repo.list_receipts().await?;
+        let total_received: i64 = existing_receipts
+            .iter()
+            .filter(|r| r.invoice_id == input.invoice_id)
+            .map(|r| r.amount_cents)
+            .sum();
+        let remaining = invoice.total_cents - total_received;
+        if input.amount_cents > remaining {
+            return Err(AppError::Validation(format!(
+                "Receipt amount ({}) exceeds remaining invoice balance ({}). Invoice total: {}, Already received: {}",
+                input.amount_cents, remaining, invoice.total_cents, total_received
+            )));
+        }
+
         let receipt = self.repo.create_receipt(input).await?;
 
         // Publish AR receipt created event
@@ -214,7 +229,7 @@ impl ArService {
         order_id: &str,
         order_number: &str,
         customer_id: &str,
-        order_lines: &[(String, i64)], // (item_id, quantity)
+        order_lines: &[(String, i64, i64)], // (item_id, quantity, unit_price_cents)
     ) -> AppResult<Option<ArInvoiceWithLines>> {
         // Try to find customer matching the order
         let customer = match self.repo.get_customer(customer_id).await {
@@ -236,15 +251,14 @@ impl ArService {
             return Ok(None);
         }
 
-        let default_unit_price_cents: i64 = 1000; // $10 per unit default
         let invoice_lines: Vec<CreateArInvoiceLineRequest> = order_lines
             .iter()
-            .map(|(item_id, qty)| CreateArInvoiceLineRequest {
+            .map(|(item_id, qty, unit_price)| CreateArInvoiceLineRequest {
                 description: Some(format!(
                     "Order {} - Item {} (qty: {})",
                     order_number, item_id, qty
                 )),
-                amount_cents: qty * default_unit_price_cents,
+                amount_cents: qty * unit_price,
             })
             .collect();
 
