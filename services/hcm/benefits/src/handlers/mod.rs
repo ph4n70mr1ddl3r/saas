@@ -84,3 +84,26 @@ pub async fn cancel_enrollment(
     let enrollment = state.service.cancel_enrollment(&id).await?;
     Ok(Json(ApiResponse::new(enrollment)))
 }
+
+pub async fn deactivate_plan(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<BenefitPlan>>, AppError> {
+    rbac::require_admin(&user.roles, "hcm").map_err(|e| AppError::Forbidden(e))?;
+    let plan = state
+        .service
+        .update_plan(
+            &id,
+            UpdatePlanRequest {
+                name: None,
+                description: None,
+                plan_type: None,
+                employer_contribution_cents: None,
+                employee_contribution_cents: None,
+                is_active: Some(false),
+            },
+        )
+        .await?;
+    Ok(Json(ApiResponse::new(plan)))
+}

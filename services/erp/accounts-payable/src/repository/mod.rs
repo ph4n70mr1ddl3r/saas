@@ -148,6 +148,14 @@ impl ApRepo {
         self.get_invoice(id).await
     }
 
+    pub async fn cancel_invoice(&self, id: &str) -> AppResult<ApInvoice> {
+        sqlx::query("UPDATE ap_invoices SET status = 'cancelled' WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        self.get_invoice(id).await
+    }
+
     // --- Payments ---
 
     pub async fn list_payments(&self) -> AppResult<Vec<Payment>> {

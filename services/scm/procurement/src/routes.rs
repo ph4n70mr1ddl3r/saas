@@ -41,6 +41,10 @@ pub fn build_router(state: AppState) -> Router {
             post(handlers::receive_purchase_order),
         )
         .route(
+            "/api/v1/purchase-orders/{id}/cancel",
+            post(handlers::cancel_purchase_order),
+        )
+        .route(
             "/api/v1/goods-receipts",
             get(handlers::list_goods_receipts),
         )

@@ -37,6 +37,10 @@ pub fn build_router(state: AppState) -> Router {
             axum::routing::post(handlers::approve_invoice),
         )
         .route(
+            "/api/v1/invoices/{id}/cancel",
+            axum::routing::post(handlers::cancel_invoice),
+        )
+        .route(
             "/api/v1/payments",
             get(handlers::list_payments).post(handlers::create_payment),
         )

@@ -266,9 +266,8 @@ impl ExpenseService {
             )));
         }
 
-        self.repo.get_category(&input.category_id).await?;
-
         let category = self.repo.get_category(&input.category_id).await?;
+
         if category.limit_cents > 0 {
             let spent = self.repo.get_category_spent(&input.category_id).await?;
             if spent + input.amount_cents > category.limit_cents {

@@ -75,3 +75,15 @@ pub async fn list_permissions(
     let perms = state.role_service.list_permissions().await?;
     Ok(Json(ApiResponse::new(perms)))
 }
+
+pub async fn delete_role(
+    user: AuthUser,
+    State(state): State<AuthState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, AppError> {
+    if !is_admin(&user.roles) {
+        return Err(AppError::Forbidden("Admin role required".into()));
+    }
+    state.role_service.delete(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}

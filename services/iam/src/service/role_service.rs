@@ -119,9 +119,13 @@ impl RoleService {
 
         Ok(())
     }
-}
 
-#[cfg(test)]
+    pub async fn delete(&self, id: &str) -> AppResult<()> {
+        // Verify role exists
+        self.repo.get_role(id).await?;
+        self.repo.delete_role(id).await
+    }
+}
 mod tests {
     use super::*;
     use saas_db::test_helpers::create_test_pool;
@@ -306,5 +310,37 @@ mod tests {
         // Clear all permissions
         repo.set_role_permissions(&role.id, &[]).await.unwrap();
         assert_eq!(repo.get_role_permissions(&role.id).await.unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_role_delete() {
+        let pool = setup().await;
+        let repo = RoleRepo::new(pool);
+
+        let role = repo.create_role("delete_me", Some("To be deleted")).await.unwrap();
+        assert_eq!(role.name, "delete_me");
+
+        let perms = repo.list_permissions().await.unwrap();
+        let perm_ids: Vec<String> = perms.iter().take(2).map(|p| p.id.clone()).collect();
+        repo.set_role_permissions(&role.id, &perm_ids).await.unwrap();
+
+        // Delete should succeed
+        repo.delete_role(&role.id).await.unwrap();
+
+        // Verify role is gone
+        let result = repo.get_role(&role.id).await;
+        assert!(result.is_err());
+
+        // Verify not in list
+        let roles = repo.list_roles().await.unwrap();
+        assert!(roles.iter().all(|r| r.id != role.id));
+    }
+
+    #[tokio::test]
+    async fn test_role_delete_not_found() {
+        let pool = setup().await;
+        let repo = RoleRepo::new(pool);
+        let result = repo.delete_role("nonexistent").await;
+        assert!(result.is_err());
     }
 }

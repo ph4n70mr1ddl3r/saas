@@ -18,6 +18,10 @@ pub fn build_router(state: AppState) -> Router {
             get(handlers::get_plan).put(handlers::update_plan),
         )
         .route(
+            "/api/v1/benefits/plans/{id}/deactivate",
+            axum::routing::put(handlers::deactivate_plan),
+        )
+        .route(
             "/api/v1/benefits/enrollments",
             get(handlers::list_enrollments).post(handlers::create_enrollment),
         )

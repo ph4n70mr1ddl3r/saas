@@ -165,6 +165,21 @@ pub async fn receive_purchase_order(
     Ok(axum::Json(saas_common::response::ApiResponse::new(order)))
 }
 
+pub async fn cancel_purchase_order(
+    user: saas_auth_core::extractor::AuthUser,
+    axum::extract::State(state): axum::extract::State<crate::routes::AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<
+    axum::Json<
+        saas_common::response::ApiResponse<crate::models::purchase_order::PurchaseOrderResponse>,
+    >,
+    saas_common::error::AppError,
+> {
+    rbac::require_admin(&user.roles, "scm").map_err(|e| AppError::Forbidden(e))?;
+    let order = state.service.cancel_purchase_order(&id).await?;
+    Ok(axum::Json(saas_common::response::ApiResponse::new(order)))
+}
+
 pub async fn list_goods_receipts(
     _user: saas_auth_core::extractor::AuthUser,
     axum::extract::State(state): axum::extract::State<crate::routes::AppState>,

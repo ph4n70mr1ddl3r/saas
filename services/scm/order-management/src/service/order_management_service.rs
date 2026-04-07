@@ -47,6 +47,17 @@ impl OrderManagementService {
         self.order_repo.create(&input).await
     }
 
+    pub async fn cancel_sales_order(&self, id: &str) -> AppResult<SalesOrderResponse> {
+        let order = self.order_repo.get_by_id(id).await?;
+        if order.status != "draft" && order.status != "confirmed" {
+            return Err(saas_common::error::AppError::Validation(
+                "Only draft or confirmed orders can be cancelled".into(),
+            ));
+        }
+        self.order_repo.update_status(id, "cancelled").await?;
+        self.order_repo.get_by_id(id).await
+    }
+
     pub async fn confirm_sales_order(&self, id: &str) -> AppResult<SalesOrderDetailResponse> {
         let order = self.order_repo.get_by_id(id).await?;
         if order.status != "draft" {

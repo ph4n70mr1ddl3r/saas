@@ -29,6 +29,14 @@ impl ApService {
     }
 
     pub async fn create_vendor(&self, input: &CreateVendorRequest) -> AppResult<Vendor> {
+        // Check for duplicate vendor name
+        let existing = self.repo.list_vendors().await?;
+        if existing.iter().any(|v| v.name.to_lowercase() == input.name.to_lowercase()) {
+            return Err(AppError::Validation(format!(
+                "Vendor with name '{}' already exists",
+                input.name
+            )));
+        }
         self.repo.create_vendor(input).await
     }
 
@@ -118,6 +126,16 @@ impl ApService {
         }
 
         Ok(ApInvoiceWithLines { invoice, lines })
+    }
+
+    pub async fn cancel_invoice(&self, id: &str) -> AppResult<ApInvoice> {
+        let invoice = self.repo.get_invoice(id).await?;
+        if invoice.status != "draft" {
+            return Err(AppError::Validation(
+                "Only draft invoices can be cancelled".into(),
+            ));
+        }
+        self.repo.cancel_invoice(id).await
     }
 
     // --- Payments ---
@@ -885,5 +903,74 @@ mod tests {
 
         assert_eq!(invoice.total_cents, 25000);
         assert_eq!(invoice.tax_amount_cents, 0);
+    }
+
+    #[tokio::test]
+    async fn test_vendor_name_uniqueness() {
+        let repo = setup_repo().await;
+        let svc = ApService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        svc.create_vendor(&CreateVendorRequest {
+            name: "Acme Corp".into(),
+            email: Some("acme@example.com".into()),
+            phone: None,
+            address: None,
+        })
+        .await
+        .unwrap();
+
+        // Duplicate name (case-insensitive) should fail
+        let result = svc
+            .create_vendor(&CreateVendorRequest {
+                name: "ACME CORP".into(),
+                email: Some("other@example.com".into()),
+                phone: None,
+                address: None,
+            })
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_cancel_invoice() {
+        let repo = setup_repo().await;
+        let svc = ApService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let vendor = create_test_vendor(&repo, "Cancel Vendor").await;
+        let invoice = create_test_invoice(&repo, &vendor.id, 5000).await;
+        assert_eq!(invoice.status, "draft");
+
+        let cancelled = svc.cancel_invoice(&invoice.id).await.unwrap();
+        assert_eq!(cancelled.status, "cancelled");
+
+        // Cannot cancel an approved invoice
+        let invoice2 = repo
+            .create_invoice(&CreateApInvoiceRequest {
+                vendor_id: vendor.id,
+                invoice_number: "INV-CANCEL-002".into(),
+                invoice_date: "2025-03-01".into(),
+                due_date: "2025-04-01".into(),
+                lines: vec![CreateApInvoiceLineRequest {
+                    description: None,
+                    account_code: "5000".into(),
+                    amount_cents: 3000,
+                }],
+                tax_code: None,
+            }, 0)
+            .await
+            .unwrap();
+        repo.approve_invoice(&invoice2.id).await.unwrap();
+        let result = svc.cancel_invoice(&invoice2.id).await;
+        assert!(result.is_err());
     }
 }

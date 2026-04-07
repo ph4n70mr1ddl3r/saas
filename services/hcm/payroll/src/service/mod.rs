@@ -204,6 +204,28 @@ impl PayrollService {
         Ok(())
     }
 
+    /// When a timesheet is approved, log availability for hourly payroll processing.
+    pub async fn handle_timesheet_approved(
+        &self,
+        employee_id: &str,
+        week_start: &str,
+    ) -> AppResult<()> {
+        // Verify employee has compensation record
+        let compensations = self.repo.list_compensation_by_employee(employee_id).await?;
+        if compensations.is_empty() {
+            tracing::warn!(
+                "Timesheet approved for employee {} but no compensation record found",
+                employee_id
+            );
+            return Ok(());
+        }
+        tracing::info!(
+            "Timesheet approved for employee {} — week of {} ready for payroll processing",
+            employee_id, week_start
+        );
+        Ok(())
+    }
+
     // --- Tax Brackets ---
 
     pub async fn list_tax_brackets(&self) -> AppResult<Vec<TaxBracket>> {

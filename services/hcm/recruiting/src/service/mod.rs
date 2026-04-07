@@ -71,6 +71,18 @@ impl RecruitingService {
                 input.job_id, job.status
             )));
         }
+        // Prevent duplicate application from same candidate email for same job
+        let existing = self.repo.list_applications().await?;
+        if existing.iter().any(|a| {
+            a.job_id == input.job_id
+                && a.candidate_email.to_lowercase() == input.candidate_email.to_lowercase()
+                && a.status != "rejected"
+        }) {
+            return Err(AppError::Validation(format!(
+                "Candidate '{}' already has an active application for this job",
+                input.candidate_email
+            )));
+        }
         self.repo.create_application(&input).await
     }
 
@@ -724,5 +736,63 @@ mod tests {
             )
             .await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_application_prevention() {
+        let repo = setup_repo().await;
+        let svc = RecruitingService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let job = repo
+            .create_job(&CreateJobRequest {
+                title: "Engineer".into(),
+                department_id: "eng".into(),
+                description: None,
+                requirements: None,
+            })
+            .await
+            .unwrap();
+
+        // First application should succeed
+        svc.create_application(CreateApplicationRequest {
+            job_id: job.id.clone(),
+            candidate_first_name: "Alice".into(),
+            candidate_last_name: "Smith".into(),
+            candidate_email: "alice@example.com".into(),
+            notes: None,
+        })
+        .await
+        .unwrap();
+
+        // Duplicate email for same job should fail
+        let result = svc
+            .create_application(CreateApplicationRequest {
+                job_id: job.id.clone(),
+                candidate_first_name: "Alice".into(),
+                candidate_last_name: "Smith".into(),
+                candidate_email: "ALICE@example.com".into(), // case-insensitive
+                notes: None,
+            })
+            .await;
+        assert!(result.is_err());
+
+        // Different email for same job should succeed
+        svc.create_application(CreateApplicationRequest {
+            job_id: job.id.clone(),
+            candidate_first_name: "Bob".into(),
+            candidate_last_name: "Jones".into(),
+            candidate_email: "bob@example.com".into(),
+            notes: None,
+        })
+        .await
+        .unwrap();
+
+        let apps = repo.list_applications().await.unwrap();
+        assert_eq!(apps.len(), 2);
     }
 }

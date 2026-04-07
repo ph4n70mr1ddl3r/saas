@@ -33,6 +33,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/v1/ar-invoices/{id}", get(handlers::get_invoice))
         .route(
+            "/api/v1/ar-invoices/{id}/cancel",
+            axum::routing::post(handlers::cancel_invoice),
+        )
+        .route(
             "/api/v1/receipts",
             get(handlers::list_receipts).post(handlers::create_receipt),
         )

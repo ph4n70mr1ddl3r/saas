@@ -87,6 +87,16 @@ pub async fn approve_invoice(
     Ok(Json(ApiResponse::new(invoice)))
 }
 
+pub async fn cancel_invoice(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<ApInvoice>>, AppError> {
+    rbac::require_admin(&user.roles, "erp").map_err(|e| AppError::Forbidden(e))?;
+    let invoice = state.service.cancel_invoice(&id).await?;
+    Ok(Json(ApiResponse::new(invoice)))
+}
+
 pub async fn list_payments(
     user: AuthUser,
     State(state): State<AppState>,

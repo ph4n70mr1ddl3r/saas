@@ -95,6 +95,17 @@ impl ProcurementService {
         self.po_repo.get_by_id(id).await
     }
 
+    pub async fn cancel_purchase_order(&self, id: &str) -> AppResult<PurchaseOrderResponse> {
+        let po = self.po_repo.get_by_id(id).await?;
+        if po.status != "draft" && po.status != "submitted" {
+            return Err(AppError::Validation(
+                "Only draft or submitted orders can be cancelled".into(),
+            ));
+        }
+        self.po_repo.update_status(id, "cancelled").await?;
+        self.po_repo.get_by_id(id).await
+    }
+
     pub async fn receive_purchase_order(
         &self,
         id: &str,

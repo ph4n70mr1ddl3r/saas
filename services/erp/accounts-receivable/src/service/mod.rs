@@ -29,6 +29,14 @@ impl ArService {
     }
 
     pub async fn create_customer(&self, input: &CreateCustomerRequest) -> AppResult<Customer> {
+        // Check for duplicate customer name
+        let existing = self.repo.list_customers().await?;
+        if existing.iter().any(|c| c.name.to_lowercase() == input.name.to_lowercase()) {
+            return Err(AppError::Validation(format!(
+                "Customer with name '{}' already exists",
+                input.name
+            )));
+        }
         self.repo.create_customer(input).await
     }
 
@@ -86,6 +94,16 @@ impl ArService {
         }
 
         Ok(ArInvoiceWithLines { invoice, lines })
+    }
+
+    pub async fn cancel_invoice(&self, id: &str) -> AppResult<ArInvoice> {
+        let invoice = self.repo.get_invoice(id).await?;
+        if invoice.status != "draft" && invoice.status != "sent" {
+            return Err(AppError::Validation(
+                "Only draft or sent invoices can be cancelled".into(),
+            ));
+        }
+        self.repo.cancel_invoice(id).await
     }
 
     // --- Receipts ---
@@ -862,5 +880,84 @@ mod tests {
 
         let lines = repo.get_invoice_lines(&invoice.id).await.unwrap();
         assert_eq!(lines.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn test_customer_name_uniqueness() {
+        let repo = setup_repo().await;
+        let svc = ArService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        svc.create_customer(&CreateCustomerRequest {
+            name: "Beta Corp".into(),
+            email: Some("beta@example.com".into()),
+            phone: None,
+            address: None,
+        })
+        .await
+        .unwrap();
+
+        // Duplicate name (case-insensitive) should fail
+        let result = svc
+            .create_customer(&CreateCustomerRequest {
+                name: "BETA CORP".into(),
+                email: Some("other@example.com".into()),
+                phone: None,
+                address: None,
+            })
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_cancel_ar_invoice() {
+        let repo = setup_repo().await;
+        let svc = ArService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let customer = create_test_customer(&repo, "Cancel Client").await;
+        let invoice = repo
+            .create_invoice(&CreateArInvoiceRequest {
+                customer_id: customer.id.clone(),
+                invoice_number: "AR-CANCEL-001".into(),
+                invoice_date: "2025-01-01".into(),
+                due_date: "2025-02-01".into(),
+                lines: vec![CreateArInvoiceLineRequest {
+                    description: Some("Test".into()),
+                    amount_cents: 5000,
+                }],
+            })
+            .await
+            .unwrap();
+
+        // Cancel draft invoice
+        let cancelled = svc.cancel_invoice(&invoice.id).await.unwrap();
+        assert_eq!(cancelled.status, "cancelled");
+
+        // Cancel sent invoice
+        let invoice2 = repo
+            .create_invoice(&CreateArInvoiceRequest {
+                customer_id: customer.id,
+                invoice_number: "AR-CANCEL-002".into(),
+                invoice_date: "2025-01-01".into(),
+                due_date: "2025-02-01".into(),
+                lines: vec![CreateArInvoiceLineRequest {
+                    description: Some("Test2".into()),
+                    amount_cents: 3000,
+                }],
+            })
+            .await
+            .unwrap();
+        repo.mark_invoice_sent(&invoice2.id).await.unwrap();
+        let cancelled2 = svc.cancel_invoice(&invoice2.id).await.unwrap();
+        assert_eq!(cancelled2.status, "cancelled");
     }
 }

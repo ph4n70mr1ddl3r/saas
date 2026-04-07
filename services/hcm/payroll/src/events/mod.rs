@@ -1,6 +1,6 @@
 use crate::service::PayrollService;
 use saas_nats_bus::NatsBus;
-use saas_proto::events::{EmployeeCreated, EmployeeTerminated};
+use saas_proto::events::{EmployeeCreated, EmployeeTerminated, TimesheetApproved};
 
 pub async fn subscribe(bus: &NatsBus, service: PayrollService) -> anyhow::Result<()> {
     let svc1 = service.clone();
@@ -31,6 +31,23 @@ pub async fn subscribe(bus: &NatsBus, service: PayrollService) -> anyhow::Result
             );
             if let Err(e) = svc2.handle_employee_terminated(&employee_id, &termination_date).await {
                 tracing::error!("Failed to end compensation for {}: {}", employee_id, e);
+            }
+        }
+    })
+    .await?;
+
+    let svc3 = service.clone();
+    bus.subscribe::<TimesheetApproved, _, _>("hcm.timesheet.approved", move |envelope| {
+        let svc3 = svc3.clone();
+        let employee_id = envelope.payload.employee_id.clone();
+        let week_start = envelope.payload.week_start.clone();
+        async move {
+            tracing::info!(
+                "Received timesheet.approved for employee {} — week starting {} available for payroll",
+                employee_id, week_start
+            );
+            if let Err(e) = svc3.handle_timesheet_approved(&employee_id, &week_start).await {
+                tracing::error!("Failed to handle timesheet approved for {}: {}", employee_id, e);
             }
         }
     })

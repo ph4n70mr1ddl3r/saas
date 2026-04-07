@@ -1,7 +1,7 @@
 use crate::handlers;
 use crate::service::{AuthService, RoleService, UserService};
 use axum::{
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
     Router,
 };
 use saas_nats_bus::NatsBus;
@@ -50,7 +50,9 @@ pub fn build_router(pool: SqlitePool, bus: NatsBus) -> Router {
         )
         .route(
             "/api/v1/roles/{id}",
-            get(handlers::roles::get_role).put(handlers::roles::update_role),
+            get(handlers::roles::get_role)
+                .put(handlers::roles::update_role)
+                .delete(handlers::roles::delete_role),
         )
         .route(
             "/api/v1/roles/{id}/permissions",

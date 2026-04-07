@@ -107,4 +107,26 @@ impl RoleRepo {
         .await?;
         Ok(rows.into_iter().map(|r| r.0).collect())
     }
+
+    pub async fn delete_role(&self, id: &str) -> AppResult<()> {
+        // Remove role_permissions and user_roles associations first
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM role_permissions WHERE role_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM user_roles WHERE role_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        let result = sqlx::query("DELETE FROM roles WHERE id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::NotFound("Role not found".into()));
+        }
+        Ok(())
+    }
 }

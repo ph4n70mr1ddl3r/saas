@@ -80,6 +80,21 @@ pub async fn fulfill_sales_order(
     Ok(axum::Json(saas_common::response::ApiResponse::new(order)))
 }
 
+pub async fn cancel_sales_order(
+    user: saas_auth_core::extractor::AuthUser,
+    axum::extract::State(state): axum::extract::State<crate::routes::AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<
+    axum::Json<
+        saas_common::response::ApiResponse<crate::models::sales_order::SalesOrderResponse>,
+    >,
+    saas_common::error::AppError,
+> {
+    rbac::require_admin(&user.roles, "scm").map_err(|e| AppError::Forbidden(e))?;
+    let order = state.service.cancel_sales_order(&id).await?;
+    Ok(axum::Json(saas_common::response::ApiResponse::new(order)))
+}
+
 pub async fn list_returns(
     _user: saas_auth_core::extractor::AuthUser,
     axum::extract::State(state): axum::extract::State<crate::routes::AppState>,
