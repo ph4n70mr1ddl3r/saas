@@ -53,7 +53,26 @@ impl ManufacturingService {
         self.work_order_repo
             .update_status(id, "in_progress", Some(&now), None)
             .await?;
-        self.work_order_repo.get_by_id(id).await
+        let wo = self.work_order_repo.get_by_id(id).await?;
+        if let Err(e) = self
+            .bus
+            .publish(
+                "scm.manufacturing.work_order.started",
+                saas_proto::events::WorkOrderStarted {
+                    work_order_id: wo.id.clone(),
+                    item_id: wo.item_id.clone(),
+                    quantity: wo.quantity,
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "scm.manufacturing.work_order.started",
+                e
+            );
+        }
+        Ok(wo)
     }
 
     pub async fn complete_work_order(&self, id: &str) -> AppResult<WorkOrderResponse> {
@@ -552,5 +571,30 @@ mod tests {
 
         let result = svc.cancel_work_order(&wo3.id).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_start_work_order_publishes_event() {
+        let pool = setup().await;
+        let svc = ManufacturingService {
+            work_order_repo: WorkOrderRepo::new(pool.clone()),
+            bom_repo: BomRepo::new(pool.clone()),
+            routing_step_repo: RoutingStepRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let wo = svc.create_work_order(CreateWorkOrder {
+            item_id: "ITEM-START-EV".into(),
+            quantity: 50,
+            planned_start: None,
+            planned_end: None,
+        }).await.unwrap();
+        assert_eq!(wo.status, "planned");
+
+        let started = svc.start_work_order(&wo.id).await.unwrap();
+        assert_eq!(started.status, "in_progress");
+        assert!(started.actual_start.is_some());
     }
 }

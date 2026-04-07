@@ -35,6 +35,18 @@ impl FixedAssetsService {
                 "Purchase cost must be non-negative".into(),
             ));
         }
+        if let Some(salvage) = input.salvage_value_cents {
+            if salvage > input.purchase_cost_cents {
+                return Err(AppError::Validation(
+                    "Salvage value cannot exceed purchase cost".into(),
+                ));
+            }
+            if salvage < 0 {
+                return Err(AppError::Validation(
+                    "Salvage value must be non-negative".into(),
+                ));
+            }
+        }
         if input.useful_life_months <= 0 {
             return Err(AppError::Validation("Useful life must be positive".into()));
         }
@@ -1038,5 +1050,56 @@ mod tests {
 
         let result = svc.dispose_asset(&asset2.id, -100).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_asset_salvage_exceeds_cost_rejected() {
+        let repo = setup_repo().await;
+        let svc = FixedAssetsService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc.create_asset(&CreateAssetRequest {
+            name: "Bad Salvage".into(),
+            description: None,
+            asset_number: "ASSET-SALVAGE-001".into(),
+            category: "equipment".into(),
+            purchase_date: "2025-01-01".into(),
+            purchase_cost_cents: 10000,
+            salvage_value_cents: Some(20000),
+            useful_life_months: 12,
+            depreciation_method: None,
+        }).await;
+        assert!(result.is_err());
+
+        // Negative salvage should also fail
+        let result = svc.create_asset(&CreateAssetRequest {
+            name: "Neg Salvage".into(),
+            description: None,
+            asset_number: "ASSET-SALVAGE-002".into(),
+            category: "equipment".into(),
+            purchase_date: "2025-01-01".into(),
+            purchase_cost_cents: 10000,
+            salvage_value_cents: Some(-1000),
+            useful_life_months: 12,
+            depreciation_method: None,
+        }).await;
+        assert!(result.is_err());
+
+        // Salvage <= cost should succeed
+        svc.create_asset(&CreateAssetRequest {
+            name: "OK Salvage".into(),
+            description: None,
+            asset_number: "ASSET-SALVAGE-003".into(),
+            category: "equipment".into(),
+            purchase_date: "2025-01-01".into(),
+            purchase_cost_cents: 10000,
+            salvage_value_cents: Some(5000),
+            useful_life_months: 12,
+            depreciation_method: None,
+        }).await.unwrap();
     }
 }

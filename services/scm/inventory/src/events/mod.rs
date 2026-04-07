@@ -2,7 +2,7 @@ use crate::service::InventoryService;
 use saas_nats_bus::NatsBus;
 use saas_proto::events::{
     OrderFulfilled, OrderFulfilledLine, PurchaseOrderReceived, ReturnCreated,
-    SalesOrderConfirmed, WorkOrderCompleted,
+    SalesOrderConfirmed, WorkOrderCompleted, WorkOrderCancelled,
 };
 
 pub async fn register(bus: &NatsBus, service: InventoryService) -> anyhow::Result<()> {
@@ -106,6 +106,24 @@ pub async fn register(bus: &NatsBus, service: InventoryService) -> anyhow::Resul
                 envelope.payload.quantity,
             ).await {
                 tracing::error!("Failed to handle return created: {}", e);
+            }
+        }
+    }).await.ok();
+
+    // Work order cancelled -> release reserved materials (log only for now)
+    let svc = service.clone();
+    bus.subscribe::<WorkOrderCancelled, _, _>("scm.manufacturing.work_order.cancelled", move |envelope| {
+        let svc = svc.clone();
+        async move {
+            tracing::info!(
+                "Processing work order cancelled: wo_id={}, item={}, qty={}",
+                envelope.payload.work_order_id, envelope.payload.item_id, envelope.payload.quantity
+            );
+            // Release any reserved stock for this work order's components
+            if let Err(e) = svc.handle_work_order_cancelled(
+                &envelope.payload.work_order_id,
+            ).await {
+                tracing::error!("Failed to handle work order cancelled: {}", e);
             }
         }
     }).await.ok();

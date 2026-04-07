@@ -35,6 +35,14 @@ impl CashManagementService {
         &self,
         input: &CreateBankAccountRequest,
     ) -> AppResult<BankAccount> {
+        // Check for duplicate account number
+        let existing = self.repo.list_bank_accounts().await?;
+        if existing.iter().any(|a| a.account_number == input.account_number) {
+            return Err(AppError::Validation(format!(
+                "Bank account number '{}' already exists",
+                input.account_number
+            )));
+        }
         let account = self.repo.create_bank_account(input).await?;
         if let Err(e) = self
             .bus
@@ -94,6 +102,12 @@ impl CashManagementService {
 
         if input.amount_cents < 0 {
             return Err(AppError::Validation("Amount must be non-negative".into()));
+        }
+
+        if input.amount_cents == 0 {
+            return Err(AppError::Validation(
+                "Transaction amount must be greater than zero".into(),
+            ));
         }
 
         self.repo.create_bank_transaction(input).await
@@ -1130,6 +1144,67 @@ mod tests {
 
         // Not found
         let result = svc.get_reconciliation("nonexistent").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_bank_account_unique_account_number() {
+        let pool = setup().await;
+        let svc = CashManagementService {
+            repo: CashManagementRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        svc.create_bank_account(&CreateBankAccountRequest {
+            name: "First Account".into(),
+            bank_name: "Bank A".into(),
+            account_number: "123456789".into(),
+            routing_number: None,
+            balance_cents: None,
+            currency: None,
+        }).await.unwrap();
+
+        // Duplicate account number should fail
+        let result = svc.create_bank_account(&CreateBankAccountRequest {
+            name: "Second Account".into(),
+            bank_name: "Bank B".into(),
+            account_number: "123456789".into(),
+            routing_number: None,
+            balance_cents: None,
+            currency: None,
+        }).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_bank_transaction_zero_amount_rejected() {
+        let pool = setup().await;
+        let svc = CashManagementService {
+            repo: CashManagementRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let account = svc.create_bank_account(&CreateBankAccountRequest {
+            name: "Test".into(),
+            bank_name: "Bank".into(),
+            account_number: "999888777".into(),
+            routing_number: None,
+            balance_cents: Some(10000),
+            currency: None,
+        }).await.unwrap();
+
+        let result = svc.create_bank_transaction(&CreateBankTransactionRequest {
+            bank_account_id: account.id,
+            amount_cents: 0,
+            transaction_date: "2025-01-15".into(),
+            description: None,
+            r#type: "deposit".into(),
+            reference: None,
+        }).await;
         assert!(result.is_err());
     }
 }

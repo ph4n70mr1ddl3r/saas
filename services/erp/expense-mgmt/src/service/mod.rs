@@ -291,6 +291,12 @@ impl ExpenseService {
             )));
         }
 
+        if input.amount_cents <= 0 {
+            return Err(AppError::Validation(
+                "Expense line amount must be greater than zero".into(),
+            ));
+        }
+
         // Validate expense date is not in the future
         if let Ok(expense_date) = chrono::NaiveDate::parse_from_str(&input.expense_date, "%Y-%m-%d") {
             let today = chrono::Utc::now().date_naive();
@@ -1005,5 +1011,61 @@ mod tests {
             daily_rate_cents: 10000,
         }).await.unwrap();
         assert_eq!(pd.total_cents, 10000);
+    }
+
+    #[tokio::test]
+    async fn test_expense_line_zero_amount_rejected() {
+        let pool = setup().await;
+        let svc = ExpenseService {
+            repo: ExpenseRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let cat = svc.create_category(&CreateExpenseCategoryRequest {
+            name: "Travel".into(),
+            description: None,
+            limit_cents: None,
+            requires_receipt: None,
+        }).await.unwrap();
+
+        let report = svc.create_report(&CreateExpenseReportRequest {
+            employee_id: "emp-1".into(),
+            title: "Trip".into(),
+            description: None,
+        }).await.unwrap();
+
+        // Zero amount should fail
+        let result = svc.create_line(&CreateExpenseLineRequest {
+            report_id: report.id.clone(),
+            expense_date: "2025-06-01".into(),
+            category_id: cat.id.clone(),
+            amount_cents: 0,
+            description: None,
+            receipt_url: None,
+        }).await;
+        assert!(result.is_err());
+
+        // Negative amount should fail
+        let result = svc.create_line(&CreateExpenseLineRequest {
+            report_id: report.id.clone(),
+            expense_date: "2025-06-01".into(),
+            category_id: cat.id.clone(),
+            amount_cents: -100,
+            description: None,
+            receipt_url: None,
+        }).await;
+        assert!(result.is_err());
+
+        // Positive amount should succeed
+        svc.create_line(&CreateExpenseLineRequest {
+            report_id: report.id,
+            expense_date: "2025-06-01".into(),
+            category_id: cat.id,
+            amount_cents: 5000,
+            description: None,
+            receipt_url: None,
+        }).await.unwrap();
     }
 }

@@ -457,3 +457,33 @@ pub struct ArReceiptCreated {
     pub customer_id: String,
     pub amount_cents: i64,
 }
+
+// AR Invoice Events
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArInvoiceApproved {
+    pub invoice_id: String,
+    pub customer_id: String,
+    pub total_cents: i64,
+}
+
+// AP Invoice Events
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApInvoiceCancelled {
+    pub invoice_id: String,
+    pub vendor_id: String,
+}
+
+// GL Events
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct YearEndClosed {
+    pub fiscal_year: i32,
+    pub entry_id: String,
+}
+
+// Manufacturing Events
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkOrderStarted {
+    pub work_order_id: String,
+    pub item_id: String,
+    pub quantity: i64,
+}

@@ -115,6 +115,26 @@ impl ArService {
         }
         let invoice = self.repo.mark_invoice_approved(&invoice.id).await?;
         let lines = self.repo.get_invoice_lines(&invoice.id).await?;
+
+        if let Err(e) = self
+            .bus
+            .publish(
+                "erp.ar.invoice.approved",
+                saas_proto::events::ArInvoiceApproved {
+                    invoice_id: invoice.id.clone(),
+                    customer_id: invoice.customer_id.clone(),
+                    total_cents: invoice.total_cents,
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "erp.ar.invoice.approved",
+                e
+            );
+        }
+
         Ok(ArInvoiceWithLines { invoice, lines })
     }
 

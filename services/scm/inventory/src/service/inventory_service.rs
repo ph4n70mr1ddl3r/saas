@@ -474,6 +474,21 @@ impl InventoryService {
         Ok(())
     }
 
+    /// Release reserved materials when a work order is cancelled.
+    pub async fn handle_work_order_cancelled(
+        &self,
+        work_order_id: &str,
+    ) -> AppResult<()> {
+        // Find and release reservations tied to this work order
+        let reservations = self.reservation_repo.list().await?;
+        for res in reservations {
+            if res.reference_id == work_order_id && res.status == "active" {
+                self.reservation_repo.cancel(&res.id).await?;
+            }
+        }
+        Ok(())
+    }
+
     /// Add returned items back to inventory when a customer return is processed.
     pub async fn handle_return_created(
         &self,
