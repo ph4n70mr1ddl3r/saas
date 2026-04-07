@@ -247,6 +247,17 @@ impl LedgerService {
         Ok(JournalEntryWithLines { entry: original, lines })
     }
 
+    /// Delete a draft journal entry that has not been posted.
+    pub async fn delete_journal_entry(&self, id: &str) -> AppResult<()> {
+        let entry = self.repo.get_journal_entry(id).await?;
+        if entry.status != "draft" {
+            return Err(AppError::Validation(
+                "Only draft journal entries can be deleted".into(),
+            ));
+        }
+        self.repo.delete_journal_entry(id).await
+    }
+
     // --- Reports ---
 
     pub async fn trial_balance(&self) -> AppResult<Vec<TrialBalanceRow>> {
@@ -2410,6 +2421,83 @@ mod tests {
 
         // Deactivated account should not be found by type search
         let result = repo.find_account_by_type_async("asset").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_delete_draft_journal_entry() {
+        let repo = setup_repo().await;
+        let svc = LedgerService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let period = create_test_period(&repo, "2025-01").await;
+        let cash = create_test_account(&repo, "1111", "Cash", "asset").await;
+        let revenue = create_test_account(&repo, "4111", "Revenue", "revenue").await;
+
+        let entry = svc
+            .create_journal_entry(
+                &CreateJournalEntryRequest {
+                    period_id: period.id.clone(),
+                    description: Some("Draft to delete".into()),
+                    lines: vec![
+                        CreateJournalLineRequest {
+                            account_id: cash.id.clone(),
+                            debit_cents: 1000,
+                            credit_cents: 0,
+                            description: None,
+                        },
+                        CreateJournalLineRequest {
+                            account_id: revenue.id.clone(),
+                            debit_cents: 0,
+                            credit_cents: 1000,
+                            description: None,
+                        },
+                    ],
+                },
+                "user-1",
+            )
+            .await
+            .unwrap();
+        assert_eq!(entry.entry.status, "draft");
+
+        // Delete draft should succeed
+        svc.delete_journal_entry(&entry.entry.id).await.unwrap();
+
+        // Entry should be gone
+        let result = repo.get_journal_entry(&entry.entry.id).await;
+        assert!(result.is_err());
+
+        // Cannot delete a posted entry
+        let entry2 = svc
+            .create_journal_entry(
+                &CreateJournalEntryRequest {
+                    period_id: period.id,
+                    description: Some("To post".into()),
+                    lines: vec![
+                        CreateJournalLineRequest {
+                            account_id: cash.id,
+                            debit_cents: 500,
+                            credit_cents: 0,
+                            description: None,
+                        },
+                        CreateJournalLineRequest {
+                            account_id: revenue.id,
+                            debit_cents: 0,
+                            credit_cents: 500,
+                            description: None,
+                        },
+                    ],
+                },
+                "user-1",
+            )
+            .await
+            .unwrap();
+        svc.post_journal_entry(&entry2.entry.id).await.unwrap();
+        let result = svc.delete_journal_entry(&entry2.entry.id).await;
         assert!(result.is_err());
     }
 }

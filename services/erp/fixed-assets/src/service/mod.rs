@@ -38,6 +38,16 @@ impl FixedAssetsService {
         if input.useful_life_months <= 0 {
             return Err(AppError::Validation("Useful life must be positive".into()));
         }
+        // Validate depreciation_method if specified
+        if let Some(ref method) = input.depreciation_method {
+            let valid_methods = ["straight_line", "declining_balance", "sum_of_years_digits"];
+            if !valid_methods.contains(&method.as_str()) {
+                return Err(AppError::Validation(format!(
+                    "Invalid depreciation_method '{}'. Must be one of: {:?}",
+                    method, valid_methods
+                )));
+            }
+        }
         let asset = self.repo.create_asset(input).await?;
         if let Err(e) = self
             .bus
@@ -110,6 +120,71 @@ impl FixedAssetsService {
         }
 
         Ok(asset)
+    }
+
+    /// Dispose an asset with gain/loss calculation.
+    /// `proceeds_cents` is the amount received from disposal (0 for write-off).
+    /// Returns (asset, gain_or_loss_cents) where positive = gain, negative = loss.
+    pub async fn dispose_asset(
+        &self,
+        id: &str,
+        proceeds_cents: i64,
+    ) -> AppResult<(Asset, i64)> {
+        let asset = self.repo.get_asset(id).await?;
+        if asset.status == "disposed" {
+            return Err(AppError::Validation(
+                "Asset is already disposed".into(),
+            ));
+        }
+        if proceeds_cents < 0 {
+            return Err(AppError::Validation(
+                "Disposal proceeds must be non-negative".into(),
+            ));
+        }
+
+        // Calculate net book value
+        let accumulated_depreciation_cents = self
+            .repo
+            .get_last_depreciation(&asset.id)
+            .await
+            .ok()
+            .flatten()
+            .map(|d| d.accumulated_cents)
+            .unwrap_or(0);
+        let net_book_value = asset.purchase_cost_cents - accumulated_depreciation_cents;
+
+        // Gain/loss = proceeds - net book value
+        let gain_or_loss = proceeds_cents - net_book_value;
+
+        let asset = self.repo.update_asset(id, &UpdateAssetRequest {
+            name: None,
+            description: None,
+            category: None,
+            status: Some("disposed".into()),
+        }).await?;
+
+        if let Err(e) = self
+            .bus
+            .publish(
+                "erp.assets.asset.disposed",
+                AssetDisposed {
+                    asset_id: asset.id.clone(),
+                    name: asset.name.clone(),
+                    asset_number: asset.asset_number.clone(),
+                    cost_cents: asset.purchase_cost_cents,
+                    accumulated_depreciation_cents,
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "erp.assets.asset.disposed",
+                e
+            );
+        }
+
+        Ok((asset, gain_or_loss))
     }
 
     // --- Depreciation ---
@@ -714,5 +789,122 @@ mod tests {
     async fn test_sum_of_years_digits_invalid_year() {
         let dep = FixedAssetsService::calculate_sum_of_years_digits(100_000, 10_000, 5, 6);
         assert_eq!(dep, 0);
+    }
+
+    #[tokio::test]
+    async fn test_dispose_asset_with_gain_loss() {
+        let repo = setup_repo().await;
+        let svc = FixedAssetsService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Create asset: cost=100000, salvage=10000
+        let asset = repo
+            .create_asset(&CreateAssetRequest {
+                name: "Test Vehicle".into(),
+                description: None,
+                asset_number: "ASSET-DISP-001".into(),
+                category: "vehicles".into(),
+                purchase_date: "2024-01-01".into(),
+                purchase_cost_cents: 100_000,
+                salvage_value_cents: Some(10_000),
+                useful_life_months: 60,
+                depreciation_method: None,
+            })
+            .await
+            .unwrap();
+
+        // Depreciate 20000
+        repo.insert_depreciation(&asset.id, "2024-01", 20_000, 20_000, 80_000)
+            .await
+            .unwrap();
+
+        // Dispose for 70000: NBV = 80000, gain/loss = 70000 - 80000 = -10000 (loss)
+        let (disposed, gain_loss) = svc.dispose_asset(&asset.id, 70_000).await.unwrap();
+        assert_eq!(disposed.status, "disposed");
+        assert_eq!(gain_loss, -10_000); // loss of 10000
+
+        // Cannot dispose again
+        let result = svc.dispose_asset(&disposed.id, 0).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_dispose_asset_with_gain() {
+        let repo = setup_repo().await;
+        let svc = FixedAssetsService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let asset = repo
+            .create_asset(&CreateAssetRequest {
+                name: "Art".into(),
+                description: None,
+                asset_number: "ASSET-DISP-002".into(),
+                category: "equipment".into(),
+                purchase_date: "2023-01-01".into(),
+                purchase_cost_cents: 50_000,
+                salvage_value_cents: Some(0),
+                useful_life_months: 60,
+                depreciation_method: None,
+            })
+            .await
+            .unwrap();
+
+        // Depreciate 20000, NBV = 30000
+        repo.insert_depreciation(&asset.id, "2023-01", 20_000, 20_000, 30_000)
+            .await
+            .unwrap();
+
+        // Sell for 40000: gain = 40000 - 30000 = 10000
+        let (_, gain_loss) = svc.dispose_asset(&asset.id, 40_000).await.unwrap();
+        assert_eq!(gain_loss, 10_000); // gain of 10000
+    }
+
+    #[tokio::test]
+    async fn test_depreciation_method_validation() {
+        let repo = setup_repo().await;
+        let svc = FixedAssetsService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Valid methods should succeed
+        for method in &["straight_line", "declining_balance", "sum_of_years_digits"] {
+            let asset = svc.create_asset(&CreateAssetRequest {
+                name: format!("Asset-{}", method),
+                description: None,
+                asset_number: format!("ASSET-METH-{}", method),
+                category: "equipment".into(),
+                purchase_date: "2025-01-01".into(),
+                purchase_cost_cents: 10_000,
+                salvage_value_cents: Some(0),
+                useful_life_months: 12,
+                depreciation_method: Some(method.to_string()),
+            }).await.unwrap();
+            assert_eq!(asset.status, "active");
+        }
+
+        // Invalid method should fail
+        let result = svc.create_asset(&CreateAssetRequest {
+            name: "Bad Asset".into(),
+            description: None,
+            asset_number: "ASSET-BAD".into(),
+            category: "equipment".into(),
+            purchase_date: "2025-01-01".into(),
+            purchase_cost_cents: 10_000,
+            salvage_value_cents: Some(0),
+            useful_life_months: 12,
+            depreciation_method: Some("invalid_method".into()),
+        }).await;
+        assert!(result.is_err());
     }
 }

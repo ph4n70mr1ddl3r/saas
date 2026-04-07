@@ -220,6 +220,31 @@ impl ExpenseService {
         Ok(report)
     }
 
+    /// Resubmit a rejected expense report (sets status back to draft for editing).
+    pub async fn resubmit_report(&self, id: &str) -> AppResult<ExpenseReport> {
+        let report = self.repo.get_report(id).await?;
+        if report.status != "rejected" {
+            return Err(AppError::Validation(format!(
+                "Cannot resubmit report in '{}' status. Only 'rejected' reports can be resubmitted.",
+                report.status
+            )));
+        }
+        // Reset to draft so employee can edit and re-submit
+        self.repo.resubmit_report(id).await
+    }
+
+    /// Delete a draft expense report.
+    pub async fn delete_report(&self, id: &str) -> AppResult<()> {
+        let report = self.repo.get_report(id).await?;
+        if report.status != "draft" {
+            return Err(AppError::Validation(format!(
+                "Cannot delete report in '{}' status. Only 'draft' reports can be deleted.",
+                report.status
+            )));
+        }
+        self.repo.delete_report(id).await
+    }
+
     pub async fn mark_paid(&self, id: &str) -> AppResult<ExpenseReport> {
         let report = self.repo.get_report(id).await?;
 
@@ -266,6 +291,16 @@ impl ExpenseService {
             )));
         }
 
+        // Validate expense date is not in the future
+        if let Ok(expense_date) = chrono::NaiveDate::parse_from_str(&input.expense_date, "%Y-%m-%d") {
+            let today = chrono::Utc::now().date_naive();
+            if expense_date > today {
+                return Err(AppError::Validation(
+                    "Expense date cannot be in the future".into(),
+                ));
+            }
+        }
+
         let category = self.repo.get_category(&input.category_id).await?;
 
         if category.limit_cents > 0 {
@@ -290,6 +325,12 @@ impl ExpenseService {
                 "Cannot add per diems to report in '{}' status. Only 'draft' reports can be edited.",
                 report.status
             )));
+        }
+        // Validate end_date >= start_date
+        if input.end_date < input.start_date {
+            return Err(AppError::Validation(
+                "Per diem end_date must be on or after start_date".into(),
+            ));
         }
         self.repo.create_per_diem(input).await
     }
@@ -880,5 +921,89 @@ mod tests {
         assert_eq!(updated.limit_cents, 100000);
         assert_eq!(updated.requires_receipt, 0);
         assert_eq!(updated.gl_account_code, Some("6100".into()));
+    }
+
+    #[tokio::test]
+    async fn test_resubmit_rejected_report() {
+        let repo = setup_repo().await;
+        let svc = ExpenseService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let report = create_test_report(&repo, "emp-1", "Bad Report").await;
+        repo.submit_report(&report.id).await.unwrap();
+        repo.reject_report(&report.id, "Invalid").await.unwrap();
+
+        // Resubmit should set back to draft
+        let resubmitted = svc.resubmit_report(&report.id).await.unwrap();
+        assert_eq!(resubmitted.status, "draft");
+        assert!(resubmitted.rejected_reason.is_none());
+
+        // Cannot resubmit a non-rejected report
+        let report2 = create_test_report(&repo, "emp-2", "Draft Report").await;
+        let result = svc.resubmit_report(&report2.id).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_delete_draft_report() {
+        let repo = setup_repo().await;
+        let svc = ExpenseService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let report = create_test_report(&repo, "emp-1", "To Delete").await;
+        assert_eq!(report.status, "draft");
+
+        svc.delete_report(&report.id).await.unwrap();
+
+        // Report should be gone
+        let result = repo.get_report(&report.id).await;
+        assert!(result.is_err());
+
+        // Cannot delete submitted report
+        let report2 = create_test_report(&repo, "emp-2", "Submitted").await;
+        repo.submit_report(&report2.id).await.unwrap();
+        let result = svc.delete_report(&report2.id).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_per_diem_date_validation() {
+        let repo = setup_repo().await;
+        let svc = ExpenseService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let report = create_test_report(&repo, "emp-1", "Dates").await;
+
+        // end_date before start_date should fail
+        let result = svc.create_per_diem(&CreatePerDiemRequest {
+            report_id: report.id.clone(),
+            location: "NYC".into(),
+            start_date: "2025-07-10".into(),
+            end_date: "2025-07-05".into(),
+            daily_rate_cents: 10000,
+        }).await;
+        assert!(result.is_err());
+
+        // Same day should succeed
+        let pd = svc.create_per_diem(&CreatePerDiemRequest {
+            report_id: report.id,
+            location: "NYC".into(),
+            start_date: "2025-07-10".into(),
+            end_date: "2025-07-10".into(),
+            daily_rate_cents: 10000,
+        }).await.unwrap();
+        assert_eq!(pd.total_cents, 10000);
     }
 }

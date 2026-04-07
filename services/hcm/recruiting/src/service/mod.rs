@@ -60,6 +60,10 @@ impl RecruitingService {
         self.repo.list_applications().await
     }
 
+    pub async fn get_application(&self, id: &str) -> AppResult<Application> {
+        self.repo.get_application(id).await
+    }
+
     pub async fn create_application(
         &self,
         input: CreateApplicationRequest,
@@ -735,6 +739,42 @@ mod tests {
                 },
             )
             .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_application() {
+        let repo = setup_repo().await;
+
+        let job = repo
+            .create_job(&CreateJobRequest {
+                title: "Engineer".into(),
+                department_id: "eng".into(),
+                description: None,
+                requirements: None,
+            })
+            .await
+            .unwrap();
+
+        let app = repo
+            .create_application(&CreateApplicationRequest {
+                job_id: job.id.clone(),
+                candidate_first_name: "John".into(),
+                candidate_last_name: "Doe".into(),
+                candidate_email: "john@test.com".into(),
+                notes: Some("Great candidate".into()),
+            })
+            .await
+            .unwrap();
+
+        // Fetch by ID
+        let fetched = repo.get_application(&app.id).await.unwrap();
+        assert_eq!(fetched.id, app.id);
+        assert_eq!(fetched.candidate_email, "john@test.com");
+        assert_eq!(fetched.notes, Some("Great candidate".into()));
+
+        // Not found
+        let result = repo.get_application("nonexistent").await;
         assert!(result.is_err());
     }
 

@@ -47,6 +47,14 @@ impl InventoryService {
     }
 
     pub async fn create_warehouse(&self, input: CreateWarehouse) -> AppResult<WarehouseResponse> {
+        // Check for duplicate warehouse name
+        let existing = self.warehouse_repo.list().await?;
+        if existing.iter().any(|w| w.name.to_lowercase() == input.name.to_lowercase()) {
+            return Err(AppError::Validation(format!(
+                "Warehouse with name '{}' already exists",
+                input.name
+            )));
+        }
         self.warehouse_repo.create(&input).await
     }
 
@@ -71,6 +79,14 @@ impl InventoryService {
         input
             .validate()
             .map_err(|e| saas_common::error::AppError::Validation(e.to_string()))?;
+        // Check for duplicate SKU
+        let existing = self.item_repo.list(&ItemFilters { item_type: None, is_active: None }).await?;
+        if existing.iter().any(|i| i.sku.to_lowercase() == input.sku.to_lowercase()) {
+            return Err(AppError::Validation(format!(
+                "Item with SKU '{}' already exists",
+                input.sku
+            )));
+        }
         self.item_repo.create(&input).await
     }
 
@@ -103,6 +119,38 @@ impl InventoryService {
         input
             .validate()
             .map_err(|e| saas_common::error::AppError::Validation(e.to_string()))?;
+
+        // Validate movement_type
+        let valid_types = ["receipt", "transfer", "adjustment", "issue", "pick", "return"];
+        if !valid_types.contains(&input.movement_type.as_str()) {
+            return Err(AppError::Validation(format!(
+                "Invalid movement_type '{}'. Must be one of: {:?}",
+                input.movement_type, valid_types
+            )));
+        }
+
+        // Check for negative stock on deduct operations
+        match input.movement_type.as_str() {
+            "transfer" | "issue" | "pick" => {
+                let warehouse_id = match &input.from_warehouse_id {
+                    Some(wh) => wh,
+                    None => &input.to_warehouse_id,
+                };
+                let stock = self
+                    .stock_level_repo
+                    .get_by_item_warehouse(&input.item_id, warehouse_id)
+                    .await?;
+                let on_hand = stock.as_ref().map(|s| s.quantity_on_hand).unwrap_or(0);
+                if on_hand < input.quantity {
+                    return Err(AppError::Validation(format!(
+                        "Insufficient stock for {} operation. On hand: {}, Requested: {}",
+                        input.movement_type, on_hand, input.quantity
+                    )));
+                }
+            }
+            _ => {}
+        }
+
         let movement = self.stock_movement_repo.create(&input).await?;
         // Update stock levels based on movement type
         match input.movement_type.as_str() {
@@ -173,6 +221,19 @@ impl InventoryService {
         input
             .validate()
             .map_err(|e| saas_common::error::AppError::Validation(e.to_string()))?;
+
+        // Check available stock before reserving
+        let stock = self
+            .stock_level_repo
+            .get_by_item_warehouse(&input.item_id, &input.warehouse_id)
+            .await?;
+        let available = stock.as_ref().map(|s| s.quantity_available).unwrap_or(0);
+        if available < input.quantity {
+            return Err(AppError::Validation(format!(
+                "Insufficient available stock for reservation. Available: {}, Requested: {}",
+                available, input.quantity
+            )));
+        }
 
         let mut tx = self.pool.begin().await?;
 
@@ -1466,6 +1527,231 @@ mod tests {
         assert_eq!(fetched.reorder_point, 50);
         assert_eq!(fetched.safety_stock, 20);
         assert_eq!(fetched.economic_order_qty, 100);
+    }
+
+    #[tokio::test]
+    async fn test_warehouse_name_uniqueness() {
+        let pool = setup().await;
+        let svc = InventoryService {
+            pool: pool.clone(),
+            warehouse_repo: WarehouseRepo::new(pool.clone()),
+            item_repo: ItemRepo::new(pool.clone()),
+            stock_level_repo: StockLevelRepo::new(pool.clone()),
+            stock_movement_repo: StockMovementRepo::new(pool.clone()),
+            reservation_repo: ReservationRepo::new(pool.clone()),
+            cycle_count_repo: CycleCountRepo::new(pool.clone()),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        svc.create_warehouse(CreateWarehouse {
+            name: "Main WH".into(),
+            address: None,
+        })
+        .await
+        .unwrap();
+
+        // Duplicate name should fail
+        let result = svc.create_warehouse(CreateWarehouse {
+            name: "MAIN WH".into(),
+            address: None,
+        })
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_item_sku_uniqueness() {
+        let pool = setup().await;
+        let svc = InventoryService {
+            pool: pool.clone(),
+            warehouse_repo: WarehouseRepo::new(pool.clone()),
+            item_repo: ItemRepo::new(pool.clone()),
+            stock_level_repo: StockLevelRepo::new(pool.clone()),
+            stock_movement_repo: StockMovementRepo::new(pool.clone()),
+            reservation_repo: ReservationRepo::new(pool.clone()),
+            cycle_count_repo: CycleCountRepo::new(pool.clone()),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        svc.create_item(CreateItem {
+            sku: "SKU-UNIQ".into(),
+            name: "Item A".into(),
+            description: None,
+            unit_of_measure: None,
+            item_type: "finished".into(),
+            reorder_point: 0,
+            safety_stock: 0,
+            economic_order_qty: 0,
+            unit_price_cents: None,
+        })
+        .await
+        .unwrap();
+
+        // Duplicate SKU should fail
+        let result = svc.create_item(CreateItem {
+            sku: "sku-uniq".into(), // case-insensitive
+            name: "Item B".into(),
+            description: None,
+            unit_of_measure: None,
+            item_type: "finished".into(),
+            reorder_point: 0,
+            safety_stock: 0,
+            economic_order_qty: 0,
+            unit_price_cents: None,
+        })
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_stock_movement_type_validation() {
+        let pool = setup().await;
+        let svc = InventoryService {
+            pool: pool.clone(),
+            warehouse_repo: WarehouseRepo::new(pool.clone()),
+            item_repo: ItemRepo::new(pool.clone()),
+            stock_level_repo: StockLevelRepo::new(pool.clone()),
+            stock_movement_repo: StockMovementRepo::new(pool.clone()),
+            reservation_repo: ReservationRepo::new(pool.clone()),
+            cycle_count_repo: CycleCountRepo::new(pool.clone()),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let wh = svc.warehouse_repo.create(&CreateWarehouse {
+            name: "WH-TYPE".into(),
+            address: None,
+        }).await.unwrap();
+        let item = svc.item_repo.create(&CreateItem {
+            sku: "SKU-TYPE".into(),
+            name: "Type Item".into(),
+            description: None,
+            unit_of_measure: None,
+            item_type: "finished".into(),
+            reorder_point: 0,
+            safety_stock: 0,
+            economic_order_qty: 0,
+            unit_price_cents: None,
+        }).await.unwrap();
+
+        let result = svc.create_stock_movement(CreateStockMovement {
+            item_id: item.id,
+            from_warehouse_id: None,
+            to_warehouse_id: wh.id,
+            quantity: 10,
+            movement_type: "invalid_type".into(),
+            reference_type: None,
+            reference_id: None,
+        }).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_reservation_insufficient_stock_prevented() {
+        let pool = setup().await;
+        let svc = InventoryService {
+            pool: pool.clone(),
+            warehouse_repo: WarehouseRepo::new(pool.clone()),
+            item_repo: ItemRepo::new(pool.clone()),
+            stock_level_repo: StockLevelRepo::new(pool.clone()),
+            stock_movement_repo: StockMovementRepo::new(pool.clone()),
+            reservation_repo: ReservationRepo::new(pool.clone()),
+            cycle_count_repo: CycleCountRepo::new(pool.clone()),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let wh = svc.warehouse_repo.create(&CreateWarehouse {
+            name: "WH-RES-LIMIT".into(),
+            address: None,
+        }).await.unwrap();
+        let item = svc.item_repo.create(&CreateItem {
+            sku: "SKU-RES-LIMIT".into(),
+            name: "Res Item".into(),
+            description: None,
+            unit_of_measure: None,
+            item_type: "finished".into(),
+            reorder_point: 0,
+            safety_stock: 0,
+            economic_order_qty: 0,
+            unit_price_cents: None,
+        }).await.unwrap();
+
+        // Put 5 units on hand
+        svc.stock_level_repo.upsert_receipt(&item.id, &wh.id, 5).await.unwrap();
+
+        // Reserve 10 should fail (only 5 available)
+        let result = svc.create_reservation(CreateReservation {
+            item_id: item.id.clone(),
+            warehouse_id: wh.id.clone(),
+            quantity: 10,
+            reference_type: "test".into(),
+            reference_id: "REF-1".into(),
+        }).await;
+        assert!(result.is_err());
+
+        // Reserve 5 should succeed
+        svc.create_reservation(CreateReservation {
+            item_id: item.id,
+            warehouse_id: wh.id,
+            quantity: 5,
+            reference_type: "test".into(),
+            reference_id: "REF-2".into(),
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_issue_insufficient_stock_prevented() {
+        let pool = setup().await;
+        let svc = InventoryService {
+            pool: pool.clone(),
+            warehouse_repo: WarehouseRepo::new(pool.clone()),
+            item_repo: ItemRepo::new(pool.clone()),
+            stock_level_repo: StockLevelRepo::new(pool.clone()),
+            stock_movement_repo: StockMovementRepo::new(pool.clone()),
+            reservation_repo: ReservationRepo::new(pool.clone()),
+            cycle_count_repo: CycleCountRepo::new(pool.clone()),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let wh = svc.warehouse_repo.create(&CreateWarehouse {
+            name: "WH-ISS".into(),
+            address: None,
+        }).await.unwrap();
+        let item = svc.item_repo.create(&CreateItem {
+            sku: "SKU-ISS".into(),
+            name: "Issue Item".into(),
+            description: None,
+            unit_of_measure: None,
+            item_type: "finished".into(),
+            reorder_point: 0,
+            safety_stock: 0,
+            economic_order_qty: 0,
+            unit_price_cents: None,
+        }).await.unwrap();
+
+        // Put 10 units on hand
+        svc.stock_level_repo.upsert_receipt(&item.id, &wh.id, 10).await.unwrap();
+
+        // Issue 20 should fail
+        let result = svc.create_stock_movement(CreateStockMovement {
+            item_id: item.id,
+            from_warehouse_id: None,
+            to_warehouse_id: wh.id,
+            quantity: 20,
+            movement_type: "issue".into(),
+            reference_type: None,
+            reference_id: None,
+        }).await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]

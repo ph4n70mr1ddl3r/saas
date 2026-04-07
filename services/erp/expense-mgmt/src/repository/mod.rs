@@ -191,6 +191,37 @@ impl ExpenseRepo {
         self.get_report(id).await
     }
 
+    pub async fn resubmit_report(&self, id: &str) -> AppResult<ExpenseReport> {
+        sqlx::query(
+            "UPDATE expense_reports SET status = 'draft', rejected_reason = NULL, submitted_at = NULL WHERE id = ?",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        self.get_report(id).await
+    }
+
+    pub async fn delete_report(&self, id: &str) -> AppResult<()> {
+        // Delete associated lines, per_diems, mileage first
+        sqlx::query("DELETE FROM mileage WHERE report_id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM per_diems WHERE report_id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM expense_lines WHERE report_id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM expense_reports WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn recalculate_report_total(&self, report_id: &str) -> AppResult<()> {
         let lines_total: i64 = sqlx::query_scalar(
             "SELECT COALESCE(SUM(amount_cents), 0) FROM expense_lines WHERE report_id = ?",

@@ -290,6 +290,19 @@ impl LedgerRepo {
         Ok(row)
     }
 
+    /// Delete a draft journal entry and its lines.
+    pub async fn delete_journal_entry(&self, id: &str) -> AppResult<()> {
+        sqlx::query("DELETE FROM journal_lines WHERE entry_id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM journal_entries WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Generate the next entry number atomically using a counter table.
     /// Falls back to COUNT-based if the counter table doesn't exist.
     pub async fn next_entry_number(&self) -> AppResult<String> {
