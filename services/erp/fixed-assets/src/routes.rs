@@ -36,6 +36,10 @@ pub fn build_router(state: AppState) -> Router {
             axum::routing::post(handlers::run_depreciation),
         )
         .route(
+            "/api/v1/assets/{id}/dispose",
+            axum::routing::post(handlers::dispose_asset),
+        )
+        .route(
             "/health",
             get(|| async { axum::Json(serde_json::json!({"status": "ok"})) }),
         )

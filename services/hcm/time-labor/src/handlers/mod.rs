@@ -63,6 +63,25 @@ pub async fn approve_timesheet(
     Ok(Json(ApiResponse::new(ts)))
 }
 
+pub async fn get_timesheet(
+    _user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<Timesheet>>, AppError> {
+    let ts = state.service.get_timesheet(&id).await?;
+    Ok(Json(ApiResponse::new(ts)))
+}
+
+pub async fn reject_timesheet(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<Timesheet>>, AppError> {
+    rbac::require_admin(&user.roles, "hcm").map_err(|e| AppError::Forbidden(e))?;
+    let ts = state.service.reject_timesheet(&id).await?;
+    Ok(Json(ApiResponse::new(ts)))
+}
+
 pub async fn list_leave_requests(
     _user: AuthUser,
     State(state): State<AppState>,

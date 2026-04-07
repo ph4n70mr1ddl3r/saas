@@ -91,6 +91,15 @@ impl TimeLaborRepo {
         self.get_timesheet(id).await
     }
 
+    pub async fn update_timesheet_status(&self, id: &str, status: &str) -> AppResult<Timesheet> {
+        sqlx::query("UPDATE timesheets SET status = ? WHERE id = ?")
+            .bind(status)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        self.get_timesheet(id).await
+    }
+
     // --- Time Entries ---
 
     pub async fn list_time_entries(&self, timesheet_id: &str) -> AppResult<Vec<TimeEntry>> {

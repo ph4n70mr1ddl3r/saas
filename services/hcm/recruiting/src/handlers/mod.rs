@@ -53,6 +53,15 @@ pub async fn list_applications(
     Ok(Json(ApiResponse::new(list)))
 }
 
+pub async fn get_application(
+    _user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<Application>>, AppError> {
+    let app = state.service.get_application(&id).await?;
+    Ok(Json(ApiResponse::new(app)))
+}
+
 pub async fn create_application(
     _user: AuthUser,
     State(state): State<AppState>,

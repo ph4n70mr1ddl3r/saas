@@ -99,7 +99,27 @@ impl ManufacturingService {
         self.work_order_repo
             .update_status(id, "cancelled", None, None)
             .await?;
-        self.work_order_repo.get_by_id(id).await
+        let wo = self.work_order_repo.get_by_id(id).await?;
+        if let Err(e) = self
+            .bus
+            .publish(
+                "scm.manufacturing.work_order.cancelled",
+                saas_proto::events::WorkOrderCancelled {
+                    work_order_id: wo.id.clone(),
+                    item_id: wo.item_id.clone(),
+                    quantity: wo.quantity,
+                    reason: None,
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "scm.manufacturing.work_order.cancelled",
+                e
+            );
+        }
+        Ok(wo)
     }
 
     // BOMs
@@ -482,5 +502,55 @@ mod tests {
         assert_eq!(completed.item_id, "ITEM-FG-001");
         assert_eq!(completed.quantity, 500);
         assert_eq!(completed.actual_end, Some(end_time.to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_cancel_work_order_service() {
+        let pool = setup().await;
+        let svc = ManufacturingService {
+            work_order_repo: WorkOrderRepo::new(pool.clone()),
+            bom_repo: BomRepo::new(pool.clone()),
+            routing_step_repo: RoutingStepRepo::new(pool.clone()),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Cancel from planned
+        let wo = svc.create_work_order(CreateWorkOrder {
+            item_id: "ITEM-CANCEL-001".into(),
+            quantity: 10,
+            planned_start: None,
+            planned_end: None,
+        }).await.unwrap();
+        assert_eq!(wo.status, "planned");
+
+        let cancelled = svc.cancel_work_order(&wo.id).await.unwrap();
+        assert_eq!(cancelled.status, "cancelled");
+
+        // Cancel from in_progress
+        let wo2 = svc.create_work_order(CreateWorkOrder {
+            item_id: "ITEM-CANCEL-002".into(),
+            quantity: 20,
+            planned_start: None,
+            planned_end: None,
+        }).await.unwrap();
+        svc.start_work_order(&wo2.id).await.unwrap();
+
+        let cancelled2 = svc.cancel_work_order(&wo2.id).await.unwrap();
+        assert_eq!(cancelled2.status, "cancelled");
+
+        // Cannot cancel a completed work order
+        let wo3 = svc.create_work_order(CreateWorkOrder {
+            item_id: "ITEM-CANCEL-003".into(),
+            quantity: 5,
+            planned_start: None,
+            planned_end: None,
+        }).await.unwrap();
+        svc.start_work_order(&wo3.id).await.unwrap();
+        svc.complete_work_order(&wo3.id).await.unwrap();
+
+        let result = svc.cancel_work_order(&wo3.id).await;
+        assert!(result.is_err());
     }
 }

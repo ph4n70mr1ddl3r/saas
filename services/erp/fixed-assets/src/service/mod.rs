@@ -275,13 +275,49 @@ impl FixedAssetsService {
                 continue;
             }
 
-            // Calculate straight-line depreciation
+            // Calculate depreciation based on the asset's method
             let depreciable_amount = asset.purchase_cost_cents - asset.salvage_value_cents;
             if depreciable_amount <= 0 {
                 continue;
             }
 
-            let monthly_depreciation = depreciable_amount / asset.useful_life_months;
+            let monthly_depreciation = match asset.depreciation_method.as_str() {
+                "declining_balance" => {
+                    let useful_life_years: i32 = ((asset.useful_life_months + 11) / 12) as i32;
+                    let annual = Self::calculate_declining_balance(
+                        asset.purchase_cost_cents,
+                        asset.salvage_value_cents,
+                        useful_life_years,
+                        200.0,
+                    );
+                    // Convert annual to monthly, don't exceed depreciable amount
+                    let monthly = annual / 12;
+                    monthly.min(depreciable_amount)
+                }
+                "sum_of_years_digits" => {
+                    let useful_life_years: i32 = ((asset.useful_life_months + 11) / 12) as i32;
+                    // Determine which year we're in based on existing depreciation count
+                    let existing_count: i32 = self
+                        .repo
+                        .get_depreciation_schedule(&asset.id)
+                        .await
+                        .unwrap_or_default()
+                        .len() as i32;
+                    let current_year = (existing_count / 12) + 1;
+                    let annual = Self::calculate_sum_of_years_digits(
+                        asset.purchase_cost_cents,
+                        asset.salvage_value_cents,
+                        useful_life_years,
+                        current_year.min(useful_life_years),
+                    );
+                    let monthly = annual / 12;
+                    monthly.min(depreciable_amount)
+                }
+                _ => {
+                    // Default: straight-line
+                    depreciable_amount / asset.useful_life_months
+                }
+            };
             if monthly_depreciation <= 0 {
                 continue;
             }
@@ -905,6 +941,102 @@ mod tests {
             useful_life_months: 12,
             depreciation_method: Some("invalid_method".into()),
         }).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_run_depreciation_method_aware() {
+        let repo = setup_repo().await;
+        let svc = FixedAssetsService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Create a straight-line asset (default)
+        let sl_asset = repo.create_asset(&CreateAssetRequest {
+            name: "SL Asset".into(),
+            description: None,
+            asset_number: "ASSET-SL-001".into(),
+            category: "equipment".into(),
+            purchase_date: "2025-01-01".into(),
+            purchase_cost_cents: 12_000,
+            salvage_value_cents: Some(0),
+            useful_life_months: 12,
+            depreciation_method: None, // defaults to straight-line
+        }).await.unwrap();
+
+        // Create a declining_balance asset
+        let db_asset = repo.create_asset(&CreateAssetRequest {
+            name: "DB Asset".into(),
+            description: None,
+            asset_number: "ASSET-DB-001".into(),
+            category: "equipment".into(),
+            purchase_date: "2025-01-01".into(),
+            purchase_cost_cents: 100_000,
+            salvage_value_cents: Some(10_000),
+            useful_life_months: 60, // 5 years
+            depreciation_method: Some("declining_balance".into()),
+        }).await.unwrap();
+
+        let results = svc.run_depreciation("2025-01").await.unwrap();
+        assert_eq!(results.len(), 2);
+
+        // Verify straight-line: 12000 / 12 = 1000
+        let sl_dep = results.iter().find(|d| d.asset_id == sl_asset.id).unwrap();
+        assert_eq!(sl_dep.depreciation_cents, 1_000);
+
+        // Verify declining balance produces some depreciation > 0
+        let db_dep = results.iter().find(|d| d.asset_id == db_asset.id).unwrap();
+        assert!(db_dep.depreciation_cents > 0);
+    }
+
+    #[tokio::test]
+    async fn test_dispose_asset_handler_route() {
+        let repo = setup_repo().await;
+        let svc = FixedAssetsService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let asset = repo.create_asset(&CreateAssetRequest {
+            name: "Route Test".into(),
+            description: None,
+            asset_number: "ASSET-ROUTE-001".into(),
+            category: "equipment".into(),
+            purchase_date: "2025-01-01".into(),
+            purchase_cost_cents: 50_000,
+            salvage_value_cents: Some(5_000),
+            useful_life_months: 24,
+            depreciation_method: None,
+        }).await.unwrap();
+
+        // Dispose with zero proceeds (write-off)
+        let (disposed, gain_loss) = svc.dispose_asset(&asset.id, 0).await.unwrap();
+        assert_eq!(disposed.status, "disposed");
+        assert_eq!(gain_loss, -50_000); // loss = 0 - 50000 (no depreciation yet, NBV = cost)
+
+        // Cannot dispose again
+        let result = svc.dispose_asset(&disposed.id, 0).await;
+        assert!(result.is_err());
+
+        // Negative proceeds should fail
+        let asset2 = repo.create_asset(&CreateAssetRequest {
+            name: "Negative Test".into(),
+            description: None,
+            asset_number: "ASSET-NEG-001".into(),
+            category: "equipment".into(),
+            purchase_date: "2025-01-01".into(),
+            purchase_cost_cents: 10_000,
+            salvage_value_cents: Some(0),
+            useful_life_months: 12,
+            depreciation_method: None,
+        }).await.unwrap();
+
+        let result = svc.dispose_asset(&asset2.id, -100).await;
         assert!(result.is_err());
     }
 }

@@ -22,6 +22,10 @@ pub fn build_router(state: AppState) -> Router {
             get(handlers::list_applications).post(handlers::create_application),
         )
         .route(
+            "/api/v1/applications/{id}",
+            get(handlers::get_application),
+        )
+        .route(
             "/api/v1/applications/{id}/status",
             axum::routing::put(handlers::update_application_status),
         )

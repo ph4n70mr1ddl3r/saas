@@ -177,3 +177,23 @@ pub async fn create_mileage(
     let mileage = state.service.create_mileage(&input).await?;
     Ok(Json(ApiResponse::new(mileage)))
 }
+
+pub async fn resubmit_expense_report(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<ExpenseReport>>, AppError> {
+    rbac::require_admin(&user.roles, "erp").map_err(|e| AppError::Forbidden(e))?;
+    let report = state.service.resubmit_report(&id).await?;
+    Ok(Json(ApiResponse::new(report)))
+}
+
+pub async fn delete_expense_report(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    rbac::require_admin(&user.roles, "erp").map_err(|e| AppError::Forbidden(e))?;
+    state.service.delete_report(&id).await?;
+    Ok(Json(ApiResponse::new(())))
+}

@@ -66,3 +66,19 @@ pub async fn run_depreciation(
     let results = state.service.run_depreciation(&input.period).await?;
     Ok(Json(ApiResponse::new(results)))
 }
+
+#[derive(serde::Deserialize)]
+pub struct DisposeAssetRequest {
+    pub proceeds_cents: i64,
+}
+
+pub async fn dispose_asset(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(input): Json<DisposeAssetRequest>,
+) -> Result<Json<ApiResponse<Asset>>, AppError> {
+    rbac::require_admin(&user.roles, "erp").map_err(|e| AppError::Forbidden(e))?;
+    let (asset, _gain_loss) = state.service.dispose_asset(&id, input.proceeds_cents).await?;
+    Ok(Json(ApiResponse::new(asset)))
+}

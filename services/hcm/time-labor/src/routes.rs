@@ -26,6 +26,14 @@ pub fn build_router(state: AppState) -> Router {
             axum::routing::put(handlers::approve_timesheet),
         )
         .route(
+            "/api/v1/timesheets/{id}",
+            get(handlers::get_timesheet),
+        )
+        .route(
+            "/api/v1/timesheets/{id}/reject",
+            axum::routing::put(handlers::reject_timesheet),
+        )
+        .route(
             "/api/v1/leave/requests",
             get(handlers::list_leave_requests).post(handlers::create_leave_request),
         )

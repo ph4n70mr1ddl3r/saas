@@ -3,7 +3,7 @@ use crate::repository::TimeLaborRepo;
 use saas_common::error::{AppError, AppResult};
 use saas_nats_bus::NatsBus;
 use saas_proto::events::{
-    TimesheetSubmitted, TimesheetApproved, LeaveRequestSubmitted, LeaveRequestApproved,
+    TimesheetSubmitted, TimesheetApproved, TimesheetRejected, LeaveRequestSubmitted, LeaveRequestApproved,
     LeaveRequestRejected,
 };
 use sqlx::SqlitePool;
@@ -98,6 +98,40 @@ impl TimeLaborService {
             tracing::error!(
                 "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
                 "hcm.timelabor.timesheet.approved",
+                e
+            );
+        }
+        Ok(ts)
+    }
+
+    pub async fn get_timesheet(&self, id: &str) -> AppResult<Timesheet> {
+        self.repo.get_timesheet(id).await
+    }
+
+    pub async fn reject_timesheet(&self, id: &str) -> AppResult<Timesheet> {
+        let ts = self.repo.get_timesheet(id).await?;
+        if ts.status != "submitted" {
+            return Err(AppError::Validation(format!(
+                "Timesheet '{}' must be in submitted status to reject (current: {})",
+                id, ts.status
+            )));
+        }
+        let ts = self.repo.update_timesheet_status(id, "rejected").await?;
+        if let Err(e) = self
+            .bus
+            .publish(
+                "hcm.timelabor.timesheet.rejected",
+                TimesheetRejected {
+                    timesheet_id: ts.id.clone(),
+                    employee_id: ts.employee_id.clone(),
+                    week_start: ts.week_start.clone(),
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "hcm.timelabor.timesheet.rejected",
                 e
             );
         }
@@ -826,6 +860,66 @@ mod tests {
                 reason: None,
             })
             .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_timesheet_public() {
+        let repo = setup_repo().await;
+        let svc = TimeLaborService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let ts = repo
+            .create_timesheet(&CreateTimesheetRequest {
+                employee_id: "emp-get-ts".into(),
+                week_start: "2025-09-01".into(),
+            })
+            .await
+            .unwrap();
+
+        let fetched = svc.get_timesheet(&ts.id).await.unwrap();
+        assert_eq!(fetched.id, ts.id);
+        assert_eq!(fetched.employee_id, "emp-get-ts");
+        assert_eq!(fetched.status, "draft");
+
+        // Not found
+        let result = svc.get_timesheet("nonexistent").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_reject_timesheet() {
+        let repo = setup_repo().await;
+        let svc = TimeLaborService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let ts = repo
+            .create_timesheet(&CreateTimesheetRequest {
+                employee_id: "emp-reject".into(),
+                week_start: "2025-10-01".into(),
+            })
+            .await
+            .unwrap();
+
+        // Cannot reject a draft timesheet
+        let result = svc.reject_timesheet(&ts.id).await;
+        assert!(result.is_err());
+
+        // Submit first, then reject
+        repo.submit_timesheet(&ts.id).await.unwrap();
+        let rejected = svc.reject_timesheet(&ts.id).await.unwrap();
+        assert_eq!(rejected.status, "rejected");
+
+        // Cannot reject again
+        let result = svc.reject_timesheet(&ts.id).await;
         assert!(result.is_err());
     }
 }

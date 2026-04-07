@@ -30,7 +30,7 @@ impl WorkOrderRepo {
 
     pub async fn create(&self, input: &CreateWorkOrder) -> AppResult<WorkOrderResponse> {
         let id = uuid::Uuid::new_v4().to_string();
-        let wo_number = format!("WO-{}", chrono::Utc::now().format("%Y%m%d%H%M%S"));
+        let wo_number = format!("WO-{}-{}", chrono::Utc::now().format("%Y%m%d%H%M%S"), &id[..8]);
         sqlx::query(
             "INSERT INTO work_orders (id, wo_number, item_id, quantity, status, planned_start, planned_end) VALUES (?, ?, ?, ?, 'planned', ?, ?)"
         )

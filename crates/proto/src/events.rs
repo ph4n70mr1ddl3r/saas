@@ -312,6 +312,13 @@ pub struct TimesheetApproved {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimesheetRejected {
+    pub timesheet_id: String,
+    pub employee_id: String,
+    pub week_start: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LeaveRequestSubmitted {
     pub request_id: String,
     pub employee_id: String,
@@ -375,6 +382,14 @@ pub struct WorkOrderCompleted {
     pub work_order_id: String,
     pub item_id: String,
     pub quantity: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkOrderCancelled {
+    pub work_order_id: String,
+    pub item_id: String,
+    pub quantity: i64,
+    pub reason: Option<String>,
 }
 
 // SCM Order Management Events

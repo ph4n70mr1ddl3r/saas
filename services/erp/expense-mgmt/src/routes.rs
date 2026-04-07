@@ -34,7 +34,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(
             "/api/v1/expense-reports/{id}",
-            get(handlers::get_expense_report),
+            get(handlers::get_expense_report).delete(handlers::delete_expense_report),
         )
         .route(
             "/api/v1/expense-reports/{id}/submit",
@@ -51,6 +51,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/expense-reports/{id}/mark-paid",
             axum::routing::post(handlers::mark_expense_report_paid),
+        )
+        .route(
+            "/api/v1/expense-reports/{id}/resubmit",
+            axum::routing::post(handlers::resubmit_expense_report),
         )
         .route(
             "/api/v1/expense-lines",

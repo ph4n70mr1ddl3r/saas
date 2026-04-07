@@ -973,4 +973,59 @@ mod tests {
         let result = svc.cancel_invoice(&invoice2.id).await;
         assert!(result.is_err());
     }
+
+    #[tokio::test]
+    async fn test_overpayment_prevention_service_level() {
+        let repo = setup_repo().await;
+        let svc = ApService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let vendor = create_test_vendor(&repo, "Overpay Vendor").await;
+        let invoice = create_test_invoice(&repo, &vendor.id, 10000).await;
+        repo.approve_invoice(&invoice.id).await.unwrap();
+
+        // First payment of 6000 should succeed
+        let p1 = svc.create_payment(&CreatePaymentRequest {
+            invoice_id: invoice.id.clone(),
+            vendor_id: vendor.id.clone(),
+            amount_cents: 6000,
+            payment_date: "2025-03-01".into(),
+            method: None,
+            reference: None,
+        }).await.unwrap();
+        assert_eq!(p1.amount_cents, 6000);
+
+        // Invoice should be partial
+        let inv = repo.get_invoice(&invoice.id).await.unwrap();
+        assert_eq!(inv.status, "partial");
+
+        // Overpayment attempt (remaining is 4000, trying 5000) should fail
+        let result = svc.create_payment(&CreatePaymentRequest {
+            invoice_id: invoice.id.clone(),
+            vendor_id: vendor.id.clone(),
+            amount_cents: 5000,
+            payment_date: "2025-03-02".into(),
+            method: None,
+            reference: None,
+        }).await;
+        assert!(result.is_err());
+
+        // Exact remaining payment should succeed
+        let p2 = svc.create_payment(&CreatePaymentRequest {
+            invoice_id: invoice.id.clone(),
+            vendor_id: vendor.id.clone(),
+            amount_cents: 4000,
+            payment_date: "2025-03-03".into(),
+            method: None,
+            reference: None,
+        }).await.unwrap();
+        assert_eq!(p2.amount_cents, 4000);
+
+        let inv = repo.get_invoice(&invoice.id).await.unwrap();
+        assert_eq!(inv.status, "paid");
+    }
 }
