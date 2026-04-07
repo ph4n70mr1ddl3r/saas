@@ -1,6 +1,6 @@
 use crate::handlers;
 use crate::service::ExpenseService;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use saas_nats_bus::NatsBus;
 use sqlx::SqlitePool;
@@ -51,6 +51,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/expense-reports/{id}/mark-paid",
             axum::routing::post(handlers::mark_expense_report_paid),
+        )
+        .route(
+            "/api/v1/expense-lines",
+            post(handlers::create_expense_line),
         )
         .route(
             "/api/v1/per-diems",

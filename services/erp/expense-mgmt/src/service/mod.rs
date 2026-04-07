@@ -136,6 +136,17 @@ impl ExpenseService {
 
         let report = self.repo.approve_report(id, user_id).await?;
 
+        // Look up GL account code from the first expense line's category
+        let gl_account_code = match self.repo.list_lines(id).await {
+            Ok(lines) if !lines.is_empty() => {
+                match self.repo.get_category(&lines[0].category_id).await {
+                    Ok(cat) => cat.gl_account_code.unwrap_or_default(),
+                    Err(_) => String::new(),
+                }
+            }
+            _ => String::new(),
+        };
+
         // Publish expense report approved event for GL auto-JE
         if let Err(e) = self
             .bus
@@ -145,7 +156,7 @@ impl ExpenseService {
                     report_id: report.id.clone(),
                     employee_id: report.employee_id.clone(),
                     total_cents: report.total_cents,
-                    gl_account_code: String::new(),
+                    gl_account_code,
                 },
             )
             .await
@@ -356,6 +367,7 @@ mod tests {
             include_str!("../../migrations/003_create_expense_lines.sql"),
             include_str!("../../migrations/004_create_per_diems.sql"),
             include_str!("../../migrations/005_create_mileage.sql"),
+            include_str!("../../migrations/006_add_gl_account_code.sql"),
         ];
         let migration_names = [
             "001_create_expense_categories.sql",
@@ -363,6 +375,7 @@ mod tests {
             "003_create_expense_lines.sql",
             "004_create_per_diems.sql",
             "005_create_mileage.sql",
+            "006_add_gl_account_code.sql",
         ];
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS _migrations (filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)",

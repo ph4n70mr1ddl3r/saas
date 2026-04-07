@@ -653,17 +653,45 @@ mod tests {
 
     #[tokio::test]
     async fn test_tax_rate_validation() {
-        // Valid rates: between 0.0 and 1.0 inclusive
-        let valid_rates = [0.0, 0.05, 0.20, 0.5, 1.0];
-        for rate in valid_rates {
-            assert!(rate >= 0.0 && rate <= 1.0, "Rate {} should be valid", rate);
-        }
+        let repo = setup_repo().await;
 
-        // Invalid rates
-        let invalid_rates = [-0.01, 1.01, 2.0];
-        for rate in invalid_rates {
-            assert!(rate < 0.0 || rate > 1.0, "Rate {} should be invalid", rate);
-        }
+        // Create tax codes with valid rates and verify stored values
+        let tax_code = repo
+            .create_tax_code(&CreateTaxCodeRequest {
+                code: "VAT-10".into(),
+                rate: 0.10,
+                description: Some("10% VAT".into()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(tax_code.code, "VAT-10");
+        assert!((tax_code.rate - 0.10).abs() < f64::EPSILON);
+
+        // Verify zero rate is accepted
+        let zero_rate = repo
+            .create_tax_code(&CreateTaxCodeRequest {
+                code: "TAX-EXEMPT".into(),
+                rate: 0.0,
+                description: Some("Exempt".into()),
+            })
+            .await
+            .unwrap();
+        assert!((zero_rate.rate - 0.0).abs() < f64::EPSILON);
+
+        // Verify 100% rate is accepted
+        let full_rate = repo
+            .create_tax_code(&CreateTaxCodeRequest {
+                code: "TAX-100".into(),
+                rate: 1.0,
+                description: Some("100% tax".into()),
+            })
+            .await
+            .unwrap();
+        assert!((full_rate.rate - 1.0).abs() < f64::EPSILON);
+
+        // List all created tax codes
+        let codes = repo.list_tax_codes().await.unwrap();
+        assert_eq!(codes.len(), 3);
     }
 
     #[tokio::test]

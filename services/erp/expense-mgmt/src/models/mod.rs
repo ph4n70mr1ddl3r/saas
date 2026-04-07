@@ -10,6 +10,7 @@ pub struct ExpenseCategory {
     pub limit_cents: i64,
     pub requires_receipt: i64,
     pub is_active: i64,
+    pub gl_account_code: Option<String>,
     pub created_at: String,
 }
 

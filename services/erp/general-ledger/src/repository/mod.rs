@@ -127,7 +127,7 @@ impl LedgerRepo {
 
     pub async fn list_journal_entries(&self) -> AppResult<Vec<JournalEntry>> {
         let rows = sqlx::query_as::<_, JournalEntry>(
-            "SELECT id, entry_number, description, period_id, status, posted_at, created_by, created_at FROM journal_entries ORDER BY created_at DESC",
+            "SELECT id, entry_number, description, period_id, status, posted_at, created_by, created_at, reversal_of FROM journal_entries ORDER BY created_at DESC",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -136,7 +136,7 @@ impl LedgerRepo {
 
     pub async fn get_journal_entry(&self, id: &str) -> AppResult<JournalEntry> {
         sqlx::query_as::<_, JournalEntry>(
-            "SELECT id, entry_number, description, period_id, status, posted_at, created_by, created_at FROM journal_entries WHERE id = ?",
+            "SELECT id, entry_number, description, period_id, status, posted_at, created_by, created_at, reversal_of FROM journal_entries WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -209,8 +209,8 @@ impl LedgerRepo {
     }
 
     /// Reverse a journal entry by creating a counter-entry with swapped debit/credit lines,
-    /// then marking the original as reversed. All within a single transaction.
-    pub async fn reverse_journal_entry(&self, id: &str) -> AppResult<JournalEntry> {
+    /// then marking the original as reversed. Tracks reversal_of for reliable lookup.
+    pub async fn reverse_journal_entry(&self, id: &str) -> AppResult<(JournalEntry, JournalEntry)> {
         let mut tx = self.pool.begin().await?;
 
         // Mark original as reversed
@@ -222,7 +222,7 @@ impl LedgerRepo {
         // Create counter-entry with swapped lines
         let reversal_id = uuid::Uuid::new_v4().to_string();
         let original = sqlx::query_as::<_, JournalEntry>(
-            "SELECT id, entry_number, description, period_id, status, posted_at, created_by, created_at FROM journal_entries WHERE id = ?",
+            "SELECT id, entry_number, description, period_id, status, posted_at, created_by, created_at, reversal_of FROM journal_entries WHERE id = ?",
         )
         .bind(id)
         .fetch_one(&mut *tx)
@@ -231,13 +231,14 @@ impl LedgerRepo {
         let reversal_number = format!("REV-{}", original.entry_number);
 
         sqlx::query(
-            "INSERT INTO journal_entries (id, entry_number, description, period_id, created_by) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO journal_entries (id, entry_number, description, period_id, created_by, reversal_of) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(&reversal_id)
         .bind(&reversal_number)
         .bind(format!("Reversal of {}", original.entry_number))
         .bind(&original.period_id)
         .bind(&original.created_by)
+        .bind(id) // Track which entry this reverses
         .execute(&mut *tx)
         .await?;
 
@@ -273,7 +274,20 @@ impl LedgerRepo {
             .await?;
 
         tx.commit().await?;
-        self.get_journal_entry(id).await
+        let original = self.get_journal_entry(id).await?;
+        let reversal = self.get_journal_entry(&reversal_id).await?;
+        Ok((original, reversal))
+    }
+
+    /// Find the reversal entry for a given original entry ID.
+    pub async fn find_reversal_for(&self, original_id: &str) -> AppResult<Option<JournalEntry>> {
+        let row = sqlx::query_as::<_, JournalEntry>(
+            "SELECT id, entry_number, description, period_id, status, posted_at, created_by, created_at, reversal_of FROM journal_entries WHERE reversal_of = ?",
+        )
+        .bind(original_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
     }
 
     /// Generate the next entry number atomically using a counter table.

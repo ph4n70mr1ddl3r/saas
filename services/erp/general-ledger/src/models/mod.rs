@@ -47,6 +47,7 @@ pub struct JournalEntry {
     pub posted_at: Option<String>,
     pub created_by: String,
     pub created_at: String,
+    pub reversal_of: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

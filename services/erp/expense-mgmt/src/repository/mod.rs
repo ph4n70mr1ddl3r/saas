@@ -16,7 +16,7 @@ impl ExpenseRepo {
 
     pub async fn list_categories(&self) -> AppResult<Vec<ExpenseCategory>> {
         let rows = sqlx::query_as::<_, ExpenseCategory>(
-            "SELECT id, name, description, limit_cents, requires_receipt, is_active, created_at FROM expense_categories ORDER BY name",
+            "SELECT id, name, description, limit_cents, requires_receipt, is_active, gl_account_code, created_at FROM expense_categories ORDER BY name",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -25,7 +25,7 @@ impl ExpenseRepo {
 
     pub async fn get_category(&self, id: &str) -> AppResult<ExpenseCategory> {
         sqlx::query_as::<_, ExpenseCategory>(
-            "SELECT id, name, description, limit_cents, requires_receipt, is_active, created_at FROM expense_categories WHERE id = ?",
+            "SELECT id, name, description, limit_cents, requires_receipt, is_active, gl_account_code, created_at FROM expense_categories WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -357,6 +357,7 @@ mod tests {
             include_str!("../../migrations/003_create_expense_lines.sql"),
             include_str!("../../migrations/004_create_per_diems.sql"),
             include_str!("../../migrations/005_create_mileage.sql"),
+            include_str!("../../migrations/006_add_gl_account_code.sql"),
         ];
         let migration_names = [
             "001_create_expense_categories.sql",
@@ -364,6 +365,7 @@ mod tests {
             "003_create_expense_lines.sql",
             "004_create_per_diems.sql",
             "005_create_mileage.sql",
+            "006_add_gl_account_code.sql",
         ];
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS _migrations (filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)",

@@ -90,6 +90,7 @@ fn resolve_service(path: &str) -> String {
     if path.starts_with("/api/v1/compensation")
         || path.starts_with("/api/v1/pay-runs")
         || path.starts_with("/api/v1/deductions")
+        || path.starts_with("/api/v1/tax-brackets")
     {
         return "payroll".to_string();
     }
@@ -116,6 +117,7 @@ fn resolve_service(path: &str) -> String {
         || path.starts_with("/api/v1/balance-sheet")
         || path.starts_with("/api/v1/income-statement")
         || path.starts_with("/api/v1/budgets")
+        || path.starts_with("/api/v1/year-end-close")
     {
         return "gl".to_string();
     }
@@ -147,6 +149,7 @@ fn resolve_service(path: &str) -> String {
     }
     if path.starts_with("/api/v1/expense-categories")
         || path.starts_with("/api/v1/expense-reports")
+        || path.starts_with("/api/v1/expense-lines")
         || path.starts_with("/api/v1/per-diems")
         || path.starts_with("/api/v1/mileage")
     {
@@ -160,7 +163,10 @@ fn resolve_service(path: &str) -> String {
     {
         return "inventory".to_string();
     }
-    if path.starts_with("/api/v1/suppliers") || path.starts_with("/api/v1/purchase-orders") {
+    if path.starts_with("/api/v1/suppliers")
+        || path.starts_with("/api/v1/purchase-orders")
+        || path.starts_with("/api/v1/goods-receipts")
+    {
         return "procurement".to_string();
     }
     if path.starts_with("/api/v1/sales-orders")
@@ -201,6 +207,7 @@ mod tests {
         assert_eq!(resolve_service("/api/v1/compensation"), "payroll");
         assert_eq!(resolve_service("/api/v1/pay-runs"), "payroll");
         assert_eq!(resolve_service("/api/v1/deductions"), "payroll");
+        assert_eq!(resolve_service("/api/v1/tax-brackets"), "payroll");
     }
 
     #[test]
@@ -212,6 +219,7 @@ mod tests {
         assert_eq!(resolve_service("/api/v1/balance-sheet"), "gl");
         assert_eq!(resolve_service("/api/v1/income-statement"), "gl");
         assert_eq!(resolve_service("/api/v1/budgets"), "gl");
+        assert_eq!(resolve_service("/api/v1/year-end-close/2025"), "gl");
     }
 
     #[test]
@@ -245,6 +253,7 @@ mod tests {
     fn test_resolve_service_procurement() {
         assert_eq!(resolve_service("/api/v1/suppliers"), "procurement");
         assert_eq!(resolve_service("/api/v1/purchase-orders"), "procurement");
+        assert_eq!(resolve_service("/api/v1/goods-receipts"), "procurement");
     }
 
     #[test]

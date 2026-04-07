@@ -213,14 +213,11 @@ impl LedgerService {
                 "Only posted entries can be reversed".into(),
             ));
         }
-        let entry = self.repo.reverse_journal_entry(id).await?;
+        let (original, _reversal) = self.repo.reverse_journal_entry(id).await?;
         let lines = self.repo.get_journal_lines(id).await?;
 
-        // Find the reversal entry to publish its ID
-        let all_entries = self.repo.list_journal_entries().await?;
-        let reversal = all_entries
-            .iter()
-            .find(|e| e.entry_number.starts_with("REV-") && e.status == "posted");
+        // Find the reversal entry using the tracked relationship
+        let reversal = self.repo.find_reversal_for(id).await?;
 
         if let Some(rev) = reversal {
             if let Err(e) = self
@@ -243,7 +240,7 @@ impl LedgerService {
             }
         }
 
-        Ok(JournalEntryWithLines { entry, lines })
+        Ok(JournalEntryWithLines { entry: original, lines })
     }
 
     // --- Reports ---
@@ -1100,6 +1097,7 @@ mod tests {
             include_str!("../../migrations/004_create_journal_lines.sql"),
             include_str!("../../migrations/005_create_budgets.sql"),
             include_str!("../../migrations/006_create_budget_lines.sql"),
+            include_str!("../../migrations/007_add_reversal_of.sql"),
         ];
         let migration_names = [
             "001_create_accounts.sql",
@@ -1108,6 +1106,7 @@ mod tests {
             "004_create_journal_lines.sql",
             "005_create_budgets.sql",
             "006_create_budget_lines.sql",
+            "007_add_reversal_of.sql",
         ];
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS _migrations (filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)",
@@ -1368,20 +1367,17 @@ mod tests {
         repo.post_journal_entry(&entry.id).await.unwrap();
 
         // Reverse
-        let reversed = repo.reverse_journal_entry(&entry.id).await.unwrap();
+        let (reversed, _) = repo.reverse_journal_entry(&entry.id).await.unwrap();
         assert_eq!(reversed.status, "reversed");
 
         // Original lines still exist
         let original_lines = repo.get_journal_lines(&entry.id).await.unwrap();
         assert_eq!(original_lines.len(), 2);
 
-        // Find the reversal entry
-        let all_entries = repo.list_journal_entries().await.unwrap();
-        let reversal_entry = all_entries
-            .iter()
-            .find(|e| e.entry_number.starts_with("REV-"))
-            .unwrap();
+        // Find the reversal entry using tracked relationship
+        let reversal_entry = repo.find_reversal_for(&entry.id).await.unwrap().unwrap();
         assert_eq!(reversal_entry.status, "posted");
+        assert_eq!(reversal_entry.reversal_of, Some(entry.id.clone()));
 
         // Reversal lines have swapped debit/credit
         let reversal_lines = repo.get_journal_lines(&reversal_entry.id).await.unwrap();
