@@ -37,6 +37,17 @@ pub async fn create_bank_account(
     Ok(Json(ApiResponse::new(account)))
 }
 
+pub async fn update_bank_account(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(input): Json<UpdateBankAccountRequest>,
+) -> Result<Json<ApiResponse<BankAccount>>, AppError> {
+    rbac::require_admin(&user.roles, "erp").map_err(|e| AppError::Forbidden(e))?;
+    let account = state.service.update_bank_account(&id, &input).await?;
+    Ok(Json(ApiResponse::new(account)))
+}
+
 pub async fn list_bank_transactions(
     user: AuthUser,
     State(state): State<AppState>,

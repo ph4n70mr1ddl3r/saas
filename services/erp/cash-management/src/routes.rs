@@ -25,7 +25,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(
             "/api/v1/bank-accounts/{id}",
-            get(handlers::get_bank_account),
+            get(handlers::get_bank_account).put(handlers::update_bank_account),
         )
         .route(
             "/api/v1/bank-transactions",

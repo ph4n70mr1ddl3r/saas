@@ -114,6 +114,27 @@ impl TimeLaborService {
         &self,
         input: CreateLeaveRequestRequest,
     ) -> AppResult<LeaveRequest> {
+        // Validate start_date <= end_date
+        if input.start_date > input.end_date {
+            return Err(AppError::Validation(
+                "start_date must be on or before end_date".into(),
+            ));
+        }
+
+        // Check for overlapping leave for the same employee
+        let existing = self.repo.list_leave_requests().await?;
+        let overlap = existing.iter().any(|lr| {
+            lr.employee_id == input.employee_id
+                && lr.status != "rejected"
+                && lr.start_date <= input.end_date
+                && lr.end_date >= input.start_date
+        });
+        if overlap {
+            return Err(AppError::Validation(
+                "Employee already has an overlapping leave request for these dates".into(),
+            ));
+        }
+
         let req = self.repo.create_leave_request(&input).await?;
         if let Err(e) = self
             .bus
@@ -738,5 +759,73 @@ mod tests {
         // Approved request should remain approved
         let r3 = repo.get_leave_request(&req3.id).await.unwrap();
         assert_eq!(r3.status, "approved");
+    }
+
+    #[tokio::test]
+    async fn test_leave_request_overlap_validation() {
+        let repo = setup_repo().await;
+        let svc = TimeLaborService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Create first leave request: Jun 10-14
+        svc.create_leave_request(CreateLeaveRequestRequest {
+            employee_id: "emp-001".into(),
+            leave_type: "vacation".into(),
+            start_date: "2025-06-10".into(),
+            end_date: "2025-06-14".into(),
+            reason: Some("Summer break".into()),
+        })
+        .await
+        .unwrap();
+
+        // Overlapping request should fail (Jun 12-16 overlaps with Jun 10-14)
+        let result = svc
+            .create_leave_request(CreateLeaveRequestRequest {
+                employee_id: "emp-001".into(),
+                leave_type: "sick".into(),
+                start_date: "2025-06-12".into(),
+                end_date: "2025-06-16".into(),
+                reason: None,
+            })
+            .await;
+        assert!(result.is_err());
+
+        // Non-overlapping should succeed (Jun 16-20)
+        svc.create_leave_request(CreateLeaveRequestRequest {
+            employee_id: "emp-001".into(),
+            leave_type: "vacation".into(),
+            start_date: "2025-06-16".into(),
+            end_date: "2025-06-20".into(),
+            reason: None,
+        })
+        .await
+        .unwrap();
+
+        // Different employee should not conflict
+        svc.create_leave_request(CreateLeaveRequestRequest {
+            employee_id: "emp-002".into(),
+            leave_type: "vacation".into(),
+            start_date: "2025-06-10".into(),
+            end_date: "2025-06-14".into(),
+            reason: None,
+        })
+        .await
+        .unwrap();
+
+        // Invalid date range should fail
+        let result = svc
+            .create_leave_request(CreateLeaveRequestRequest {
+                employee_id: "emp-001".into(),
+                leave_type: "vacation".into(),
+                start_date: "2025-07-15".into(),
+                end_date: "2025-07-10".into(),
+                reason: None,
+            })
+            .await;
+        assert!(result.is_err());
     }
 }

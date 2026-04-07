@@ -89,6 +89,19 @@ impl ManufacturingService {
         Ok(wo)
     }
 
+    pub async fn cancel_work_order(&self, id: &str) -> AppResult<WorkOrderResponse> {
+        let wo = self.work_order_repo.get_by_id(id).await?;
+        if wo.status != "planned" && wo.status != "in_progress" {
+            return Err(saas_common::error::AppError::Validation(
+                "Only planned or in-progress work orders can be cancelled".into(),
+            ));
+        }
+        self.work_order_repo
+            .update_status(id, "cancelled", None, None)
+            .await?;
+        self.work_order_repo.get_by_id(id).await
+    }
+
     // BOMs
     pub async fn list_boms(&self) -> AppResult<Vec<BomResponse>> {
         self.bom_repo.list().await

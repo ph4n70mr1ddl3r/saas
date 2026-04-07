@@ -65,6 +65,26 @@ impl CashManagementRepo {
         self.get_bank_account(id).await
     }
 
+    pub async fn update_bank_account(
+        &self,
+        id: &str,
+        input: &crate::models::UpdateBankAccountRequest,
+    ) -> AppResult<BankAccount> {
+        self.get_bank_account(id).await?;
+        sqlx::query(
+            "UPDATE bank_accounts SET name = COALESCE(?, name), bank_name = COALESCE(?, bank_name), account_number = COALESCE(?, account_number), routing_number = COALESCE(?, routing_number), currency = COALESCE(?, currency) WHERE id = ?",
+        )
+        .bind(&input.name)
+        .bind(&input.bank_name)
+        .bind(&input.account_number)
+        .bind(&input.routing_number)
+        .bind(&input.currency)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        self.get_bank_account(id).await
+    }
+
     // --- Bank Transactions ---
 
     pub async fn list_bank_transactions(&self) -> AppResult<Vec<BankTransaction>> {

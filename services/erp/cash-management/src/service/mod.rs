@@ -58,6 +58,14 @@ impl CashManagementService {
         Ok(account)
     }
 
+    pub async fn update_bank_account(
+        &self,
+        id: &str,
+        input: &UpdateBankAccountRequest,
+    ) -> AppResult<BankAccount> {
+        self.repo.update_bank_account(id, input).await
+    }
+
     // --- Bank Transactions ---
 
     pub async fn list_bank_transactions(&self) -> AppResult<Vec<BankTransaction>> {

@@ -66,6 +66,15 @@ pub async fn list_goals(
     Ok(Json(ApiResponse::new(list)))
 }
 
+pub async fn get_goal(
+    _user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<Goal>>, AppError> {
+    let goal = state.service.get_goal(&id).await?;
+    Ok(Json(ApiResponse::new(goal)))
+}
+
 pub async fn create_goal(
     user: AuthUser,
     State(state): State<AppState>,
@@ -97,6 +106,15 @@ pub async fn list_review_assignments(
     Ok(Json(ApiResponse::new(list)))
 }
 
+pub async fn get_review_assignment(
+    _user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<ReviewAssignment>>, AppError> {
+    let assignment = state.service.get_review_assignment(&id).await?;
+    Ok(Json(ApiResponse::new(assignment)))
+}
+
 pub async fn create_review_assignment(
     user: AuthUser,
     State(state): State<AppState>,
@@ -126,6 +144,15 @@ pub async fn list_feedback(
 ) -> Result<Json<ApiResponse<Vec<Feedback>>>, AppError> {
     let list = state.service.list_feedback().await?;
     Ok(Json(ApiResponse::new(list)))
+}
+
+pub async fn get_feedback(
+    _user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<Feedback>>, AppError> {
+    let feedback = state.service.get_feedback(&id).await?;
+    Ok(Json(ApiResponse::new(feedback)))
 }
 
 pub async fn create_feedback(

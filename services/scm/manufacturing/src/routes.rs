@@ -26,6 +26,10 @@ pub fn build_router(state: AppState) -> Router {
             post(handlers::complete_work_order),
         )
         .route(
+            "/api/v1/work-orders/{id}/cancel",
+            post(handlers::cancel_work_order),
+        )
+        .route(
             "/api/v1/bom",
             get(handlers::list_boms).post(handlers::create_bom),
         )

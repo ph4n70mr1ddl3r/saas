@@ -22,6 +22,15 @@ pub struct CreateBankAccountRequest {
     pub currency: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UpdateBankAccountRequest {
+    pub name: Option<String>,
+    pub bank_name: Option<String>,
+    pub account_number: Option<String>,
+    pub routing_number: Option<String>,
+    pub currency: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct BankTransaction {
     pub id: String,

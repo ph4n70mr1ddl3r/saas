@@ -31,11 +31,15 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(
             "/api/v1/goals/{id}",
-            axum::routing::put(handlers::update_goal),
+            get(handlers::get_goal).put(handlers::update_goal),
         )
         .route(
             "/api/v1/review-assignments",
             get(handlers::list_review_assignments).post(handlers::create_review_assignment),
+        )
+        .route(
+            "/api/v1/review-assignments/{id}",
+            get(handlers::get_review_assignment),
         )
         .route(
             "/api/v1/review-assignments/{id}/submit",
@@ -44,6 +48,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/feedback",
             get(handlers::list_feedback).post(handlers::create_feedback),
+        )
+        .route(
+            "/api/v1/feedback/{id}",
+            get(handlers::get_feedback),
         )
         .route(
             "/health",

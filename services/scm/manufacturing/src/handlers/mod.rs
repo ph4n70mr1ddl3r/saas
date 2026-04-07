@@ -73,6 +73,19 @@ pub async fn complete_work_order(
     Ok(axum::Json(saas_common::response::ApiResponse::new(order)))
 }
 
+pub async fn cancel_work_order(
+    user: saas_auth_core::extractor::AuthUser,
+    axum::extract::State(state): axum::extract::State<crate::routes::AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<
+    axum::Json<saas_common::response::ApiResponse<crate::models::work_order::WorkOrderResponse>>,
+    saas_common::error::AppError,
+> {
+    rbac::require_admin(&user.roles, "scm").map_err(|e| AppError::Forbidden(e))?;
+    let order = state.service.cancel_work_order(&id).await?;
+    Ok(axum::Json(saas_common::response::ApiResponse::new(order)))
+}
+
 pub async fn list_boms(
     _user: saas_auth_core::extractor::AuthUser,
     axum::extract::State(state): axum::extract::State<crate::routes::AppState>,

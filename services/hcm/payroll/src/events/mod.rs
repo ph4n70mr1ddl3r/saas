@@ -37,7 +37,7 @@ pub async fn subscribe(bus: &NatsBus, service: PayrollService) -> anyhow::Result
     .await?;
 
     let svc3 = service.clone();
-    bus.subscribe::<TimesheetApproved, _, _>("hcm.timesheet.approved", move |envelope| {
+    bus.subscribe::<TimesheetApproved, _, _>("hcm.timelabor.timesheet.approved", move |envelope| {
         let svc3 = svc3.clone();
         let employee_id = envelope.payload.employee_id.clone();
         let week_start = envelope.payload.week_start.clone();

@@ -82,6 +82,10 @@ impl PerformanceService {
         self.repo.list_goals().await
     }
 
+    pub async fn get_goal(&self, id: &str) -> AppResult<Goal> {
+        self.repo.get_goal(id).await
+    }
+
     pub async fn create_goal(&self, input: CreateGoalRequest) -> AppResult<Goal> {
         if let Some(weight) = input.weight {
             if weight < 0.01 || weight > 10.0 {
@@ -133,6 +137,10 @@ impl PerformanceService {
 
     pub async fn list_review_assignments(&self) -> AppResult<Vec<ReviewAssignment>> {
         self.repo.list_review_assignments().await
+    }
+
+    pub async fn get_review_assignment(&self, id: &str) -> AppResult<ReviewAssignment> {
+        self.repo.get_review_assignment(id).await
     }
 
     pub async fn create_review_assignment(
@@ -208,6 +216,10 @@ impl PerformanceService {
 
     pub async fn list_feedback(&self) -> AppResult<Vec<Feedback>> {
         self.repo.list_feedback().await
+    }
+
+    pub async fn get_feedback(&self, id: &str) -> AppResult<Feedback> {
+        self.repo.get_feedback(id).await
     }
 
     pub async fn create_feedback(&self, input: CreateFeedbackRequest) -> AppResult<Feedback> {
