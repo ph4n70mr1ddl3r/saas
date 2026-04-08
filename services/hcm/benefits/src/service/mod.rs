@@ -75,6 +75,24 @@ impl BenefitsService {
                     e
                 );
             }
+
+            // Auto-cancel all active enrollments for the deactivated plan
+            let active_enrollments = self.repo.list_active_enrollments_by_plan(id).await?;
+            let count = active_enrollments.len();
+            for enrollment in &active_enrollments {
+                if let Err(e) = self.cancel_enrollment(&enrollment.id).await {
+                    tracing::error!(
+                        "Failed to cancel enrollment '{}' during plan deactivation: {}",
+                        enrollment.id,
+                        e
+                    );
+                }
+            }
+            tracing::info!(
+                "Auto-cancelled {} active enrollment(s) for deactivated plan '{}'",
+                count,
+                plan.name
+            );
         }
         Ok(plan)
     }
@@ -669,5 +687,144 @@ mod tests {
         // Not found
         let result = svc.get_enrollment("nonexistent").await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_deactivating_plan_cancels_active_enrollments() {
+        let pool = setup().await;
+        let repo = BenefitsRepo::new(pool.clone());
+        let svc = BenefitsService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Create an active plan
+        let plan = svc
+            .create_plan(CreatePlanRequest {
+                name: "Group Medical".into(),
+                plan_type: "medical".into(),
+                description: None,
+                employer_contribution_cents: None,
+                employee_contribution_cents: None,
+                is_active: Some(true),
+            })
+            .await
+            .unwrap();
+
+        // Enroll three employees
+        let e1 = svc
+            .create_enrollment(CreateEnrollmentRequest {
+                employee_id: "emp-a".into(),
+                plan_id: plan.id.clone(),
+            })
+            .await
+            .unwrap();
+        let e2 = svc
+            .create_enrollment(CreateEnrollmentRequest {
+                employee_id: "emp-b".into(),
+                plan_id: plan.id.clone(),
+            })
+            .await
+            .unwrap();
+        let e3 = svc
+            .create_enrollment(CreateEnrollmentRequest {
+                employee_id: "emp-c".into(),
+                plan_id: plan.id.clone(),
+            })
+            .await
+            .unwrap();
+
+        // All should be active
+        assert_eq!(svc.get_enrollment(&e1.id).await.unwrap().status, "active");
+        assert_eq!(svc.get_enrollment(&e2.id).await.unwrap().status, "active");
+        assert_eq!(svc.get_enrollment(&e3.id).await.unwrap().status, "active");
+
+        // Deactivate the plan
+        let deactivated = svc
+            .update_plan(
+                &plan.id,
+                UpdatePlanRequest {
+                    name: None,
+                    plan_type: None,
+                    description: None,
+                    employer_contribution_cents: None,
+                    employee_contribution_cents: None,
+                    is_active: Some(false),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!deactivated.is_active);
+
+        // All enrollments should now be cancelled
+        assert_eq!(
+            svc.get_enrollment(&e1.id).await.unwrap().status,
+            "cancelled"
+        );
+        assert_eq!(
+            svc.get_enrollment(&e2.id).await.unwrap().status,
+            "cancelled"
+        );
+        assert_eq!(
+            svc.get_enrollment(&e3.id).await.unwrap().status,
+            "cancelled"
+        );
+        assert!(svc
+            .get_enrollment(&e1.id)
+            .await
+            .unwrap()
+            .cancelled_at
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn test_deactivating_plan_with_no_active_enrollments() {
+        let pool = setup().await;
+        let repo = BenefitsRepo::new(pool.clone());
+        let svc = BenefitsService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Create an active plan with no enrollments
+        let plan = svc
+            .create_plan(CreatePlanRequest {
+                name: "Unused Dental".into(),
+                plan_type: "dental".into(),
+                description: None,
+                employer_contribution_cents: None,
+                employee_contribution_cents: None,
+                is_active: Some(true),
+            })
+            .await
+            .unwrap();
+
+        // Deactivate the plan -- should succeed without errors
+        let deactivated = svc
+            .update_plan(
+                &plan.id,
+                UpdatePlanRequest {
+                    name: None,
+                    plan_type: None,
+                    description: None,
+                    employer_contribution_cents: None,
+                    employee_contribution_cents: None,
+                    is_active: Some(false),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!deactivated.is_active);
+
+        // Verify no enrollments exist for this plan
+        let enrollments = repo
+            .list_active_enrollments_by_plan(&plan.id)
+            .await
+            .unwrap();
+        assert!(enrollments.is_empty());
     }
 }

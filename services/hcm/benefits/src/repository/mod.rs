@@ -144,6 +144,19 @@ impl BenefitsRepo {
         self.get_enrollment(&id).await
     }
 
+    pub async fn list_active_enrollments_by_plan(
+        &self,
+        plan_id: &str,
+    ) -> AppResult<Vec<Enrollment>> {
+        let rows = sqlx::query_as::<_, Enrollment>(
+            "SELECT id, employee_id, plan_id, status, enrolled_at, cancelled_at FROM enrollments WHERE plan_id = ? AND status = 'active'"
+        )
+        .bind(plan_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
     pub async fn cancel_enrollment(&self, id: &str) -> AppResult<Enrollment> {
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query("UPDATE enrollments SET status = 'cancelled', cancelled_at = ? WHERE id = ?")

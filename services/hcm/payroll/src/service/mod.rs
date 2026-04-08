@@ -250,6 +250,26 @@ impl PayrollService {
         Ok(())
     }
 
+    /// When an employee is updated, log the changes and flag department transfers for payroll review.
+    pub async fn handle_employee_updated(
+        &self,
+        employee_id: &str,
+        changes: &[String],
+    ) -> AppResult<()> {
+        tracing::info!(
+            "Employee {} updated — changed fields: {:?}",
+            employee_id,
+            changes
+        );
+        if changes.iter().any(|c| c == "department_id") {
+            tracing::warn!(
+                "Employee {} department changed — payroll may need review for cost center reallocation",
+                employee_id
+            );
+        }
+        Ok(())
+    }
+
     /// When a timesheet is approved, log availability for hourly payroll processing.
     pub async fn handle_timesheet_approved(
         &self,
@@ -269,6 +289,62 @@ impl PayrollService {
             "Timesheet approved for employee {} — week of {} ready for payroll processing",
             employee_id, week_start
         );
+        Ok(())
+    }
+
+    /// When an employee enrolls in a benefit plan, auto-create a recurring deduction.
+    /// Uses a fixed amount of 5000 cents ($50). Code: "BEN-{plan_id}".
+    pub async fn handle_benefit_enrollment_created(
+        &self,
+        enrollment_id: &str,
+        employee_id: &str,
+        plan_id: &str,
+    ) -> AppResult<Deduction> {
+        let code = format!("BEN-{}", plan_id);
+        tracing::info!(
+            "Creating benefit deduction for employee {} plan {} (enrollment {})",
+            employee_id, plan_id, enrollment_id
+        );
+        let input = CreateDeductionRequest {
+            employee_id: employee_id.to_string(),
+            code: code.clone(),
+            amount_cents: 5000,
+            recurring: Some(true),
+            start_date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
+            end_date: None,
+        };
+        self.repo.create_deduction(&input).await
+    }
+
+    /// When a benefit enrollment is cancelled, deactivate the matching deduction.
+    /// Looks up the active deduction with code "BEN-{plan_id}" and sets its end_date.
+    pub async fn handle_benefit_enrollment_cancelled(
+        &self,
+        enrollment_id: &str,
+        employee_id: &str,
+        plan_id: &str,
+    ) -> AppResult<()> {
+        let code = format!("BEN-{}", plan_id);
+        tracing::info!(
+            "Cancelling benefit deduction for employee {} plan {} (enrollment {})",
+            employee_id, plan_id, enrollment_id
+        );
+        match self.repo.find_active_deduction_by_employee_and_code(employee_id, &code).await? {
+            Some(deduction) => {
+                let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+                self.repo.deactivate_deduction(&deduction.id, &today).await?;
+                tracing::info!(
+                    "Deactivated deduction {} ({}) for employee {}",
+                    deduction.id, code, employee_id
+                );
+            }
+            None => {
+                tracing::warn!(
+                    "No active deduction found with code {} for employee {} — nothing to cancel",
+                    code, employee_id
+                );
+            }
+        }
         Ok(())
     }
 
@@ -1033,5 +1109,157 @@ mod tests {
         // Not found
         let result = svc.get_tax_bracket("nonexistent").await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_handle_benefit_enrollment_created() {
+        let repo = setup_repo().await;
+        let svc = PayrollService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let deduction = svc
+            .handle_benefit_enrollment_created("enr-001", "emp-ben-001", "plan-health")
+            .await
+            .unwrap();
+
+        assert_eq!(deduction.employee_id, "emp-ben-001");
+        assert_eq!(deduction.code, "BEN-plan-health");
+        assert_eq!(deduction.amount_cents, 5000);
+        assert!(deduction.recurring);
+        assert!(deduction.end_date.is_none());
+
+        // Verify it shows up when listing deductions for the employee
+        let deductions = repo.list_deductions_by_employee("emp-ben-001").await.unwrap();
+        assert_eq!(deductions.len(), 1);
+        assert_eq!(deductions[0].code, "BEN-plan-health");
+    }
+
+    #[tokio::test]
+    async fn test_handle_benefit_enrollment_cancelled() {
+        let repo = setup_repo().await;
+        let svc = PayrollService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // First create a deduction via enrollment
+        let deduction = svc
+            .handle_benefit_enrollment_created("enr-002", "emp-ben-002", "plan-dental")
+            .await
+            .unwrap();
+        assert!(deduction.end_date.is_none());
+
+        // Now cancel the enrollment — should deactivate the deduction
+        svc.handle_benefit_enrollment_cancelled("enr-002", "emp-ben-002", "plan-dental")
+            .await
+            .unwrap();
+
+        // Verify the deduction now has an end_date
+        let deactivated = repo.get_deduction(&deduction.id).await.unwrap();
+        assert!(deactivated.end_date.is_some());
+        assert_eq!(deactivated.code, "BEN-plan-dental");
+        assert_eq!(deactivated.amount_cents, 5000);
+    }
+
+    #[tokio::test]
+    async fn test_handle_benefit_enrollment_cancelled_no_matching_deduction() {
+        let repo = setup_repo().await;
+        let svc = PayrollService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Cancelling a non-existent enrollment should succeed gracefully (no-op)
+        let result = svc
+            .handle_benefit_enrollment_cancelled("enr-nonexistent", "emp-ben-999", "plan-vision")
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_benefit_enrollment_create_then_cancel_round_trip() {
+        let repo = setup_repo().await;
+        let svc = PayrollService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Enroll in two plans
+        svc.handle_benefit_enrollment_created("enr-010", "emp-ben-010", "plan-medical")
+            .await
+            .unwrap();
+        svc.handle_benefit_enrollment_created("enr-011", "emp-ben-010", "plan-life")
+            .await
+            .unwrap();
+
+        // Both should be active
+        let deductions = repo.list_deductions_by_employee("emp-ben-010").await.unwrap();
+        assert_eq!(deductions.len(), 2);
+
+        // Cancel one
+        svc.handle_benefit_enrollment_cancelled("enr-010", "emp-ben-010", "plan-medical")
+            .await
+            .unwrap();
+
+        // Still two records, but only one should be active (no end_date)
+        let deductions = repo.list_deductions_by_employee("emp-ben-010").await.unwrap();
+        assert_eq!(deductions.len(), 2);
+        let active: Vec<_> = deductions.iter().filter(|d| d.end_date.is_none()).collect();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].code, "BEN-plan-life");
+    }
+
+    #[tokio::test]
+    async fn test_handle_employee_updated() {
+        let repo = setup_repo().await;
+        let svc = PayrollService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Create a compensation record for the employee
+        svc.create_compensation(CreateCompensationRequest {
+            employee_id: "emp-upd-001".into(),
+            salary_type: "salaried".into(),
+            amount_cents: 75_000_00,
+            currency: Some("USD".into()),
+            effective_date: "2025-01-01".into(),
+            end_date: None,
+        })
+        .await
+        .unwrap();
+
+        // Handle update with general field changes (no department change)
+        let result = svc
+            .handle_employee_updated("emp-upd-001", &["first_name".into(), "email".into()])
+            .await;
+        assert!(result.is_ok());
+
+        // Handle update with department_id change — should succeed and flag review
+        let result = svc
+            .handle_employee_updated("emp-upd-001", &["department_id".into(), "title".into()])
+            .await;
+        assert!(result.is_ok());
+
+        // Handle update with empty changes list
+        let result = svc.handle_employee_updated("emp-upd-001", &[]).await;
+        assert!(result.is_ok());
+
+        // Compensation should be unchanged after update events
+        let comps = repo.list_compensation_by_employee("emp-upd-001").await.unwrap();
+        assert_eq!(comps.len(), 1);
+        assert_eq!(comps[0].amount_cents, 75_000_00);
     }
 }

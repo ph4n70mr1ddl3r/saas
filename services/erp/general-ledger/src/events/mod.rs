@@ -2,7 +2,7 @@ use crate::service::LedgerService;
 use saas_common::error::AppResult;
 use saas_nats_bus::NatsBus;
 use saas_proto::events::{
-    ApInvoiceCancelled, ApPaymentCreated, ArInvoiceCancelled, ArReceiptCreated, AssetCreated, AssetDisposed,
+    ApInvoiceCancelled, ApPaymentCreated, ArInvoiceApproved, ArInvoiceCancelled, ArReceiptCreated, AssetCreated, AssetDisposed,
     CycleCountPosted, DepreciationRunCompleted, ExpenseReportApproved, PayRunCompleted,
     ReconciliationCompleted, TransferCompleted, VendorInvoiceApproved,
     CustomerInvoiceCreated,
@@ -34,6 +34,21 @@ pub async fn register(bus: &NatsBus, service: &LedgerService) -> AppResult<()> {
             tracing::info!("AR invoice created: {} ({} cents)", invoice_id, total_cents);
             if let Err(e) = svc.handle_ar_invoice_created(&invoice_id, total_cents).await {
                 tracing::error!("Failed to create auto-JE for AR invoice {}: {}", invoice_id, e);
+            }
+        }
+    }).await.ok();
+
+    // AR Invoice Approved -> auto-create journal entry
+    let svc = service.clone();
+    bus.subscribe::<ArInvoiceApproved, _, _>("erp.ar.invoice.approved", move |envelope| {
+        let svc = svc.clone();
+        let invoice_id = envelope.payload.invoice_id.clone();
+        let customer_id = envelope.payload.customer_id.clone();
+        let total_cents = envelope.payload.total_cents;
+        async move {
+            tracing::info!("AR invoice approved: {} (customer: {}, {} cents)", invoice_id, customer_id, total_cents);
+            if let Err(e) = svc.handle_ar_invoice_approved(&invoice_id, &customer_id, total_cents).await {
+                tracing::error!("Failed to create auto-JE for approved AR invoice {}: {}", invoice_id, e);
             }
         }
     }).await.ok();

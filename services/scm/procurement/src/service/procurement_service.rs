@@ -327,6 +327,135 @@ impl ProcurementService {
         );
         self.create_purchase_order(input).await
     }
+
+    /// Handle stock received events from inventory service to track PO fulfillment.
+    /// Only processes events where reference_type is "purchase_order".
+    pub async fn handle_stock_received(
+        &self,
+        item_id: &str,
+        warehouse_id: &str,
+        quantity: i64,
+        reference_type: &str,
+        reference_id: &str,
+    ) -> AppResult<()> {
+        if reference_type != "purchase_order" {
+            tracing::debug!(
+                "Ignoring stock received event for reference_type '{}' (id: {})",
+                reference_type, reference_id
+            );
+            return Ok(());
+        }
+
+        tracing::info!(
+            "Processing stock received for PO {}: item={}, warehouse={}, qty={}",
+            reference_id, item_id, warehouse_id, quantity
+        );
+
+        // Look up the PO — if it doesn't exist, just return Ok
+        let po = match self.po_repo.get_by_id(reference_id).await {
+            Ok(po) => po,
+            Err(_) => {
+                tracing::warn!(
+                    "Stock received references PO {} which does not exist; skipping",
+                    reference_id
+                );
+                return Ok(());
+            }
+        };
+
+        // Only process if PO is in a receivable state
+        if po.status != "approved" && po.status != "partially_received" {
+            tracing::warn!(
+                "PO {} is in status '{}', cannot receive stock; skipping",
+                reference_id, po.status
+            );
+            return Ok(());
+        }
+
+        // Find matching PO lines for this item
+        let lines = self.po_repo.get_lines(reference_id).await?;
+        let matching_lines: Vec<_> = lines
+            .iter()
+            .filter(|l| l.item_id == item_id && l.quantity_received < l.quantity)
+            .collect();
+
+        if matching_lines.is_empty() {
+            tracing::warn!(
+                "No open PO lines found for item {} on PO {}; skipping",
+                item_id, reference_id
+            );
+            return Ok(());
+        }
+
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let mut remaining = quantity;
+
+        let mut tx = self.pool.begin().await?;
+
+        for line in &matching_lines {
+            if remaining <= 0 {
+                break;
+            }
+            let can_receive = line.quantity - line.quantity_received;
+            let to_receive = remaining.min(can_receive);
+
+            // Create goods receipt
+            let receipt_id = uuid::Uuid::new_v4().to_string();
+            sqlx::query(
+                "INSERT INTO goods_receipts (id, po_id, po_line_id, quantity_received, received_date) VALUES (?, ?, ?, ?, ?)"
+            )
+            .bind(&receipt_id)
+            .bind(reference_id)
+            .bind(&line.id)
+            .bind(to_receive)
+            .bind(&today)
+            .execute(&mut *tx)
+            .await?;
+
+            // Update line received quantity
+            sqlx::query(
+                "UPDATE po_lines SET quantity_received = quantity_received + ? WHERE id = ?",
+            )
+            .bind(to_receive)
+            .bind(&line.id)
+            .execute(&mut *tx)
+            .await?;
+
+            remaining -= to_receive;
+
+            tracing::info!(
+                "Recorded receipt of {} units for PO line {} (item {})",
+                to_receive, line.id, item_id
+            );
+        }
+
+        // Determine new PO status
+        let updated_lines = sqlx::query_as::<_, (String, i64, i64)>(
+            "SELECT id, quantity, quantity_received FROM po_lines WHERE po_id = ?",
+        )
+        .bind(reference_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let all_received = updated_lines
+            .iter()
+            .all(|(_, qty, qty_received)| qty_received >= qty);
+        let po_status = if all_received { "received" } else { "partially_received" };
+
+        sqlx::query("UPDATE purchase_orders SET status = ? WHERE id = ?")
+            .bind(po_status)
+            .bind(reference_id)
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+
+        tracing::info!(
+            "PO {} fulfillment updated: status={}, item={}, received={}/{}",
+            reference_id, po_status, item_id, quantity - remaining, quantity
+        );
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -941,5 +1070,190 @@ mod tests {
 
         let cancelled = svc.cancel_purchase_order(&po.id).await.unwrap();
         assert_eq!(cancelled.status, "cancelled");
+    }
+
+    #[tokio::test]
+    async fn test_handle_stock_received_updates_po_fulfillment() {
+        let pool = setup().await;
+        let svc = ProcurementService {
+            pool: pool.clone(),
+            supplier_repo: SupplierRepo::new(pool.clone()),
+            po_repo: PurchaseOrderRepo::new(pool.clone()),
+            goods_receipt_repo: GoodsReceiptRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let supplier = svc.create_supplier(CreateSupplier {
+            name: "Stock Received Supplier".into(),
+            email: None,
+            phone: None,
+            address: None,
+        }).await.unwrap();
+
+        let po = svc.create_purchase_order(CreatePurchaseOrder {
+            supplier_id: supplier.id,
+            order_date: "2025-01-01".into(),
+            lines: vec![CreatePurchaseOrderLine {
+                item_id: "ITEM-SR-1".into(),
+                quantity: 10,
+                unit_price_cents: 1000,
+            }],
+        }).await.unwrap();
+
+        svc.submit_purchase_order(&po.id).await.unwrap();
+        svc.approve_purchase_order(&po.id).await.unwrap();
+
+        // Handle stock received for this PO
+        svc.handle_stock_received(
+            "ITEM-SR-1",
+            "WH-1",
+            6,
+            "purchase_order",
+            &po.id,
+        ).await.unwrap();
+
+        // Verify PO is now partially received
+        let detail = svc.get_purchase_order(&po.id).await.unwrap();
+        assert_eq!(detail.order.status, "partially_received");
+
+        // Verify goods receipt was created
+        let receipts = svc.list_goods_receipts_by_po(&po.id).await.unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].quantity_received, 6);
+
+        // Verify line received quantity updated
+        let lines = svc.po_repo.get_lines(&po.id).await.unwrap();
+        assert_eq!(lines[0].quantity_received, 6);
+
+        // Receive remaining quantity
+        svc.handle_stock_received(
+            "ITEM-SR-1",
+            "WH-1",
+            4,
+            "purchase_order",
+            &po.id,
+        ).await.unwrap();
+
+        // PO should now be fully received
+        let detail = svc.get_purchase_order(&po.id).await.unwrap();
+        assert_eq!(detail.order.status, "received");
+
+        let receipts = svc.list_goods_receipts_by_po(&po.id).await.unwrap();
+        assert_eq!(receipts.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_handle_stock_received_ignores_non_po_reference() {
+        let pool = setup().await;
+        let svc = ProcurementService {
+            pool: pool.clone(),
+            supplier_repo: SupplierRepo::new(pool.clone()),
+            po_repo: PurchaseOrderRepo::new(pool.clone()),
+            goods_receipt_repo: GoodsReceiptRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Should silently succeed for non-purchase_order reference types
+        let result = svc.handle_stock_received(
+            "ITEM-001",
+            "WH-1",
+            10,
+            "sales_order",
+            "SO-12345",
+        ).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_stock_received_ignores_unknown_po() {
+        let pool = setup().await;
+        let svc = ProcurementService {
+            pool: pool.clone(),
+            supplier_repo: SupplierRepo::new(pool.clone()),
+            po_repo: PurchaseOrderRepo::new(pool.clone()),
+            goods_receipt_repo: GoodsReceiptRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Should silently succeed for a PO that doesn't exist
+        let result = svc.handle_stock_received(
+            "ITEM-001",
+            "WH-1",
+            10,
+            "purchase_order",
+            "nonexistent-po-id",
+        ).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_stock_received_multi_line_po() {
+        let pool = setup().await;
+        let svc = ProcurementService {
+            pool: pool.clone(),
+            supplier_repo: SupplierRepo::new(pool.clone()),
+            po_repo: PurchaseOrderRepo::new(pool.clone()),
+            goods_receipt_repo: GoodsReceiptRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let supplier = svc.create_supplier(CreateSupplier {
+            name: "Multi-Line Supplier".into(),
+            email: None,
+            phone: None,
+            address: None,
+        }).await.unwrap();
+
+        let po = svc.create_purchase_order(CreatePurchaseOrder {
+            supplier_id: supplier.id,
+            order_date: "2025-01-01".into(),
+            lines: vec![
+                CreatePurchaseOrderLine {
+                    item_id: "ITEM-ML-1".into(),
+                    quantity: 5,
+                    unit_price_cents: 100,
+                },
+                CreatePurchaseOrderLine {
+                    item_id: "ITEM-ML-2".into(),
+                    quantity: 3,
+                    unit_price_cents: 200,
+                },
+            ],
+        }).await.unwrap();
+
+        svc.submit_purchase_order(&po.id).await.unwrap();
+        svc.approve_purchase_order(&po.id).await.unwrap();
+
+        // Receive only item 1 fully
+        svc.handle_stock_received(
+            "ITEM-ML-1",
+            "WH-1",
+            5,
+            "purchase_order",
+            &po.id,
+        ).await.unwrap();
+
+        let detail = svc.get_purchase_order(&po.id).await.unwrap();
+        assert_eq!(detail.order.status, "partially_received");
+
+        // Receive item 2 fully
+        svc.handle_stock_received(
+            "ITEM-ML-2",
+            "WH-1",
+            3,
+            "purchase_order",
+            &po.id,
+        ).await.unwrap();
+
+        let detail = svc.get_purchase_order(&po.id).await.unwrap();
+        assert_eq!(detail.order.status, "received");
     }
 }

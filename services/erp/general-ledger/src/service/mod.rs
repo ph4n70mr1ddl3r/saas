@@ -516,6 +516,56 @@ impl LedgerService {
         self.post_journal_entry(&result.entry.id).await
     }
 
+    /// Create a journal entry when an AR invoice is approved.
+    /// Debit Accounts Receivable (1200), credit Revenue (4000).
+    pub async fn handle_ar_invoice_approved(
+        &self,
+        invoice_id: &str,
+        customer_id: &str,
+        total_cents: i64,
+    ) -> AppResult<JournalEntryWithLines> {
+        let period = self.find_open_period().await?;
+        let ar_account = match self.repo.find_account_by_code("1200").await {
+            Ok(a) => a,
+            Err(_) => match self.repo.find_account_by_type_async("asset").await {
+                Ok(a) => a,
+                Err(_) => self.repo.find_account_by_type_async("revenue").await?,
+            },
+        };
+        let revenue_account = match self.repo.find_account_by_code("4000").await {
+            Ok(a) => a,
+            Err(_) => match self.repo.find_account_by_type_async("revenue").await {
+                Ok(a) => a,
+                Err(_) => self.repo.find_account_by_type_async("asset").await?,
+            },
+        };
+
+        let input = CreateJournalEntryRequest {
+            description: Some(format!(
+                "AR invoice approved - {} (customer: {})",
+                invoice_id, customer_id
+            )),
+            period_id: period.id,
+            lines: vec![
+                CreateJournalLineRequest {
+                    account_id: ar_account.id.clone(),
+                    debit_cents: total_cents,
+                    credit_cents: 0,
+                    description: Some(format!("AR receivable for approved invoice {}", invoice_id)),
+                },
+                CreateJournalLineRequest {
+                    account_id: revenue_account.id.clone(),
+                    debit_cents: 0,
+                    credit_cents: total_cents,
+                    description: Some(format!("Revenue from approved invoice {}", invoice_id)),
+                },
+            ],
+        };
+
+        let result = self.create_journal_entry(&input, "system").await?;
+        self.post_journal_entry(&result.entry.id).await
+    }
+
     /// Create a journal entry when a payroll run completes.
     /// Debit salary expense, credit accrued payroll (liability).
     pub async fn handle_payroll_run_completed(
@@ -1861,6 +1911,57 @@ mod tests {
 
         let posted = repo.post_journal_entry(&entry.id).await.unwrap();
         assert_eq!(posted.status, "posted");
+    }
+
+    #[tokio::test]
+    async fn test_handle_ar_invoice_approved_creates_je() {
+        let pool = setup().await;
+        let repo = LedgerRepo::new(pool.clone());
+        let svc = LedgerService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let ar_account = create_test_account(&repo, "1200", "Accounts Receivable", "asset").await;
+        let revenue_account = create_test_account(&repo, "4000", "Revenue", "revenue").await;
+        let _period = create_test_period(&repo, "AR Approved Period").await;
+
+        let result = svc
+            .handle_ar_invoice_approved("INV-AR-APPROVED-001", "CUST-001", 25000)
+            .await
+            .unwrap();
+
+        assert_eq!(result.entry.status, "posted");
+        assert_eq!(
+            result.entry.description,
+            Some("AR invoice approved - INV-AR-APPROVED-001 (customer: CUST-001)".to_string())
+        );
+
+        let lines = repo.get_journal_lines(&result.entry.id).await.unwrap();
+        assert_eq!(lines.len(), 2);
+
+        // Debit AR
+        let ar_line = lines
+            .iter()
+            .find(|l| l.account_id == ar_account.id)
+            .unwrap();
+        assert_eq!(ar_line.debit_cents, 25000);
+        assert_eq!(ar_line.credit_cents, 0);
+
+        // Credit Revenue
+        let rev_line = lines
+            .iter()
+            .find(|l| l.account_id == revenue_account.id)
+            .unwrap();
+        assert_eq!(rev_line.debit_cents, 0);
+        assert_eq!(rev_line.credit_cents, 25000);
+
+        // Balanced
+        let total_debits: i64 = lines.iter().map(|l| l.debit_cents).sum();
+        let total_credits: i64 = lines.iter().map(|l| l.credit_cents).sum();
+        assert_eq!(total_debits, total_credits);
     }
 
     #[tokio::test]

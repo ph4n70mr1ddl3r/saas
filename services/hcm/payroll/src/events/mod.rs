@@ -1,6 +1,6 @@
 use crate::service::PayrollService;
 use saas_nats_bus::NatsBus;
-use saas_proto::events::{EmployeeCreated, EmployeeTerminated, TimesheetApproved};
+use saas_proto::events::{EmployeeCreated, EmployeeTerminated, EmployeeUpdated, EmployeeEnrolled, EnrollmentCancelled, TimesheetApproved};
 
 pub async fn subscribe(bus: &NatsBus, service: PayrollService) -> anyhow::Result<()> {
     let svc1 = service.clone();
@@ -48,6 +48,59 @@ pub async fn subscribe(bus: &NatsBus, service: PayrollService) -> anyhow::Result
             );
             if let Err(e) = svc3.handle_timesheet_approved(&employee_id, &week_start).await {
                 tracing::error!("Failed to handle timesheet approved for {}: {}", employee_id, e);
+            }
+        }
+    })
+    .await?;
+
+    let svc4 = service.clone();
+    bus.subscribe::<EmployeeUpdated, _, _>("hcm.employee.updated", move |envelope| {
+        let svc4 = svc4.clone();
+        let employee_id = envelope.payload.employee_id.clone();
+        let changes = envelope.payload.changes.clone();
+        async move {
+            tracing::info!(
+                "Received employee.updated event for {} — changes: {:?}",
+                employee_id, changes
+            );
+            if let Err(e) = svc4.handle_employee_updated(&employee_id, &changes).await {
+                tracing::error!("Failed to handle employee updated for {}: {}", employee_id, e);
+            }
+        }
+    })
+    .await?;
+
+    let svc5 = service.clone();
+    bus.subscribe::<EmployeeEnrolled, _, _>("hcm.benefits.enrollment.created", move |envelope| {
+        let svc5 = svc5.clone();
+        let enrollment_id = envelope.payload.enrollment_id.clone();
+        let employee_id = envelope.payload.employee_id.clone();
+        let plan_id = envelope.payload.plan_id.clone();
+        async move {
+            tracing::info!(
+                "Received benefits.enrollment.created for employee {} plan {} — creating benefit deduction",
+                employee_id, plan_id
+            );
+            if let Err(e) = svc5.handle_benefit_enrollment_created(&enrollment_id, &employee_id, &plan_id).await {
+                tracing::error!("Failed to create benefit deduction for employee {} plan {}: {}", employee_id, plan_id, e);
+            }
+        }
+    })
+    .await?;
+
+    let svc6 = service.clone();
+    bus.subscribe::<EnrollmentCancelled, _, _>("hcm.benefits.enrollment.cancelled", move |envelope| {
+        let svc6 = svc6.clone();
+        let enrollment_id = envelope.payload.enrollment_id.clone();
+        let employee_id = envelope.payload.employee_id.clone();
+        let plan_id = envelope.payload.plan_id.clone();
+        async move {
+            tracing::info!(
+                "Received benefits.enrollment.cancelled for employee {} plan {} — deactivating benefit deduction",
+                employee_id, plan_id
+            );
+            if let Err(e) = svc6.handle_benefit_enrollment_cancelled(&enrollment_id, &employee_id, &plan_id).await {
+                tracing::error!("Failed to cancel benefit deduction for employee {} plan {}: {}", employee_id, plan_id, e);
             }
         }
     })

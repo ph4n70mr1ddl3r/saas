@@ -235,6 +235,32 @@ impl PayrollRepo {
         .ok_or_else(|| AppError::NotFound(format!("Deduction '{}' not found", id)))
     }
 
+    /// Find an active (no end_date) deduction for a given employee and code.
+    pub async fn find_active_deduction_by_employee_and_code(
+        &self,
+        employee_id: &str,
+        code: &str,
+    ) -> AppResult<Option<Deduction>> {
+        let row = sqlx::query_as::<_, Deduction>(
+            "SELECT id, employee_id, code, amount_cents, recurring, start_date, end_date FROM deductions WHERE employee_id = ? AND code = ? AND end_date IS NULL ORDER BY start_date DESC LIMIT 1"
+        )
+        .bind(employee_id)
+        .bind(code)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    /// Deactivate a deduction by setting its end_date.
+    pub async fn deactivate_deduction(&self, id: &str, end_date: &str) -> AppResult<Deduction> {
+        sqlx::query("UPDATE deductions SET end_date = ? WHERE id = ?")
+            .bind(end_date)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        self.get_deduction(id).await
+    }
+
     // --- Tax Brackets ---
 
     pub async fn list_tax_brackets(&self) -> AppResult<Vec<TaxBracket>> {
