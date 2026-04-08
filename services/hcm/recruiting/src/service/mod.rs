@@ -160,13 +160,13 @@ impl RecruitingService {
     }
 
     /// When an employee is terminated, log open job postings for awareness.
-    pub async fn handle_employee_terminated(&self, _employee_id: &str) -> AppResult<()> {
+    pub async fn handle_employee_terminated(&self, employee_id: &str) -> AppResult<()> {
         let open_jobs = self.repo.list_jobs().await?;
         let open_count = open_jobs.iter().filter(|j| j.status == "open").count();
         if open_count > 0 {
             tracing::info!(
-                "Employee terminated: {} open job posting(s) may need review for backfill",
-                open_count
+                "Employee {} terminated: {} open job posting(s) may need review for backfill",
+                employee_id, open_count
             );
         }
         Ok(())

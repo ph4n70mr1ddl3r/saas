@@ -33,6 +33,21 @@ pub struct PayRunCompleted {
     pub total_net_pay_cents: i64,
 }
 
+// HCM Compensation Events
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompensationCreated {
+    pub compensation_id: String,
+    pub employee_id: String,
+    pub amount_cents: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompensationUpdated {
+    pub compensation_id: String,
+    pub employee_id: String,
+    pub amount_cents: i64,
+}
+
 // HCM Recruiting Events
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApplicationStatusChanged {
@@ -380,6 +395,20 @@ pub struct TokenRevoked {
 pub struct UserDeactivated {
     pub user_id: String,
     pub username: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserCreated {
+    pub user_id: String,
+    pub username: String,
+    pub email: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserUpdated {
+    pub user_id: String,
+    pub username: String,
+    pub email: String,
 }
 
 // SCM Manufacturing Events

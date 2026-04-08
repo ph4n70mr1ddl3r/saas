@@ -68,7 +68,7 @@ pub struct UserListRow {
     pub updated_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct UserRow {
     pub id: String,
     pub username: String,

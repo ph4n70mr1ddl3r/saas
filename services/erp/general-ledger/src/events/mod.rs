@@ -2,7 +2,7 @@ use crate::service::LedgerService;
 use saas_common::error::AppResult;
 use saas_nats_bus::NatsBus;
 use saas_proto::events::{
-    ApPaymentCreated, ArReceiptCreated, AssetCreated, AssetDisposed,
+    ApInvoiceCancelled, ApPaymentCreated, ArInvoiceCancelled, ArReceiptCreated, AssetCreated, AssetDisposed,
     DepreciationRunCompleted, ExpenseReportApproved, PayRunCompleted,
     ReconciliationCompleted, TransferCompleted, VendorInvoiceApproved,
     CustomerInvoiceCreated,
@@ -170,6 +170,34 @@ pub async fn register(bus: &NatsBus, service: &LedgerService) -> AppResult<()> {
             if let Err(e) = svc.handle_reconciliation_completed(&recon_id, difference_cents).await {
                 tracing::error!("Failed to create auto-JE for reconciliation {}: {}", recon_id, e);
             }
+        }
+    }).await.ok();
+
+    // AP Invoice Cancelled -> log for audit (original JE reversal would be manual)
+    let svc = service.clone();
+    bus.subscribe::<ApInvoiceCancelled, _, _>("erp.ap.invoice.cancelled", move |envelope| {
+        let _svc = svc.clone();
+        let invoice_id = envelope.payload.invoice_id.clone();
+        let vendor_id = envelope.payload.vendor_id.clone();
+        async move {
+            tracing::info!(
+                "AP invoice cancelled: {} (vendor: {}) - manual JE reversal may be required",
+                invoice_id, vendor_id
+            );
+        }
+    }).await.ok();
+
+    // AR Invoice Cancelled -> log for audit (original JE reversal would be manual)
+    let svc = service.clone();
+    bus.subscribe::<ArInvoiceCancelled, _, _>("erp.ar.invoice.cancelled", move |envelope| {
+        let _svc = svc.clone();
+        let invoice_id = envelope.payload.invoice_id.clone();
+        let customer_id = envelope.payload.customer_id.clone();
+        async move {
+            tracing::info!(
+                "AR invoice cancelled: {} (customer: {}) - manual JE reversal may be required",
+                invoice_id, customer_id
+            );
         }
     }).await.ok();
 

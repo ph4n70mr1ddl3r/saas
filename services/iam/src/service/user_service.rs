@@ -53,7 +53,26 @@ impl UserService {
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
         let user = self.repo.create(&input, &hash.to_string()).await?;
-        Ok(UserResponse::from(user))
+        let response = UserResponse::from(user.clone());
+        if let Err(e) = self
+            .bus
+            .publish(
+                "iam.user.created",
+                saas_proto::events::UserCreated {
+                    user_id: user.id.clone(),
+                    username: user.username.clone(),
+                    email: user.email.clone(),
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "iam.user.created",
+                e
+            );
+        }
+        Ok(response)
     }
 
     pub async fn update(&self, id: &str, input: UpdateUser) -> AppResult<UserResponse> {
@@ -69,7 +88,26 @@ impl UserService {
                 input.is_active,
             )
             .await?;
-        Ok(UserResponse::from(user))
+        let response = UserResponse::from(user.clone());
+        if let Err(e) = self
+            .bus
+            .publish(
+                "iam.user.updated",
+                saas_proto::events::UserUpdated {
+                    user_id: user.id.clone(),
+                    username: user.username.clone(),
+                    email: user.email.clone(),
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "iam.user.updated",
+                e
+            );
+        }
+        Ok(response)
     }
 
     pub async fn change_password(

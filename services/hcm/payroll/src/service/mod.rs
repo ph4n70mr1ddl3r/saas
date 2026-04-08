@@ -45,7 +45,26 @@ impl PayrollService {
                 "amount_cents must be non-negative".into(),
             ));
         }
-        self.repo.create_compensation(&input).await
+        let comp = self.repo.create_compensation(&input).await?;
+        if let Err(e) = self
+            .bus
+            .publish(
+                "hcm.payroll.compensation.created",
+                saas_proto::events::CompensationCreated {
+                    compensation_id: comp.id.clone(),
+                    employee_id: comp.employee_id.clone(),
+                    amount_cents: comp.amount_cents,
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "hcm.payroll.compensation.created",
+                e
+            );
+        }
+        Ok(comp)
     }
 
     pub async fn update_compensation(
@@ -53,7 +72,26 @@ impl PayrollService {
         id: &str,
         input: UpdateCompensationRequest,
     ) -> AppResult<Compensation> {
-        self.repo.update_compensation(id, &input).await
+        let comp = self.repo.update_compensation(id, &input).await?;
+        if let Err(e) = self
+            .bus
+            .publish(
+                "hcm.payroll.compensation.updated",
+                saas_proto::events::CompensationUpdated {
+                    compensation_id: comp.id.clone(),
+                    employee_id: comp.employee_id.clone(),
+                    amount_cents: comp.amount_cents,
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "hcm.payroll.compensation.updated",
+                e
+            );
+        }
+        Ok(comp)
     }
 
     // --- PayRuns ---
