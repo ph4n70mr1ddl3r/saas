@@ -4,7 +4,7 @@ use saas_nats_bus::NatsBus;
 use saas_proto::events::{
     ApInvoiceCancelled, ApPaymentCreated, ArInvoiceApproved, ArInvoiceCancelled, ArReceiptCreated, AssetCreated, AssetDisposed,
     CycleCountPosted, DepreciationRunCompleted, ExpenseReportApproved, PayRunCompleted,
-    ReconciliationCompleted, TransferCompleted, VendorInvoiceApproved,
+    ReconciliationCompleted, ReturnProcessed, TransferCompleted, VendorInvoiceApproved,
     CustomerInvoiceCreated,
 };
 
@@ -236,6 +236,21 @@ pub async fn register(bus: &NatsBus, service: &LedgerService) -> AppResult<()> {
             );
             if let Err(e) = svc.handle_cycle_count_posted(&session_id, &warehouse_id, adjustment_count).await {
                 tracing::error!("Failed to create auto-JE for cycle count session {}: {}", session_id, e);
+            }
+        }
+    }).await.ok();
+
+    // Return Processed -> auto-create refund journal entry
+    let svc = service.clone();
+    bus.subscribe::<ReturnProcessed, _, _>("scm.orders.return.processed", move |envelope| {
+        let svc = svc.clone();
+        let return_id = envelope.payload.return_id.clone();
+        let order_id = envelope.payload.order_id.clone();
+        let refund_amount_cents = envelope.payload.refund_amount_cents;
+        async move {
+            tracing::info!("Return processed: {} (order: {}, {} cents)", return_id, order_id, refund_amount_cents);
+            if let Err(e) = svc.handle_return_processed(&return_id, &order_id, refund_amount_cents).await {
+                tracing::error!("Failed to create auto-JE for return {}: {}", return_id, e);
             }
         }
     }).await.ok();

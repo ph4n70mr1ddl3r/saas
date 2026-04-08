@@ -1307,6 +1307,68 @@ impl LedgerService {
         self.post_journal_entry(&result.entry.id).await
     }
 
+    /// Create a journal entry when a return is processed (refund).
+    /// Debit Sales Returns & Allowances (4100), Credit Accounts Receivable (1200).
+    pub async fn handle_return_processed(
+        &self,
+        return_id: &str,
+        order_id: &str,
+        refund_amount_cents: i64,
+    ) -> AppResult<JournalEntryWithLines> {
+        if refund_amount_cents == 0 {
+            return Err(AppError::Validation(
+                "Refund amount is zero - no journal entry needed".into(),
+            ));
+        }
+
+        let period = self.find_open_period().await?;
+        let sales_returns_account = match self.repo.find_account_by_code("4100").await {
+            Ok(a) => a,
+            Err(_) => match self.repo.find_account_by_type_async("revenue").await {
+                Ok(a) => a,
+                Err(_) => self.repo.find_account_by_type_async("expense").await?,
+            },
+        };
+        let ar_account = match self.repo.find_account_by_code("1200").await {
+            Ok(a) => a,
+            Err(_) => match self.repo.find_account_by_type_async("asset").await {
+                Ok(a) => a,
+                Err(_) => self.repo.find_account_by_type_async("revenue").await?,
+            },
+        };
+
+        let input = CreateJournalEntryRequest {
+            description: Some(format!(
+                "Return refund - return {}, order {}",
+                return_id, order_id
+            )),
+            period_id: period.id,
+            lines: vec![
+                CreateJournalLineRequest {
+                    account_id: sales_returns_account.id.clone(),
+                    debit_cents: refund_amount_cents,
+                    credit_cents: 0,
+                    description: Some(format!(
+                        "Sales returns for return {}",
+                        return_id
+                    )),
+                },
+                CreateJournalLineRequest {
+                    account_id: ar_account.id.clone(),
+                    debit_cents: 0,
+                    credit_cents: refund_amount_cents,
+                    description: Some(format!(
+                        "AR refund for return {}",
+                        return_id
+                    )),
+                },
+            ],
+        };
+
+        let result = self.create_journal_entry(&input, "system").await?;
+        self.post_journal_entry(&result.entry.id).await
+    }
+
     async fn find_open_period(&self) -> AppResult<Period> {
         self.repo
             .list_periods()
@@ -3225,5 +3287,78 @@ mod tests {
             .await
             .unwrap();
         assert!(not_found.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_handle_return_processed_creates_refund_je() {
+        let pool = setup().await;
+        let repo = LedgerRepo::new(pool.clone());
+        let svc = LedgerService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let sales_returns = create_test_account(&repo, "4100", "Sales Returns & Allowances", "revenue").await;
+        let ar = create_test_account(&repo, "1200", "Accounts Receivable", "asset").await;
+        let _period = create_test_period(&repo, "Return Refund Period").await;
+
+        let result = svc
+            .handle_return_processed("RET-001", "ORD-001", 15000)
+            .await
+            .unwrap();
+
+        assert_eq!(result.entry.status, "posted");
+        assert_eq!(
+            result.entry.description,
+            Some("Return refund - return RET-001, order ORD-001".to_string())
+        );
+
+        let lines = repo.get_journal_lines(&result.entry.id).await.unwrap();
+        assert_eq!(lines.len(), 2);
+
+        // Debit Sales Returns & Allowances (4100)
+        let sales_returns_line = lines
+            .iter()
+            .find(|l| l.account_id == sales_returns.id)
+            .unwrap();
+        assert_eq!(sales_returns_line.debit_cents, 15000);
+        assert_eq!(sales_returns_line.credit_cents, 0);
+
+        // Credit Accounts Receivable (1200)
+        let ar_line = lines
+            .iter()
+            .find(|l| l.account_id == ar.id)
+            .unwrap();
+        assert_eq!(ar_line.debit_cents, 0);
+        assert_eq!(ar_line.credit_cents, 15000);
+
+        // Balanced entry
+        let total_debits: i64 = lines.iter().map(|l| l.debit_cents).sum();
+        let total_credits: i64 = lines.iter().map(|l| l.credit_cents).sum();
+        assert_eq!(total_debits, total_credits);
+    }
+
+    #[tokio::test]
+    async fn test_handle_return_processed_zero_amount_returns_early() {
+        let pool = setup().await;
+        let repo = LedgerRepo::new(pool.clone());
+        let svc = LedgerService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let _sales_returns = create_test_account(&repo, "4100", "Sales Returns & Allowances", "revenue").await;
+        let _ar = create_test_account(&repo, "1200", "Accounts Receivable", "asset").await;
+        let _period = create_test_period(&repo, "Return Refund Zero Period").await;
+
+        let result = svc
+            .handle_return_processed("RET-ZERO", "ORD-ZERO", 0)
+            .await;
+
+        assert!(result.is_err());
     }
 }

@@ -296,6 +296,63 @@ impl ApService {
         Ok(Some(result))
     }
 
+    // --- Stock Receipt Matching (three-way match tracking) ---
+
+    /// Match stock receipts against pending PO invoices for three-way match.
+    /// When goods are received against a purchase order, this handler checks
+    /// whether an AP invoice already exists for that PO. The PO invoices are
+    /// auto-created by `handle_po_received` using invoice_number "AUTO-PO-{po_id}".
+    pub async fn handle_stock_received(
+        &self,
+        item_id: &str,
+        quantity: i64,
+        reference_type: &str,
+        reference_id: &str,
+    ) -> AppResult<()> {
+        // Only process purchase order receipts
+        if reference_type != "purchase_order" {
+            tracing::debug!(
+                "Ignoring stock receipt: reference_type='{}' (not a purchase order)",
+                reference_type
+            );
+            return Ok(());
+        }
+
+        tracing::info!(
+            "Goods receipt for PO: item={}, qty={}, po_id={}",
+            item_id, quantity, reference_id
+        );
+
+        // Look for a matching AP invoice created for this PO
+        let po_invoice_number = format!("AUTO-PO-{}", reference_id);
+        let invoices = self.repo.list_invoices().await?;
+        let matching = invoices.iter().find(|inv| inv.invoice_number == po_invoice_number);
+
+        match matching {
+            Some(invoice) => {
+                if invoice.status == "pending" || invoice.status == "approved" {
+                    tracing::info!(
+                        "Goods receipt confirmed for three-way match: po_id={}, invoice={}, status={}",
+                        reference_id, invoice.invoice_number, invoice.status
+                    );
+                } else {
+                    tracing::info!(
+                        "Goods receipt matched PO invoice {} but status is '{}' (expected pending/approved)",
+                        invoice.invoice_number, invoice.status
+                    );
+                }
+            }
+            None => {
+                tracing::info!(
+                    "PO {} received (item={}, qty={}) but no AP invoice exists yet — awaiting invoice",
+                    reference_id, item_id, quantity
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     // --- Tax Codes ---
 
     pub async fn create_tax_code(&self, input: &CreateTaxCodeRequest) -> AppResult<TaxCode> {
@@ -1066,5 +1123,118 @@ mod tests {
 
         let inv = repo.get_invoice(&invoice.id).await.unwrap();
         assert_eq!(inv.status, "paid");
+    }
+
+    #[tokio::test]
+    async fn test_handle_stock_received_matches_po_invoice() {
+        let pool = setup().await;
+        let svc = ApService {
+            repo: ApRepo::new(pool.clone()),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let vendor = create_test_vendor(&svc.repo, "Stock Match Vendor").await;
+
+        // Create a PO invoice using the AUTO-PO-{po_id} naming convention
+        let po_id = "PO-STOCK-001";
+        svc.repo.create_invoice(&CreateApInvoiceRequest {
+            vendor_id: vendor.id.clone(),
+            invoice_number: format!("AUTO-PO-{}", po_id),
+            invoice_date: "2025-06-01".into(),
+            due_date: "2025-07-01".into(),
+            lines: vec![CreateApInvoiceLineRequest {
+                description: Some("Widgets".into()),
+                account_code: "5000".into(),
+                amount_cents: 10000,
+            }],
+            tax_code: None,
+        }, 0).await.unwrap();
+
+        // Approve the invoice so it's in "approved" status
+        let invoices = svc.repo.list_invoices().await.unwrap();
+        let inv = invoices.iter().find(|i| i.invoice_number == format!("AUTO-PO-{}", po_id)).unwrap();
+        svc.repo.approve_invoice(&inv.id).await.unwrap();
+
+        // Handle stock received for the same PO — should find matching invoice
+        let result = svc.handle_stock_received("ITEM-WIDGET", 100, "purchase_order", po_id).await;
+        assert!(result.is_ok());
+
+        // Verify the invoice still exists and is approved (handler is read-only tracking)
+        let inv = svc.repo.get_invoice(&inv.id).await.unwrap();
+        assert_eq!(inv.status, "approved");
+        assert_eq!(inv.total_cents, 10000);
+    }
+
+    #[tokio::test]
+    async fn test_handle_stock_received_no_matching_invoice() {
+        let pool = setup().await;
+        let svc = ApService {
+            repo: ApRepo::new(pool.clone()),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // No invoices exist — handler should succeed (just logs no-match)
+        let result = svc.handle_stock_received("ITEM-999", 50, "purchase_order", "PO-NONEXISTENT").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_stock_received_ignores_non_po_reference() {
+        let pool = setup().await;
+        let svc = ApService {
+            repo: ApRepo::new(pool.clone()),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // reference_type is not "purchase_order" — should be ignored
+        let result = svc.handle_stock_received("ITEM-123", 10, "sales_order", "SO-001").await;
+        assert!(result.is_ok());
+
+        let result = svc.handle_stock_received("ITEM-456", 5, "transfer", "TR-001").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_stock_received_pending_invoice_match() {
+        let pool = setup().await;
+        let svc = ApService {
+            repo: ApRepo::new(pool.clone()),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let vendor = create_test_vendor(&svc.repo, "Pending Match Vendor").await;
+
+        // Create a PO invoice but leave it in "draft" status
+        let po_id = "PO-PENDING-001";
+        svc.repo.create_invoice(&CreateApInvoiceRequest {
+            vendor_id: vendor.id.clone(),
+            invoice_number: format!("AUTO-PO-{}", po_id),
+            invoice_date: "2025-06-01".into(),
+            due_date: "2025-07-01".into(),
+            lines: vec![CreateApInvoiceLineRequest {
+                description: Some("Gadgets".into()),
+                account_code: "5000".into(),
+                amount_cents: 5000,
+            }],
+            tax_code: None,
+        }, 0).await.unwrap();
+
+        // Handler should still succeed — the invoice is draft, not pending/approved,
+        // but the handler only logs; it does not error
+        let result = svc.handle_stock_received("ITEM-GADGET", 25, "purchase_order", po_id).await;
+        assert!(result.is_ok());
+
+        // Verify invoice still in draft
+        let invoices = svc.repo.list_invoices().await.unwrap();
+        let inv = invoices.iter().find(|i| i.invoice_number == format!("AUTO-PO-{}", po_id)).unwrap();
+        assert_eq!(inv.status, "draft");
     }
 }

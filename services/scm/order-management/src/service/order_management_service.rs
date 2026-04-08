@@ -218,6 +218,77 @@ impl OrderManagementService {
         self.get_sales_order(id).await
     }
 
+    // Event Handlers
+    pub async fn handle_stock_reserved(
+        &self,
+        item_id: &str,
+        warehouse_id: &str,
+        quantity: i64,
+        reference_type: &str,
+        reference_id: &str,
+    ) {
+        // Only process stock reservations for sales orders
+        if reference_type != "sales_order" {
+            tracing::debug!(
+                "Ignoring stock reserved event: reference_type '{}' is not 'sales_order'",
+                reference_type
+            );
+            return;
+        }
+
+        let order_id = reference_id;
+        tracing::info!(
+            "Processing stock reserved for sales order {}: item={}, warehouse={}, qty={}",
+            order_id,
+            item_id,
+            warehouse_id,
+            quantity
+        );
+
+        // Try to fetch the sales order
+        let order = match self.order_repo.get_by_id(order_id).await {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to fetch sales order {} for stock reserved event: {}",
+                    order_id,
+                    e
+                );
+                return;
+            }
+        };
+
+        // Only auto-advance if the order is in "confirmed" status
+        if order.status != "confirmed" {
+            tracing::info!(
+                "Sales order {} has status '{}' — skipping auto-advance to picking (only 'confirmed' orders are advanced)",
+                order_id,
+                order.status
+            );
+            return;
+        }
+
+        // Advance status to "picking"
+        match self.order_repo.update_status(order_id, "picking").await {
+            Ok(_) => {
+                tracing::info!(
+                    "Auto-advanced sales order {} from 'confirmed' to 'picking' (stock reserved: item={}, warehouse={}, qty={})",
+                    order_id,
+                    item_id,
+                    warehouse_id,
+                    quantity
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to update sales order {} status to 'picking': {}",
+                    order_id,
+                    e
+                );
+            }
+        }
+    }
+
     // Returns
     pub async fn list_returns(&self) -> AppResult<Vec<ReturnResponse>> {
         self.return_repo.list().await
@@ -1038,5 +1109,140 @@ mod tests {
             reason: None,
         }).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_handle_stock_reserved_advances_confirmed_to_picking() {
+        let pool = setup().await;
+        let svc = OrderManagementService {
+            order_repo: SalesOrderRepo::new(pool.clone()),
+            fulfillment_repo: FulfillmentRepo::new(pool.clone()),
+            return_repo: ReturnRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Create and confirm a sales order
+        let order = svc.order_repo.create(&CreateSalesOrder {
+            customer_id: "CUST-STOCK".into(),
+            order_date: "2026-02-01".into(),
+            shipping_address: None,
+            notes: None,
+            lines: vec![CreateSalesOrderLine {
+                item_id: "ITEM-STOCK".into(),
+                quantity: 10,
+                unit_price_cents: 1000,
+            }],
+        }).await.unwrap();
+        svc.order_repo.update_status(&order.id, "confirmed").await.unwrap();
+
+        // Simulate stock reserved event for this sales order
+        svc.handle_stock_reserved("ITEM-STOCK", "WH-001", 10, "sales_order", &order.id).await;
+
+        // Verify status advanced to picking
+        let updated = svc.order_repo.get_by_id(&order.id).await.unwrap();
+        assert_eq!(updated.status, "picking");
+    }
+
+    #[tokio::test]
+    async fn test_handle_stock_reserved_ignores_non_sales_order_reference() {
+        let pool = setup().await;
+        let svc = OrderManagementService {
+            order_repo: SalesOrderRepo::new(pool.clone()),
+            fulfillment_repo: FulfillmentRepo::new(pool.clone()),
+            return_repo: ReturnRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Create and confirm a sales order
+        let order = svc.order_repo.create(&CreateSalesOrder {
+            customer_id: "CUST-REF".into(),
+            order_date: "2026-02-15".into(),
+            shipping_address: None,
+            notes: None,
+            lines: vec![CreateSalesOrderLine {
+                item_id: "ITEM-REF".into(),
+                quantity: 5,
+                unit_price_cents: 500,
+            }],
+        }).await.unwrap();
+        svc.order_repo.update_status(&order.id, "confirmed").await.unwrap();
+
+        // Call with a non-sales_order reference type
+        svc.handle_stock_reserved("ITEM-REF", "WH-002", 5, "purchase_order", &order.id).await;
+
+        // Status should remain confirmed (not advanced)
+        let updated = svc.order_repo.get_by_id(&order.id).await.unwrap();
+        assert_eq!(updated.status, "confirmed");
+    }
+
+    #[tokio::test]
+    async fn test_handle_stock_reserved_ignores_non_confirmed_order() {
+        let pool = setup().await;
+        let svc = OrderManagementService {
+            order_repo: SalesOrderRepo::new(pool.clone()),
+            fulfillment_repo: FulfillmentRepo::new(pool.clone()),
+            return_repo: ReturnRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Create a sales order but leave it in draft
+        let order = svc.order_repo.create(&CreateSalesOrder {
+            customer_id: "CUST-DRAFT".into(),
+            order_date: "2026-03-01".into(),
+            shipping_address: None,
+            notes: None,
+            lines: vec![CreateSalesOrderLine {
+                item_id: "ITEM-DRAFT".into(),
+                quantity: 2,
+                unit_price_cents: 100,
+            }],
+        }).await.unwrap();
+        // Status is "draft" — not confirmed
+
+        svc.handle_stock_reserved("ITEM-DRAFT", "WH-003", 2, "sales_order", &order.id).await;
+
+        // Status should remain draft (not advanced)
+        let updated = svc.order_repo.get_by_id(&order.id).await.unwrap();
+        assert_eq!(updated.status, "draft");
+    }
+
+    #[tokio::test]
+    async fn test_handle_stock_reserved_ignores_already_picking_order() {
+        let pool = setup().await;
+        let svc = OrderManagementService {
+            order_repo: SalesOrderRepo::new(pool.clone()),
+            fulfillment_repo: FulfillmentRepo::new(pool.clone()),
+            return_repo: ReturnRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Create, confirm, then advance to picking already
+        let order = svc.order_repo.create(&CreateSalesOrder {
+            customer_id: "CUST-PICK2".into(),
+            order_date: "2026-03-15".into(),
+            shipping_address: None,
+            notes: None,
+            lines: vec![CreateSalesOrderLine {
+                item_id: "ITEM-PICK2".into(),
+                quantity: 7,
+                unit_price_cents: 200,
+            }],
+        }).await.unwrap();
+        svc.order_repo.update_status(&order.id, "confirmed").await.unwrap();
+        svc.order_repo.update_status(&order.id, "picking").await.unwrap();
+
+        // Another stock reserved event arrives — should not change status
+        svc.handle_stock_reserved("ITEM-PICK2", "WH-004", 7, "sales_order", &order.id).await;
+
+        let updated = svc.order_repo.get_by_id(&order.id).await.unwrap();
+        assert_eq!(updated.status, "picking");
     }
 }

@@ -207,6 +207,46 @@ impl BenefitsService {
         Ok(cancelled)
     }
 
+    /// React to compensation changes by re-evaluating plan eligibility.
+    /// This is primarily a notification/logging handler since benefit deductions
+    /// are managed by payroll.
+    pub async fn handle_compensation_changed(
+        &self,
+        compensation_id: &str,
+        employee_id: &str,
+        amount_cents: i64,
+        change_type: &str,
+    ) -> AppResult<()> {
+        tracing::info!(
+            "Compensation {} for employee {}: amount_cents={}, type={}",
+            compensation_id,
+            employee_id,
+            amount_cents,
+            change_type,
+        );
+
+        let enrollments = self.repo.list_enrollments_by_employee(employee_id).await?;
+        let active_count = enrollments.iter().filter(|e| e.status == "active").count();
+
+        if active_count > 0 {
+            tracing::info!(
+                "Employee {} has {} active benefit enrollment(s) — \
+                 benefit deductions may need recalculation based on new compensation (amount_cents={})",
+                employee_id,
+                active_count,
+                amount_cents,
+            );
+        } else {
+            tracing::info!(
+                "Employee {} has no active benefit enrollments — \
+                 no deduction recalculation needed",
+                employee_id,
+            );
+        }
+
+        Ok(())
+    }
+
     /// Cancel all active enrollments when an employee is terminated.
     pub async fn handle_employee_terminated(&self, employee_id: &str) -> AppResult<()> {
         let enrollments = self.repo.list_enrollments_by_employee(employee_id).await?;
@@ -826,5 +866,61 @@ mod tests {
             .await
             .unwrap();
         assert!(enrollments.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_compensation_changed_with_active_enrollments() {
+        let pool = setup().await;
+        let repo = BenefitsRepo::new(pool.clone());
+        let svc = BenefitsService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Create an active plan and enroll an employee
+        let plan = svc
+            .create_plan(CreatePlanRequest {
+                name: "Medical Plan".into(),
+                plan_type: "medical".into(),
+                description: None,
+                employer_contribution_cents: None,
+                employee_contribution_cents: None,
+                is_active: Some(true),
+            })
+            .await
+            .unwrap();
+
+        svc.create_enrollment(CreateEnrollmentRequest {
+            employee_id: "emp-comp".into(),
+            plan_id: plan.id.clone(),
+        })
+        .await
+        .unwrap();
+
+        // Handler should succeed — verifies the lookup path works
+        let result = svc
+            .handle_compensation_changed("comp-001", "emp-comp", 150000_00, "created")
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_compensation_changed_no_enrollments() {
+        let pool = setup().await;
+        let repo = BenefitsRepo::new(pool.clone());
+        let svc = BenefitsService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Employee has no enrollments — handler should still succeed
+        let result = svc
+            .handle_compensation_changed("comp-002", "emp-noenroll", 90000_00, "updated")
+            .await;
+        assert!(result.is_ok());
     }
 }

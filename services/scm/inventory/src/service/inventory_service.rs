@@ -528,6 +528,49 @@ impl InventoryService {
         Ok(())
     }
 
+    /// Release reserved stock when a sales order is cancelled.
+    /// Finds active reservations tied to the order and cancels them,
+    /// releasing the reserved quantity back to available stock.
+    pub async fn handle_order_cancelled(
+        &self,
+        order_id: &str,
+        order_number: &str,
+        reason: &Option<String>,
+    ) -> AppResult<()> {
+        tracing::info!(
+            "Processing sales order cancelled: order_id={}, order_number={}, reason={:?}",
+            order_id, order_number, reason
+        );
+
+        let reservations = self.reservation_repo.list().await?;
+        let matching: Vec<_> = reservations
+            .iter()
+            .filter(|r| r.reference_type == "sales_order" && r.reference_id == order_id && r.status == "active")
+            .collect();
+
+        if matching.is_empty() {
+            tracing::info!(
+                "No active reservations found for cancelled order: order_id={}",
+                order_id
+            );
+            return Ok(());
+        }
+
+        for res in matching {
+            tracing::info!(
+                "Cancelling reservation {} for cancelled order {} (item={}, warehouse={}, qty={})",
+                res.id, order_id, res.item_id, res.warehouse_id, res.quantity
+            );
+            self.cancel_reservation(&res.id).await?;
+        }
+
+        tracing::info!(
+            "Successfully released reserved stock for cancelled order: order_id={}, order_number={}",
+            order_id, order_number
+        );
+        Ok(())
+    }
+
     /// Add returned items back to inventory when a customer return is processed.
     pub async fn handle_return_created(
         &self,
@@ -2060,5 +2103,180 @@ mod tests {
         // No stock at all -- handler should still succeed (logs warning about missing stock)
         let result = svc.handle_work_order_started("WO-START-003", &item.id, 25).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_order_cancelled_releases_reservation() {
+        let pool = setup().await;
+        let svc = InventoryService::new(
+            pool.clone(),
+            saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        );
+
+        let wh = svc.warehouse_repo.create(&CreateWarehouse {
+            name: "WH-OC".into(),
+            address: None,
+        }).await.unwrap();
+        let item = svc.item_repo.create(&CreateItem {
+            sku: "SKU-OC".into(),
+            name: "Order Cancel Item".into(),
+            description: None,
+            unit_of_measure: None,
+            item_type: "finished".into(),
+            reorder_point: 0,
+            safety_stock: 0,
+            economic_order_qty: 0,
+            unit_price_cents: None,
+        }).await.unwrap();
+
+        // Put 100 units on hand
+        svc.stock_level_repo.upsert_receipt(&item.id, &wh.id, 100).await.unwrap();
+
+        // Create a reservation tied to a sales order
+        svc.create_reservation(CreateReservation {
+            item_id: item.id.clone(),
+            warehouse_id: wh.id.clone(),
+            quantity: 30,
+            reference_type: "sales_order".into(),
+            reference_id: "SO-CANCEL-001".into(),
+        }).await.unwrap();
+
+        // Verify reservation is active and stock is reserved
+        let sl = svc.stock_level_repo
+            .get_by_item_warehouse(&item.id, &wh.id)
+            .await.unwrap().unwrap();
+        assert_eq!(sl.quantity_on_hand, 100);
+        assert_eq!(sl.quantity_reserved, 30);
+
+        // Handle order cancellation
+        let result = svc.handle_order_cancelled(
+            "SO-CANCEL-001",
+            "ORD-001",
+            &Some("Customer requested cancellation".into()),
+        ).await;
+        assert!(result.is_ok());
+
+        // Verify reservation is cancelled
+        let reservations = svc.reservation_repo.list().await.unwrap();
+        let cancelled = reservations.iter().find(|r| r.reference_id == "SO-CANCEL-001").unwrap();
+        assert_eq!(cancelled.status, "cancelled");
+
+        // Verify stock is released: reserved goes back to 0, available returns to on_hand level
+        let sl = svc.stock_level_repo
+            .get_by_item_warehouse(&item.id, &wh.id)
+            .await.unwrap().unwrap();
+        assert_eq!(sl.quantity_on_hand, 100);
+        assert_eq!(sl.quantity_reserved, 0);
+    }
+
+    #[tokio::test]
+    async fn test_handle_order_cancelled_no_reservation() {
+        let pool = setup().await;
+        let svc = InventoryService::new(
+            pool.clone(),
+            saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        );
+
+        // No reservations exist for this order -- should succeed gracefully
+        let result = svc.handle_order_cancelled(
+            "SO-NORES-999",
+            "ORD-999",
+            &None,
+        ).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_order_cancelled_multiple_reservations() {
+        let pool = setup().await;
+        let svc = InventoryService::new(
+            pool.clone(),
+            saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        );
+
+        let wh = svc.warehouse_repo.create(&CreateWarehouse {
+            name: "WH-OC-MULTI".into(),
+            address: None,
+        }).await.unwrap();
+        let item1 = svc.item_repo.create(&CreateItem {
+            sku: "SKU-OC-M1".into(),
+            name: "Multi Cancel Item 1".into(),
+            description: None,
+            unit_of_measure: None,
+            item_type: "finished".into(),
+            reorder_point: 0,
+            safety_stock: 0,
+            economic_order_qty: 0,
+            unit_price_cents: None,
+        }).await.unwrap();
+        let item2 = svc.item_repo.create(&CreateItem {
+            sku: "SKU-OC-M2".into(),
+            name: "Multi Cancel Item 2".into(),
+            description: None,
+            unit_of_measure: None,
+            item_type: "finished".into(),
+            reorder_point: 0,
+            safety_stock: 0,
+            economic_order_qty: 0,
+            unit_price_cents: None,
+        }).await.unwrap();
+
+        // Put stock on hand for both items
+        svc.stock_level_repo.upsert_receipt(&item1.id, &wh.id, 100).await.unwrap();
+        svc.stock_level_repo.upsert_receipt(&item2.id, &wh.id, 50).await.unwrap();
+
+        // Create two reservations tied to the same sales order
+        svc.create_reservation(CreateReservation {
+            item_id: item1.id.clone(),
+            warehouse_id: wh.id.clone(),
+            quantity: 20,
+            reference_type: "sales_order".into(),
+            reference_id: "SO-MULTI-001".into(),
+        }).await.unwrap();
+        svc.create_reservation(CreateReservation {
+            item_id: item2.id.clone(),
+            warehouse_id: wh.id.clone(),
+            quantity: 10,
+            reference_type: "sales_order".into(),
+            reference_id: "SO-MULTI-001".into(),
+        }).await.unwrap();
+
+        // Handle order cancellation
+        let result = svc.handle_order_cancelled(
+            "SO-MULTI-001",
+            "ORD-MULTI",
+            &Some("Duplicate order".into()),
+        ).await;
+        assert!(result.is_ok());
+
+        // Verify both reservations are cancelled
+        let reservations = svc.reservation_repo.list().await.unwrap();
+        let multi_reservations: Vec<_> = reservations
+            .iter()
+            .filter(|r| r.reference_id == "SO-MULTI-001")
+            .collect();
+        assert_eq!(multi_reservations.len(), 2);
+        for res in &multi_reservations {
+            assert_eq!(res.status, "cancelled");
+        }
+
+        // Verify stock is fully released for both items
+        let sl1 = svc.stock_level_repo
+            .get_by_item_warehouse(&item1.id, &wh.id)
+            .await.unwrap().unwrap();
+        assert_eq!(sl1.quantity_reserved, 0);
+        assert_eq!(sl1.quantity_available, 100);
+
+        let sl2 = svc.stock_level_repo
+            .get_by_item_warehouse(&item2.id, &wh.id)
+            .await.unwrap().unwrap();
+        assert_eq!(sl2.quantity_reserved, 0);
+        assert_eq!(sl2.quantity_available, 50);
     }
 }

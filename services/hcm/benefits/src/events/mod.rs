@@ -1,6 +1,8 @@
 use crate::service::BenefitsService;
 use saas_nats_bus::NatsBus;
-use saas_proto::events::{EmployeeCreated, EmployeeTerminated, EmployeeUpdated};
+use saas_proto::events::{
+    CompensationCreated, CompensationUpdated, EmployeeCreated, EmployeeTerminated, EmployeeUpdated,
+};
 
 pub async fn subscribe(bus: &NatsBus, service: BenefitsService) -> anyhow::Result<()> {
     let svc1 = service.clone();
@@ -49,6 +51,52 @@ pub async fn subscribe(bus: &NatsBus, service: BenefitsService) -> anyhow::Resul
                 tracing::warn!(
                     "Employee {} department changed — benefits eligibility may need review",
                     employee_id
+                );
+            }
+        }
+    })
+    .await?;
+
+    let svc4 = service.clone();
+    bus.subscribe::<CompensationCreated, _, _>("hcm.payroll.compensation.created", move |envelope| {
+        let svc4 = svc4.clone();
+        let compensation_id = envelope.payload.compensation_id.clone();
+        let employee_id = envelope.payload.employee_id.clone();
+        let amount_cents = envelope.payload.amount_cents;
+        async move {
+            tracing::info!(
+                "Received compensation.created event for compensation {} (employee {})",
+                compensation_id,
+                employee_id
+            );
+            if let Err(e) = svc4.handle_compensation_changed(&compensation_id, &employee_id, amount_cents, "created").await {
+                tracing::error!(
+                    "Failed to re-evaluate benefits eligibility for compensation {}: {}",
+                    compensation_id,
+                    e
+                );
+            }
+        }
+    })
+    .await?;
+
+    let svc5 = service.clone();
+    bus.subscribe::<CompensationUpdated, _, _>("hcm.payroll.compensation.updated", move |envelope| {
+        let svc5 = svc5.clone();
+        let compensation_id = envelope.payload.compensation_id.clone();
+        let employee_id = envelope.payload.employee_id.clone();
+        let amount_cents = envelope.payload.amount_cents;
+        async move {
+            tracing::info!(
+                "Received compensation.updated event for compensation {} (employee {})",
+                compensation_id,
+                employee_id
+            );
+            if let Err(e) = svc5.handle_compensation_changed(&compensation_id, &employee_id, amount_cents, "updated").await {
+                tracing::error!(
+                    "Failed to re-evaluate benefits eligibility for compensation {}: {}",
+                    compensation_id,
+                    e
                 );
             }
         }
