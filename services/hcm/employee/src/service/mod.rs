@@ -892,4 +892,447 @@ mod tests {
         let history = hist_repo.list_by_employee("emp-multi").await.unwrap();
         assert_eq!(history.len(), 2);
     }
+
+    // ---- Service-level tests for EmployeeService ----
+
+    use crate::service::EmployeeService;
+    use saas_nats_bus::NatsBus;
+
+    async fn setup_service() -> EmployeeService {
+        let pool = setup().await;
+        let bus = NatsBus::connect("nats://localhost:4222", "test")
+            .await
+            .unwrap();
+        EmployeeService::new(pool, bus)
+    }
+
+    /// Helper: create a department via the service and return it.
+    async fn helper_create_department(svc: &EmployeeService, name: &str) -> DepartmentResponse {
+        svc.create_department(CreateDepartment {
+            name: name.to_string(),
+            parent_id: None,
+            manager_id: None,
+            cost_center: None,
+        })
+        .await
+        .unwrap()
+    }
+
+    /// Helper: create an employee via the service and return it.
+    async fn helper_create_employee(
+        svc: &EmployeeService,
+        dept_id: &str,
+        first: &str,
+        last: &str,
+        email: &str,
+        job_title: &str,
+        emp_num: &str,
+    ) -> EmployeeResponse {
+        svc.create_employee(CreateEmployee {
+            first_name: first.to_string(),
+            last_name: last.to_string(),
+            email: email.to_string(),
+            phone: None,
+            hire_date: "2025-01-15".to_string(),
+            department_id: dept_id.to_string(),
+            reports_to: None,
+            job_title: job_title.to_string(),
+            employee_number: emp_num.to_string(),
+        })
+        .await
+        .unwrap()
+    }
+
+    // -------------------------------------------------------
+    // 1. create_department — service-level
+    // -------------------------------------------------------
+    #[tokio::test]
+    async fn test_service_create_department() {
+        let svc = setup_service().await;
+
+        let dept = svc
+            .create_department(CreateDepartment {
+                name: "Finance".to_string(),
+                parent_id: None,
+                manager_id: None,
+                cost_center: Some("CC-FIN".to_string()),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(dept.name, "Finance");
+        assert_eq!(dept.cost_center, Some("CC-FIN".to_string()));
+        assert!(dept.parent_id.is_none());
+        assert!(dept.manager_id.is_none());
+        assert!(!dept.id.is_empty());
+
+        // Verify the department shows up in list_departments
+        let all = svc.list_departments().await.unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, dept.id);
+    }
+
+    #[tokio::test]
+    async fn test_service_create_department_with_parent() {
+        let svc = setup_service().await;
+
+        let parent = helper_create_department(&svc, "Technology").await;
+
+        let child = svc
+            .create_department(CreateDepartment {
+                name: "Platform".to_string(),
+                parent_id: Some(parent.id.clone()),
+                manager_id: None,
+                cost_center: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(child.name, "Platform");
+        assert_eq!(child.parent_id, Some(parent.id));
+    }
+
+    // -------------------------------------------------------
+    // 2. update_department — service-level
+    // -------------------------------------------------------
+    #[tokio::test]
+    async fn test_service_update_department_name() {
+        let svc = setup_service().await;
+
+        let dept = helper_create_department(&svc, "Old Name").await;
+
+        let updated = svc
+            .update_department(
+                &dept.id,
+                UpdateDepartment {
+                    name: Some("New Name".to_string()),
+                    parent_id: None,
+                    manager_id: None,
+                    cost_center: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(updated.name, "New Name");
+        assert_eq!(updated.id, dept.id);
+    }
+
+    #[tokio::test]
+    async fn test_service_update_department_cost_center_and_manager() {
+        let svc = setup_service().await;
+
+        let dept = helper_create_department(&svc, "Operations").await;
+        assert!(dept.cost_center.is_none());
+        assert!(dept.manager_id.is_none());
+
+        let updated = svc
+            .update_department(
+                &dept.id,
+                UpdateDepartment {
+                    name: None,
+                    parent_id: None,
+                    manager_id: Some("mgr-001".to_string()),
+                    cost_center: Some("CC-OPS".to_string()),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(updated.cost_center, Some("CC-OPS".to_string()));
+        assert_eq!(updated.manager_id, Some("mgr-001".to_string()));
+        // Name should remain unchanged
+        assert_eq!(updated.name, "Operations");
+    }
+
+    #[tokio::test]
+    async fn test_service_update_department_parent() {
+        let svc = setup_service().await;
+
+        let parent = helper_create_department(&svc, "Corporate").await;
+        let child = helper_create_department(&svc, "Legal").await;
+        assert!(child.parent_id.is_none());
+
+        let updated = svc
+            .update_department(
+                &child.id,
+                UpdateDepartment {
+                    name: None,
+                    parent_id: Some(parent.id.clone()),
+                    manager_id: None,
+                    cost_center: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(updated.parent_id, Some(parent.id));
+    }
+
+    // -------------------------------------------------------
+    // 3. get_department — service-level
+    // -------------------------------------------------------
+    #[tokio::test]
+    async fn test_service_get_department_by_id() {
+        let svc = setup_service().await;
+
+        let dept = helper_create_department(&svc, "Research").await;
+
+        let fetched = svc.get_department(&dept.id).await.unwrap();
+        assert_eq!(fetched.id, dept.id);
+        assert_eq!(fetched.name, "Research");
+    }
+
+    #[tokio::test]
+    async fn test_service_get_department_not_found() {
+        let svc = setup_service().await;
+
+        let result = svc.get_department("nonexistent-id").await;
+        assert!(result.is_err());
+    }
+
+    // -------------------------------------------------------
+    // 4. get_org_chart — service-level
+    // -------------------------------------------------------
+    #[tokio::test]
+    async fn test_service_get_org_chart_empty() {
+        let svc = setup_service().await;
+
+        let chart = svc.get_org_chart().await.unwrap();
+        assert!(chart.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_service_get_org_chart_hierarchy() {
+        let svc = setup_service().await;
+
+        let dept = helper_create_department(&svc, "Engineering").await;
+
+        // Create a manager (no reports_to)
+        let manager = helper_create_employee(
+            &svc,
+            &dept.id,
+            "Carol",
+            "Davis",
+            "carol@example.com",
+            "VP Engineering",
+            "EMP-100",
+        )
+        .await;
+
+        // Create direct reports
+        let _report1 = helper_create_employee(
+            &svc,
+            &dept.id,
+            "Dave",
+            "Wilson",
+            "dave@example.com",
+            "Software Engineer",
+            "EMP-101",
+        )
+        .await;
+        let _report2 = helper_create_employee(
+            &svc,
+            &dept.id,
+            "Eve",
+            "Martinez",
+            "eve@example.com",
+            "QA Engineer",
+            "EMP-102",
+        )
+        .await;
+
+        // Update reports_to so they report to the manager
+        svc.update_employee(
+            &_report1.id,
+            UpdateEmployee {
+                first_name: None,
+                last_name: None,
+                email: None,
+                phone: None,
+                department_id: None,
+                reports_to: Some(manager.id.clone()),
+                job_title: None,
+                status: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        svc.update_employee(
+            &_report2.id,
+            UpdateEmployee {
+                first_name: None,
+                last_name: None,
+                email: None,
+                phone: None,
+                department_id: None,
+                reports_to: Some(manager.id.clone()),
+                job_title: None,
+                status: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let chart = svc.get_org_chart().await.unwrap();
+        assert_eq!(chart.len(), 3);
+
+        // Verify department name is populated for all nodes
+        for node in &chart {
+            assert_eq!(node.department_name, Some("Engineering".to_string()));
+        }
+
+        // Verify manager has no reports_to
+        let mgr_node = chart.iter().find(|n| n.id == manager.id).unwrap();
+        assert!(mgr_node.reports_to.is_none());
+
+        // Verify reports reference the manager
+        let report_nodes: Vec<_> = chart
+            .iter()
+            .filter(|n| n.id != manager.id)
+            .collect();
+        assert_eq!(report_nodes.len(), 2);
+        for rn in &report_nodes {
+            assert_eq!(rn.reports_to, Some(manager.id.clone()));
+        }
+    }
+
+    // -------------------------------------------------------
+    // 5. list_employment_history — service-level
+    // -------------------------------------------------------
+    #[tokio::test]
+    async fn test_service_list_employment_history_empty() {
+        let svc = setup_service().await;
+
+        // No history recorded yet for a made-up employee id
+        let history = svc.list_employment_history("emp-nohist").await.unwrap();
+        assert!(history.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_service_list_employment_history_after_update() {
+        let svc = setup_service().await;
+
+        let dept = helper_create_department(&svc, "Engineering").await;
+        let emp = helper_create_employee(
+            &svc,
+            &dept.id,
+            "Test",
+            "User",
+            "testuser@example.com",
+            "Engineer",
+            "EMP-200",
+        )
+        .await;
+
+        // Update the job_title — this should create an employment history entry
+        svc.update_employee(
+            &emp.id,
+            UpdateEmployee {
+                first_name: None,
+                last_name: None,
+                email: None,
+                phone: None,
+                department_id: None,
+                reports_to: None,
+                job_title: Some("Senior Engineer".to_string()),
+                status: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let history = svc.list_employment_history(&emp.id).await.unwrap();
+        assert_eq!(history.len(), 1);
+
+        let entry = &history[0];
+        assert_eq!(entry.field_name, "job_title");
+        assert_eq!(entry.old_value, Some("Engineer".to_string()));
+        assert_eq!(entry.new_value, Some("Senior Engineer".to_string()));
+        assert_eq!(entry.employee_id, emp.id);
+    }
+
+    #[tokio::test]
+    async fn test_service_list_employment_history_multiple_fields() {
+        let svc = setup_service().await;
+
+        let dept = helper_create_department(&svc, "Marketing").await;
+        let emp = helper_create_employee(
+            &svc,
+            &dept.id,
+            "Multi",
+            "Field",
+            "multi@example.com",
+            "Associate",
+            "EMP-201",
+        )
+        .await;
+
+        // Update job_title AND status in one call
+        svc.update_employee(
+            &emp.id,
+            UpdateEmployee {
+                first_name: None,
+                last_name: None,
+                email: None,
+                phone: None,
+                department_id: None,
+                reports_to: None,
+                job_title: Some("Senior Associate".to_string()),
+                status: Some("on_leave".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+
+        let history = svc.list_employment_history(&emp.id).await.unwrap();
+        assert_eq!(history.len(), 2);
+
+        let fields: std::collections::HashSet<&str> =
+            history.iter().map(|h| h.field_name.as_str()).collect();
+        assert!(fields.contains("job_title"));
+        assert!(fields.contains("status"));
+    }
+
+    #[tokio::test]
+    async fn test_service_list_employment_history_department_transfer() {
+        let svc = setup_service().await;
+
+        let old_dept = helper_create_department(&svc, "Sales").await;
+        let new_dept = helper_create_department(&svc, "Product").await;
+        let emp = helper_create_employee(
+            &svc,
+            &old_dept.id,
+            "Transfer",
+            "Employee",
+            "transfer@example.com",
+            "Rep",
+            "EMP-202",
+        )
+        .await;
+
+        // Transfer to new department
+        svc.update_employee(
+            &emp.id,
+            UpdateEmployee {
+                first_name: None,
+                last_name: None,
+                email: None,
+                phone: None,
+                department_id: Some(new_dept.id.clone()),
+                reports_to: None,
+                job_title: None,
+                status: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let history = svc.list_employment_history(&emp.id).await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].field_name, "department_id");
+        assert_eq!(history[0].old_value, Some(old_dept.id));
+        assert_eq!(history[0].new_value, Some(new_dept.id));
+    }
 }

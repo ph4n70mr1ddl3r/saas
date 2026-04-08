@@ -1848,4 +1848,64 @@ mod tests {
             .unwrap();
         assert_eq!(bracket.name, "Valid Bracket");
     }
+
+    #[tokio::test]
+    async fn test_handle_timesheet_approved_with_compensation() {
+        let repo = setup_repo().await;
+        let svc = PayrollService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Create a compensation record for the employee so the handler has data
+        svc.create_compensation(CreateCompensationRequest {
+            employee_id: "emp-ts-approve-001".into(),
+            salary_type: "hourly".into(),
+            amount_cents: 25_00,
+            currency: Some("USD".into()),
+            effective_date: "2025-01-01".into(),
+            end_date: None,
+        })
+        .await
+        .unwrap();
+
+        // Verify compensation exists before calling the handler
+        let comps = repo
+            .list_compensation_by_employee("emp-ts-approve-001")
+            .await
+            .unwrap();
+        assert_eq!(comps.len(), 1);
+
+        // Handler should succeed when compensation exists
+        let result = svc
+            .handle_timesheet_approved("emp-ts-approve-001", "2025-06-02")
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_timesheet_approved_without_compensation() {
+        let repo = setup_repo().await;
+        let svc = PayrollService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // No compensation record created for this employee
+        let comps = repo
+            .list_compensation_by_employee("emp-ts-nocomp-001")
+            .await
+            .unwrap();
+        assert!(comps.is_empty());
+
+        // Handler should still return Ok (logs a warning but does not error)
+        let result = svc
+            .handle_timesheet_approved("emp-ts-nocomp-001", "2025-06-02")
+            .await;
+        assert!(result.is_ok());
+    }
 }

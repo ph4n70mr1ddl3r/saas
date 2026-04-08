@@ -1787,4 +1787,39 @@ mod tests {
             .unwrap();
         assert_eq!(pd.report_id, report.id);
     }
+
+    #[tokio::test]
+    async fn test_handle_year_end_closed() {
+        let pool = create_test_pool().await;
+        let svc = ExpenseService::new(
+            pool,
+            saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        );
+
+        let result = svc.handle_year_end_closed(2025, "closing-entry-001").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_year_end_closed_different_years() {
+        let pool = create_test_pool().await;
+        let svc = ExpenseService::new(
+            pool,
+            saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        );
+
+        // Multiple fiscal years should all succeed
+        let result1 = svc.handle_year_end_closed(2024, "closing-2024").await;
+        assert!(result1.is_ok());
+
+        let result2 = svc.handle_year_end_closed(2025, "closing-2025").await;
+        assert!(result2.is_ok());
+
+        let result3 = svc.handle_year_end_closed(2030, "closing-2030").await;
+        assert!(result3.is_ok());
+    }
 }

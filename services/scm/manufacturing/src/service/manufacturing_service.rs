@@ -958,4 +958,190 @@ mod tests {
         let err = result.unwrap_err();
         assert!(err.to_string().contains("Only planned work orders can be started"));
     }
+
+    #[tokio::test]
+    async fn test_cancel_in_progress_work_order() {
+        let pool = setup().await;
+        let svc = ManufacturingService {
+            work_order_repo: WorkOrderRepo::new(pool.clone()),
+            bom_repo: BomRepo::new(pool.clone()),
+            routing_step_repo: RoutingStepRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let wo = svc.create_work_order(CreateWorkOrder {
+            item_id: "ITEM-CANCEL-WIP".into(),
+            quantity: 10,
+            planned_start: None,
+            planned_end: None,
+        }).await.unwrap();
+        svc.start_work_order(&wo.id).await.unwrap();
+
+        // Cancel the in-progress work order
+        let cancelled = svc.cancel_work_order(&wo.id).await.unwrap();
+        assert_eq!(cancelled.status, "cancelled");
+    }
+
+    #[tokio::test]
+    async fn test_cancel_completed_work_order_fails() {
+        let pool = setup().await;
+        let svc = ManufacturingService {
+            work_order_repo: WorkOrderRepo::new(pool.clone()),
+            bom_repo: BomRepo::new(pool.clone()),
+            routing_step_repo: RoutingStepRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let wo = svc.create_work_order(CreateWorkOrder {
+            item_id: "ITEM-CANCEL-DONE".into(),
+            quantity: 5,
+            planned_start: None,
+            planned_end: None,
+        }).await.unwrap();
+        svc.start_work_order(&wo.id).await.unwrap();
+        svc.complete_work_order(&wo.id).await.unwrap();
+
+        // Try to cancel a completed work order — should fail
+        let result = svc.cancel_work_order(&wo.id).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Only planned or in-progress work orders can be cancelled"));
+    }
+
+    #[tokio::test]
+    async fn test_work_order_full_lifecycle() {
+        let pool = setup().await;
+        let svc = ManufacturingService {
+            work_order_repo: WorkOrderRepo::new(pool.clone()),
+            bom_repo: BomRepo::new(pool.clone()),
+            routing_step_repo: RoutingStepRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // planned -> in_progress -> completed
+        let wo = svc.create_work_order(CreateWorkOrder {
+            item_id: "ITEM-LIFE".into(),
+            quantity: 20,
+            planned_start: Some("2025-08-01".into()),
+            planned_end: Some("2025-08-15".into()),
+        }).await.unwrap();
+        assert_eq!(wo.status, "planned");
+
+        let started = svc.start_work_order(&wo.id).await.unwrap();
+        assert_eq!(started.status, "in_progress");
+        assert!(started.actual_start.is_some());
+
+        let completed = svc.complete_work_order(&wo.id).await.unwrap();
+        assert_eq!(completed.status, "completed");
+        assert!(completed.actual_end.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_create_duplicate_bom_fails() {
+        let pool = setup().await;
+        let svc = ManufacturingService {
+            work_order_repo: WorkOrderRepo::new(pool.clone()),
+            bom_repo: BomRepo::new(pool.clone()),
+            routing_step_repo: RoutingStepRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let bom_input = CreateBom {
+            name: "Test BOM DUP".into(),
+            finished_item_id: "ITEM-DUP".into(),
+            quantity: Some(1),
+            description: Some("First BOM".into()),
+            components: vec![CreateBomComponent {
+                component_item_id: "COMP-1".into(),
+                quantity_required: 2,
+            }],
+        };
+        svc.create_bom(bom_input).await.unwrap();
+
+        // Duplicate BOM for same finished item
+        let result = svc.create_bom(CreateBom {
+            name: "Test BOM DUP 2".into(),
+            finished_item_id: "ITEM-DUP".into(),
+            quantity: Some(1),
+            description: Some("Second BOM".into()),
+            components: vec![CreateBomComponent {
+                component_item_id: "COMP-2".into(),
+                quantity_required: 1,
+            }],
+        }).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("already exists"));
+    }
+
+    #[tokio::test]
+    async fn test_get_bom_with_components() {
+        let pool = setup().await;
+        let svc = ManufacturingService {
+            work_order_repo: WorkOrderRepo::new(pool.clone()),
+            bom_repo: BomRepo::new(pool.clone()),
+            routing_step_repo: RoutingStepRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let bom = svc.create_bom(CreateBom {
+            name: "Detailed BOM".into(),
+            finished_item_id: "ITEM-DETAIL".into(),
+            quantity: Some(1),
+            description: Some("Detailed BOM".into()),
+            components: vec![
+                CreateBomComponent {
+                    component_item_id: "COMP-A".into(),
+                    quantity_required: 3,
+                },
+                CreateBomComponent {
+                    component_item_id: "COMP-B".into(),
+                    quantity_required: 1,
+                },
+            ],
+        }).await.unwrap();
+
+        let detail = svc.get_bom(&bom.id).await.unwrap();
+        assert_eq!(detail.bom.finished_item_id, "ITEM-DETAIL");
+        assert_eq!(detail.components.len(), 2);
+        assert_eq!(detail.components[0].component_item_id, "COMP-A");
+        assert_eq!(detail.components[0].quantity_required, 3);
+        assert_eq!(detail.components[1].component_item_id, "COMP-B");
+    }
+
+    #[tokio::test]
+    async fn test_work_order_zero_quantity_fails() {
+        let pool = setup().await;
+        let svc = ManufacturingService {
+            work_order_repo: WorkOrderRepo::new(pool.clone()),
+            bom_repo: BomRepo::new(pool.clone()),
+            routing_step_repo: RoutingStepRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc.create_work_order(CreateWorkOrder {
+            item_id: "ITEM-ZERO".into(),
+            quantity: 0,
+            planned_start: None,
+            planned_end: None,
+        }).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        // Caught by either validator (range) or service-level check
+        assert!(
+            err.contains("quantity") || err.contains("positive"),
+            "Expected quantity validation error, got: {}",
+            err
+        );
+    }
 }

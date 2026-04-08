@@ -1166,4 +1166,86 @@ mod tests {
             .unwrap();
         assert_eq!(app.candidate_email, "jane@example.com");
     }
+
+    #[tokio::test]
+    async fn test_handle_employee_terminated_with_open_jobs() {
+        let repo = setup_repo().await;
+        let svc = RecruitingService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Create open job postings that may need review after termination
+        svc.create_job(CreateJobRequest {
+            title: "Senior Engineer".into(),
+            department_id: "eng".into(),
+            description: None,
+            requirements: None,
+        })
+        .await
+        .unwrap();
+        svc.create_job(CreateJobRequest {
+            title: "Product Manager".into(),
+            department_id: "product".into(),
+            description: None,
+            requirements: None,
+        })
+        .await
+        .unwrap();
+
+        // Verify open jobs exist
+        let jobs = repo.list_jobs().await.unwrap();
+        let open_count = jobs.iter().filter(|j| j.status == "open").count();
+        assert_eq!(open_count, 2);
+
+        // Handler should succeed — logs awareness of open postings
+        let result = svc.handle_employee_terminated("emp-term-001").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_employee_terminated_with_no_open_jobs() {
+        let repo = setup_repo().await;
+        let svc = RecruitingService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Create a job and immediately close it — no open jobs
+        let job = svc
+            .create_job(CreateJobRequest {
+                title: "Old Role".into(),
+                department_id: "ops".into(),
+                description: None,
+                requirements: None,
+            })
+            .await
+            .unwrap();
+
+        svc.update_job(
+            &job.id,
+            UpdateJobRequest {
+                title: None,
+                department_id: None,
+                description: None,
+                requirements: None,
+                status: Some("closed".into()),
+            },
+        )
+        .await
+        .unwrap();
+
+        // Verify no open jobs
+        let jobs = repo.list_jobs().await.unwrap();
+        let open_count = jobs.iter().filter(|j| j.status == "open").count();
+        assert_eq!(open_count, 0);
+
+        // Handler should still succeed even with no open jobs
+        let result = svc.handle_employee_terminated("emp-term-002").await;
+        assert!(result.is_ok());
+    }
 }

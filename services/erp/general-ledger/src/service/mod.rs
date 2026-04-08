@@ -4022,4 +4022,47 @@ mod tests {
         let no_balance = repo.account_balance_for_fiscal_year(&cash.id, 2024).await.unwrap();
         assert_eq!(no_balance, 0);
     }
+
+    #[tokio::test]
+    async fn test_handle_bank_account_created() {
+        let pool = create_test_pool().await;
+        let svc = LedgerService::new(
+            pool,
+            saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        );
+
+        let result = svc
+            .handle_bank_account_created("bank-acct-001", "Operating Account", "First National", "USD")
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_bank_account_created_various_currencies() {
+        let pool = create_test_pool().await;
+        let svc = LedgerService::new(
+            pool,
+            saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        );
+
+        // Different currencies should all succeed
+        let result1 = svc
+            .handle_bank_account_created("bank-eur", "EUR Account", "Deutsche Bank", "EUR")
+            .await;
+        assert!(result1.is_ok());
+
+        let result2 = svc
+            .handle_bank_account_created("bank-gbp", "GBP Account", "Barclays", "GBP")
+            .await;
+        assert!(result2.is_ok());
+
+        let result3 = svc
+            .handle_bank_account_created("bank-jpy", "JPY Account", "Mizuho", "JPY")
+            .await;
+        assert!(result3.is_ok());
+    }
 }

@@ -2470,4 +2470,268 @@ mod tests {
         let so_res = reservations.iter().find(|r| r.reference_type == "sales_order" && r.reference_id == "PO-SELECT-001").unwrap();
         assert_eq!(so_res.status, "active");
     }
+
+    #[tokio::test]
+    async fn test_handle_po_received_adds_stock_and_movement() {
+        let pool = setup().await;
+        let svc = InventoryService::new(
+            pool.clone(),
+            saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        );
+
+        let wh = svc.warehouse_repo.create(&CreateWarehouse {
+            name: "WH-PO-RECV".into(),
+            address: None,
+        }).await.unwrap();
+        let item = svc.item_repo.create(&CreateItem {
+            sku: "SKU-PO-RECV".into(),
+            name: "PO Receive Item".into(),
+            description: None,
+            unit_of_measure: None,
+            item_type: "raw_material".into(),
+            reorder_point: 0,
+            safety_stock: 0,
+            economic_order_qty: 0,
+            unit_price_cents: None,
+        }).await.unwrap();
+
+        // Initially no stock
+        let sl = svc.stock_level_repo
+            .get_by_item_warehouse(&item.id, &wh.id)
+            .await.unwrap();
+        assert!(sl.is_none());
+
+        // Handle PO received: add 75 units
+        svc.handle_po_received("PO-RECV-001", &item.id, &wh.id, 75)
+            .await
+            .unwrap();
+
+        // Verify stock level increased
+        let sl = svc.stock_level_repo
+            .get_by_item_warehouse(&item.id, &wh.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(sl.quantity_on_hand, 75);
+        assert_eq!(sl.quantity_available, 75);
+
+        // Verify a receipt stock movement was recorded
+        let movements = svc.stock_movement_repo.list().await.unwrap();
+        assert_eq!(movements.len(), 1);
+        assert_eq!(movements[0].movement_type, "receipt");
+        assert_eq!(movements[0].quantity, 75);
+        assert_eq!(movements[0].reference_type, Some("purchase_order".to_string()));
+        assert_eq!(movements[0].reference_id, Some("PO-RECV-001".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_handle_order_confirmed_reserves_stock() {
+        let pool = setup().await;
+        let svc = InventoryService::new(
+            pool.clone(),
+            saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        );
+
+        let wh = svc.warehouse_repo.create(&CreateWarehouse {
+            name: "WH-ORD-CONF".into(),
+            address: None,
+        }).await.unwrap();
+        let item = svc.item_repo.create(&CreateItem {
+            sku: "SKU-ORD-CONF".into(),
+            name: "Order Confirm Item".into(),
+            description: None,
+            unit_of_measure: None,
+            item_type: "finished".into(),
+            reorder_point: 0,
+            safety_stock: 0,
+            economic_order_qty: 0,
+            unit_price_cents: None,
+        }).await.unwrap();
+
+        // Put 100 units on hand
+        svc.stock_level_repo.upsert_receipt(&item.id, &wh.id, 100).await.unwrap();
+
+        // Handle order confirmed: reserve 40 units
+        svc.handle_order_confirmed("SO-CONF-001", &item.id, &wh.id, 40)
+            .await
+            .unwrap();
+
+        // Verify stock is reserved
+        let sl = svc.stock_level_repo
+            .get_by_item_warehouse(&item.id, &wh.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(sl.quantity_on_hand, 100);
+        assert_eq!(sl.quantity_reserved, 40);
+
+        // Verify reservation was created with correct reference
+        let reservations = svc.reservation_repo.list().await.unwrap();
+        assert_eq!(reservations.len(), 1);
+        assert_eq!(reservations[0].quantity, 40);
+        assert_eq!(reservations[0].reference_type, "sales_order");
+        assert_eq!(reservations[0].reference_id, "SO-CONF-001");
+    }
+
+    #[tokio::test]
+    async fn test_handle_order_fulfilled_deducts_stock_and_releases_reservation() {
+        let pool = setup().await;
+        let svc = InventoryService::new(
+            pool.clone(),
+            saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        );
+
+        let wh = svc.warehouse_repo.create(&CreateWarehouse {
+            name: "WH-ORD-FUL".into(),
+            address: None,
+        }).await.unwrap();
+        let item = svc.item_repo.create(&CreateItem {
+            sku: "SKU-ORD-FUL".into(),
+            name: "Order Fulfill Item".into(),
+            description: None,
+            unit_of_measure: None,
+            item_type: "finished".into(),
+            reorder_point: 0,
+            safety_stock: 0,
+            economic_order_qty: 0,
+            unit_price_cents: None,
+        }).await.unwrap();
+
+        // Put 200 units on hand
+        svc.stock_level_repo.upsert_receipt(&item.id, &wh.id, 200).await.unwrap();
+
+        // Reserve 50 units for the order
+        svc.stock_level_repo.reserve(&item.id, &wh.id, 50).await.unwrap();
+
+        // Handle order fulfilled: deduct 50 and release reservation
+        svc.handle_order_fulfilled("SO-FUL-001", &item.id, &wh.id, 50)
+            .await
+            .unwrap();
+
+        // Verify stock deducted and reservation released
+        let sl = svc.stock_level_repo
+            .get_by_item_warehouse(&item.id, &wh.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(sl.quantity_on_hand, 150); // 200 - 50
+        assert_eq!(sl.quantity_reserved, 0);  // reservation released
+        assert_eq!(sl.quantity_available, 150);
+
+        // Verify a pick movement was recorded
+        let movements = svc.stock_movement_repo.list().await.unwrap();
+        assert_eq!(movements.len(), 1);
+        assert_eq!(movements[0].movement_type, "pick");
+        assert_eq!(movements[0].quantity, 50);
+        assert_eq!(movements[0].reference_type, Some("sales_order".to_string()));
+        assert_eq!(movements[0].reference_id, Some("SO-FUL-001".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_handle_work_order_completed_adds_stock_to_first_warehouse() {
+        let pool = setup().await;
+        let svc = InventoryService::new(
+            pool.clone(),
+            saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        );
+
+        let wh = svc.warehouse_repo.create(&CreateWarehouse {
+            name: "WH-WO-COMP".into(),
+            address: None,
+        }).await.unwrap();
+        let item = svc.item_repo.create(&CreateItem {
+            sku: "SKU-WO-COMP".into(),
+            name: "Work Order Finished Good".into(),
+            description: None,
+            unit_of_measure: None,
+            item_type: "finished".into(),
+            reorder_point: 0,
+            safety_stock: 0,
+            economic_order_qty: 0,
+            unit_price_cents: None,
+        }).await.unwrap();
+
+        // Establish a stock level row so get_first_warehouse_for_item finds it
+        svc.stock_level_repo.upsert_receipt(&item.id, &wh.id, 20).await.unwrap();
+
+        // Handle work order completed: add 80 manufactured units
+        svc.handle_work_order_completed("WO-COMP-001", &item.id, 80)
+            .await
+            .unwrap();
+
+        // Verify stock increased: 20 initial + 80 manufactured = 100
+        let sl = svc.stock_level_repo
+            .get_by_item_warehouse(&item.id, &wh.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(sl.quantity_on_hand, 100);
+
+        // Verify a receipt movement was recorded with work_order reference
+        let movements = svc.stock_movement_repo.list().await.unwrap();
+        assert_eq!(movements.len(), 1);
+        assert_eq!(movements[0].movement_type, "receipt");
+        assert_eq!(movements[0].quantity, 80);
+        assert_eq!(movements[0].reference_type, Some("work_order".to_string()));
+        assert_eq!(movements[0].reference_id, Some("WO-COMP-001".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_handle_return_created_adds_stock_back() {
+        let pool = setup().await;
+        let svc = InventoryService::new(
+            pool.clone(),
+            saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        );
+
+        let wh = svc.warehouse_repo.create(&CreateWarehouse {
+            name: "WH-RET-CREATED".into(),
+            address: None,
+        }).await.unwrap();
+        let item = svc.item_repo.create(&CreateItem {
+            sku: "SKU-RET-CREATED".into(),
+            name: "Return Created Item".into(),
+            description: None,
+            unit_of_measure: None,
+            item_type: "finished".into(),
+            reorder_point: 0,
+            safety_stock: 0,
+            economic_order_qty: 0,
+            unit_price_cents: None,
+        }).await.unwrap();
+
+        // Establish initial stock of 50 so get_first_warehouse_for_item finds the warehouse
+        svc.stock_level_repo.upsert_receipt(&item.id, &wh.id, 50).await.unwrap();
+
+        // Handle return created: add 15 units back
+        svc.handle_return_created("RET-CREATED-001", &item.id, 15)
+            .await
+            .unwrap();
+
+        // Verify stock increased: 50 initial + 15 returned = 65
+        let sl = svc.stock_level_repo
+            .get_by_item_warehouse(&item.id, &wh.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(sl.quantity_on_hand, 65);
+
+        // Verify a return movement was recorded
+        let movements = svc.stock_movement_repo.list().await.unwrap();
+        assert_eq!(movements.len(), 1);
+        assert_eq!(movements[0].movement_type, "return");
+        assert_eq!(movements[0].quantity, 15);
+        assert_eq!(movements[0].reference_type, Some("sales_return".to_string()));
+        assert_eq!(movements[0].reference_id, Some("RET-CREATED-001".to_string()));
+    }
 }
