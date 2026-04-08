@@ -157,6 +157,54 @@ impl EmployeeService {
         Ok(emp)
     }
 
+    /// Terminate an employee with a specific termination date and optional reason.
+    /// Unlike `delete_employee` which always uses today's date, this allows
+    /// backdating or future-dating the termination.
+    pub async fn terminate_employee(
+        &self,
+        id: &str,
+        termination_date: &str,
+        reason: Option<String>,
+    ) -> AppResult<EmployeeResponse> {
+        let emp = self.emp_repo.get_by_id(id).await?;
+        if emp.status == "terminated" {
+            return Err(saas_common::error::AppError::Validation(
+                format!("Employee '{}' is already terminated", id),
+            ));
+        }
+
+        // Record employment history for the termination
+        let _ = self.history_repo.create(&CreateEmploymentHistoryRequest {
+            employee_id: id.to_string(),
+            field_name: "status".to_string(),
+            old_value: Some(emp.status.clone()),
+            new_value: Some("terminated".to_string()),
+            effective_date: termination_date.to_string(),
+        }).await;
+
+        self.emp_repo.terminate(id, termination_date).await?;
+
+        if let Err(e) = self
+            .bus
+            .publish(
+                "hcm.employee.terminated",
+                saas_proto::events::EmployeeTerminated {
+                    employee_id: id.to_string(),
+                    termination_date: termination_date.to_string(),
+                    reason,
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "hcm.employee.terminated",
+                e
+            );
+        }
+        self.emp_repo.get_by_id(id).await
+    }
+
     pub async fn delete_employee(&self, id: &str) -> AppResult<EmployeeResponse> {
         let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
         self.emp_repo.terminate(id, &today).await?;

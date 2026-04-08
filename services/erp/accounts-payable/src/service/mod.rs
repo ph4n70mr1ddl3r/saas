@@ -5,6 +5,27 @@ use saas_nats_bus::NatsBus;
 use sqlx::SqlitePool;
 use validator::Validate;
 
+fn derive_period_dates(name: &str, fiscal_year: i32) -> (String, String) {
+    // Simple derivation: use the fiscal year boundaries as fallback
+    // If the name contains recognizable month info, parse it
+    let year = fiscal_year;
+    match name.to_lowercase().as_str() {
+        n if n.starts_with("jan") => (format!("{}-01-01", year), format!("{}-01-31", year)),
+        n if n.starts_with("feb") => (format!("{}-02-01", year), format!("{}-02-28", year)),
+        n if n.starts_with("mar") => (format!("{}-03-01", year), format!("{}-03-31", year)),
+        n if n.starts_with("apr") => (format!("{}-04-01", year), format!("{}-04-30", year)),
+        n if n.starts_with("may") => (format!("{}-05-01", year), format!("{}-05-31", year)),
+        n if n.starts_with("jun") => (format!("{}-06-01", year), format!("{}-06-30", year)),
+        n if n.starts_with("jul") => (format!("{}-07-01", year), format!("{}-07-31", year)),
+        n if n.starts_with("aug") => (format!("{}-08-01", year), format!("{}-08-31", year)),
+        n if n.starts_with("sep") => (format!("{}-09-01", year), format!("{}-09-30", year)),
+        n if n.starts_with("oct") => (format!("{}-10-01", year), format!("{}-10-31", year)),
+        n if n.starts_with("nov") => (format!("{}-11-01", year), format!("{}-11-30", year)),
+        n if n.starts_with("dec") => (format!("{}-12-01", year), format!("{}-12-31", year)),
+        _ => (format!("{}-01-01", year), format!("{}-12-31", year)),
+    }
+}
+
 #[derive(Clone)]
 pub struct ApService {
     repo: ApRepo,
@@ -74,6 +95,14 @@ impl ApService {
             ));
         }
 
+        // Check if invoice date falls in a closed period
+        if self.repo.is_date_in_closed_period(&input.invoice_date).await? {
+            return Err(AppError::Validation(format!(
+                "Cannot create invoice — date '{}' falls within a closed accounting period",
+                input.invoice_date
+            )));
+        }
+
         // Validate vendor exists
         self.repo.get_vendor(&input.vendor_id).await?;
 
@@ -114,6 +143,10 @@ impl ApService {
 
     pub async fn approve_invoice(&self, id: &str) -> AppResult<ApInvoiceWithLines> {
         let invoice = self.repo.get_invoice(id).await?;
+        let invoice_date = invoice.invoice_date.clone();
+        if self.repo.is_date_in_closed_period(&invoice_date).await? {
+            return Err(AppError::Validation("Cannot approve invoice — period is closed".into()));
+        }
         if invoice.status != "draft" {
             return Err(AppError::Validation(
                 "Only draft invoices can be approved".into(),
@@ -192,6 +225,14 @@ impl ApService {
             return Err(AppError::Validation(
                 "Can only pay approved or partially paid invoices".into(),
             ));
+        }
+
+        // Check if payment date falls in a closed period
+        if self.repo.is_date_in_closed_period(&input.payment_date).await? {
+            return Err(AppError::Validation(format!(
+                "Cannot create payment — date '{}' falls within a closed accounting period",
+                input.payment_date
+            )));
         }
 
         // Verify vendor_id matches the invoice
@@ -373,10 +414,11 @@ impl ApService {
         name: &str,
         fiscal_year: i32,
     ) -> AppResult<()> {
-        tracing::info!(
-            "GL period closed: period_id={}, name={}, fiscal_year={} — blocking AP transactions for this period",
-            period_id, name, fiscal_year
-        );
+        // Parse period name to derive start/end dates (format: "MMM-YYYY" like "Jan-2025")
+        // Fall back to fiscal year boundaries if parsing fails
+        let (period_start, period_end) = derive_period_dates(name, fiscal_year);
+        self.repo.close_period(name, fiscal_year, &period_start, &period_end).await?;
+        tracing::info!("GL period closed and enforced: period_id={}, name={}, fiscal_year={}", period_id, name, fiscal_year);
         Ok(())
     }
 
@@ -389,10 +431,8 @@ impl ApService {
         fiscal_year: i32,
         entry_id: &str,
     ) -> AppResult<()> {
-        tracing::info!(
-            "GL year-end closed: fiscal_year={}, closing_entry={} — blocking all AP transactions for fiscal year {}",
-            fiscal_year, entry_id, fiscal_year
-        );
+        self.repo.close_fiscal_year(fiscal_year).await?;
+        tracing::info!("GL year-end closed and enforced: fiscal_year={}, closing_entry={}", fiscal_year, entry_id);
         Ok(())
     }
 
@@ -461,6 +501,7 @@ mod tests {
             include_str!("../../migrations/004_create_payments.sql"),
             include_str!("../../migrations/005_create_tax_codes.sql"),
             include_str!("../../migrations/006_add_tax_amount_to_invoices.sql"),
+            include_str!("../../migrations/007_create_closed_periods.sql"),
         ];
         let migration_names = [
             "001_create_vendors.sql",
@@ -469,6 +510,7 @@ mod tests {
             "004_create_payments.sql",
             "005_create_tax_codes.sql",
             "006_add_tax_amount_to_invoices.sql",
+            "007_create_closed_periods.sql",
         ];
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS _migrations (filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)",
@@ -1579,7 +1621,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_year_end_closed() {
-        let pool = create_test_pool().await;
+        let pool = setup().await;
         let svc = ApService::new(
             pool,
             saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
@@ -1593,7 +1635,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_year_end_closed_different_years() {
-        let pool = create_test_pool().await;
+        let pool = setup().await;
         let svc = ApService::new(
             pool,
             saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
@@ -1610,5 +1652,127 @@ mod tests {
 
         let result3 = svc.handle_year_end_closed(2030, "closing-2030").await;
         assert!(result3.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_period_close_blocks_invoice_creation() {
+        let pool = setup().await;
+        let svc = ApService {
+            repo: ApRepo::new(pool.clone()),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+        let vendor = create_test_vendor(&svc.repo, "Period Block Vendor").await;
+
+        // Close the period that covers Jan 2025
+        svc.handle_period_closed("period-001", "Jan-2025", 2025).await.unwrap();
+
+        // Try to create an invoice dated in the closed period
+        let result = svc.create_invoice(&CreateApInvoiceRequest {
+            vendor_id: vendor.id,
+            invoice_number: "INV-CLOSED".into(),
+            invoice_date: "2025-01-15".into(),
+            due_date: "2025-02-15".into(),
+            lines: vec![CreateApInvoiceLineRequest {
+                description: Some("Test".into()),
+                account_code: "5000".into(),
+                amount_cents: 1000,
+            }],
+            tax_code: None,
+        }).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("closed accounting period"));
+    }
+
+    #[tokio::test]
+    async fn test_period_close_allows_open_period() {
+        let pool = setup().await;
+        let svc = ApService {
+            repo: ApRepo::new(pool.clone()),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+        let vendor = create_test_vendor(&svc.repo, "Open Period Vendor").await;
+
+        // Close Jan 2025, then create invoice for Feb 2025
+        svc.handle_period_closed("period-001", "Jan-2025", 2025).await.unwrap();
+
+        let result = svc.create_invoice(&CreateApInvoiceRequest {
+            vendor_id: vendor.id,
+            invoice_number: "INV-OPEN".into(),
+            invoice_date: "2025-02-15".into(),
+            due_date: "2025-03-15".into(),
+            lines: vec![CreateApInvoiceLineRequest {
+                description: Some("Test".into()),
+                account_code: "5000".into(),
+                amount_cents: 1000,
+            }],
+            tax_code: None,
+        }).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_year_end_close_blocks_all_transactions() {
+        let pool = setup().await;
+        let svc = ApService {
+            repo: ApRepo::new(pool.clone()),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+        let vendor = create_test_vendor(&svc.repo, "Year End Vendor").await;
+
+        // Close fiscal year 2024
+        svc.handle_year_end_closed(2024, "entry-001").await.unwrap();
+
+        // Try to create an invoice in 2024
+        let result = svc.create_invoice(&CreateApInvoiceRequest {
+            vendor_id: vendor.id,
+            invoice_number: "INV-YE".into(),
+            invoice_date: "2024-06-15".into(),
+            due_date: "2024-07-15".into(),
+            lines: vec![CreateApInvoiceLineRequest {
+                description: Some("Test".into()),
+                account_code: "5000".into(),
+                amount_cents: 5000,
+            }],
+            tax_code: None,
+        }).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("closed"));
+    }
+
+    #[tokio::test]
+    async fn test_period_close_blocks_payment() {
+        let pool = setup().await;
+        let svc = ApService {
+            repo: ApRepo::new(pool.clone()),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+        let vendor = create_test_vendor(&svc.repo, "Payment Period Vendor").await;
+
+        // Create and approve invoice before period close
+        let invoice = create_test_invoice(&svc.repo, &vendor.id, 5000).await;
+        svc.approve_invoice(&invoice.id).await.unwrap();
+
+        // Close the period
+        svc.handle_period_closed("period-002", "Feb-2025", 2025).await.unwrap();
+
+        // Try to pay in closed period
+        let result = svc.create_payment(&CreatePaymentRequest {
+            invoice_id: invoice.id,
+            vendor_id: vendor.id,
+            amount_cents: 5000,
+            payment_date: "2025-02-15".into(),
+            method: None,
+            reference: None,
+        }).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("closed"));
     }
 }

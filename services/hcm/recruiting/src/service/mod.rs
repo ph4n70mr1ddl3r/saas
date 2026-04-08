@@ -58,6 +58,29 @@ impl RecruitingService {
         self.repo.update_job(id, &input).await
     }
 
+    /// Close a job posting — stops accepting applications.
+    pub async fn close_job(&self, id: &str) -> AppResult<JobPosting> {
+        let existing = self.repo.get_job(id).await?;
+        if existing.status == "closed" {
+            return Err(AppError::Validation(format!(
+                "Job '{}' is already closed",
+                id
+            )));
+        }
+        self.repo
+            .update_job(
+                id,
+                &UpdateJobRequest {
+                    title: None,
+                    department_id: None,
+                    description: None,
+                    requirements: None,
+                    status: Some("closed".into()),
+                },
+            )
+            .await
+    }
+
     // --- Applications ---
 
     pub async fn list_applications(&self) -> AppResult<Vec<Application>> {
@@ -1247,5 +1270,63 @@ mod tests {
         // Handler should still succeed even with no open jobs
         let result = svc.handle_employee_terminated("emp-term-002").await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_close_job() {
+        let pool = setup().await;
+        let svc = RecruitingService {
+            repo: RecruitingRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let job = svc.create_job(CreateJobRequest {
+            title: "Software Engineer".into(),
+            department_id: "dept-eng".into(),
+            description: Some("Build things".into()),
+            requirements: Some("Rust".into()),
+        }).await.unwrap();
+        assert_eq!(job.status, "open");
+
+        let closed = svc.close_job(&job.id).await.unwrap();
+        assert_eq!(closed.status, "closed");
+        assert!(closed.closed_at.is_some());
+
+        // Closing again should fail
+        let result = svc.close_job(&job.id).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("already closed"));
+    }
+
+    #[tokio::test]
+    async fn test_close_job_blocks_applications() {
+        let pool = setup().await;
+        let svc = RecruitingService {
+            repo: RecruitingRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let job = svc.create_job(CreateJobRequest {
+            title: "Data Analyst".into(),
+            department_id: "dept-data".into(),
+            description: None,
+            requirements: None,
+        }).await.unwrap();
+
+        svc.close_job(&job.id).await.unwrap();
+
+        // Application to closed job should fail
+        let result = svc.create_application(CreateApplicationRequest {
+            job_id: job.id,
+            candidate_first_name: "Jane".into(),
+            candidate_last_name: "Doe".into(),
+            candidate_email: "jane@example.com".into(),
+            notes: None,
+        }).await;
+        assert!(result.is_err());
     }
 }

@@ -78,6 +78,8 @@ impl ProcurementService {
         input
             .validate()
             .map_err(|e| saas_common::error::AppError::Validation(e.to_string()))?;
+        // Validate supplier exists
+        self.supplier_repo.get_by_id(&input.supplier_id).await?;
         for line in &input.lines {
             if line.quantity <= 0 {
                 return Err(AppError::Validation(
@@ -1516,5 +1518,21 @@ mod tests {
         assert_eq!(detail.order.status, "received");
         assert_eq!(detail.lines[0].quantity_received, 10);
         assert_eq!(detail.lines[1].quantity_received, 5);
+    }
+
+    #[tokio::test]
+    async fn test_create_po_with_nonexistent_supplier_fails() {
+        let (svc, _pool) = make_svc().await;
+
+        let result = svc.create_purchase_order(CreatePurchaseOrder {
+            supplier_id: "nonexistent-supplier".into(),
+            order_date: "2025-01-01".into(),
+            lines: vec![CreatePurchaseOrderLine {
+                item_id: "ITEM-001".into(),
+                quantity: 5,
+                unit_price_cents: 100,
+            }],
+        }).await;
+        assert!(result.is_err());
     }
 }

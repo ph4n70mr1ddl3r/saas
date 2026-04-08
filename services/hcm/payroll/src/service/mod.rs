@@ -984,6 +984,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_progressive_tax_multi_bracket() {
+        let repo = setup_repo().await;
+        let svc = PayrollService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Three brackets (US-style)
+        svc.create_tax_bracket(CreateTaxBracketRequest {
+            name: "10%".into(),
+            min_income_cents: 0,
+            max_income_cents: Some(10_000_00),
+            rate_percent: 10.0,
+        }).await.unwrap();
+        svc.create_tax_bracket(CreateTaxBracketRequest {
+            name: "12%".into(),
+            min_income_cents: 10_000_00,
+            max_income_cents: Some(40_000_00),
+            rate_percent: 12.0,
+        }).await.unwrap();
+        svc.create_tax_bracket(CreateTaxBracketRequest {
+            name: "22%".into(),
+            min_income_cents: 40_000_00,
+            max_income_cents: None,
+            rate_percent: 22.0,
+        }).await.unwrap();
+
+        // $50,000 gross:
+        // First $10,000 @ 10% = $1,000
+        // Next $30,000 @ 12% = $3,600
+        // Last $10,000 @ 22% = $2,200
+        // Total = $6,800
+        let tax = svc.calculate_progressive_tax(50_000_00).await.unwrap();
+        assert_eq!(tax, 6_800_00);
+    }
+
+    #[tokio::test]
+    async fn test_progressive_tax_no_brackets() {
+        let repo = setup_repo().await;
+        let svc = PayrollService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+        let tax = svc.calculate_progressive_tax(100_000_00).await.unwrap();
+        assert_eq!(tax, 0);
+    }
+
+    #[tokio::test]
     async fn test_tax_bracket_overlap_validation() {
         let repo = setup_repo().await;
         let svc = PayrollService {
@@ -1908,4 +1960,5 @@ mod tests {
             .await;
         assert!(result.is_ok());
     }
+
 }
