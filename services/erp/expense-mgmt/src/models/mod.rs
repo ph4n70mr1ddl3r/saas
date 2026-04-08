@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use validator::Validate;
 
 // --- Expense Categories ---
 
@@ -14,8 +15,9 @@ pub struct ExpenseCategory {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreateExpenseCategoryRequest {
+    #[validate(length(min = 1, message = "Name is required"))]
     pub name: String,
     pub description: Option<String>,
     pub limit_cents: Option<i64>,
@@ -39,9 +41,11 @@ pub struct ExpenseReport {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreateExpenseReportRequest {
+    #[validate(length(min = 1, message = "Employee ID is required"))]
     pub employee_id: String,
+    #[validate(length(min = 1, message = "Title is required"))]
     pub title: String,
     pub description: Option<String>,
 }
@@ -68,11 +72,14 @@ pub struct ExpenseLine {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreateExpenseLineRequest {
+    #[validate(length(min = 1, message = "Report ID is required"))]
     pub report_id: String,
     pub expense_date: String,
+    #[validate(length(min = 1, message = "Category ID is required"))]
     pub category_id: String,
+    #[validate(range(min = 1, message = "Amount must be at least 1"))]
     pub amount_cents: i64,
     pub description: Option<String>,
     pub receipt_url: Option<String>,
@@ -92,12 +99,15 @@ pub struct PerDiem {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreatePerDiemRequest {
+    #[validate(length(min = 1, message = "Report ID is required"))]
     pub report_id: String,
+    #[validate(length(min = 1, message = "Location is required"))]
     pub location: String,
     pub start_date: String,
     pub end_date: String,
+    #[validate(range(min = 0, message = "Daily rate must be non-negative"))]
     pub daily_rate_cents: i64,
 }
 
@@ -116,11 +126,15 @@ pub struct Mileage {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreateMileageRequest {
+    #[validate(length(min = 1, message = "Report ID is required"))]
     pub report_id: String,
+    #[validate(length(min = 1, message = "Origin is required"))]
     pub origin: String,
+    #[validate(length(min = 1, message = "Destination is required"))]
     pub destination: String,
+    #[validate(range(min = 0.0, message = "Distance must be non-negative"))]
     pub distance_miles: f64,
     pub rate_per_mile_cents: i64,
     pub expense_date: String,
@@ -147,8 +161,9 @@ pub struct ApproveReportRequest {
     pub rejected_reason: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct RejectReportRequest {
+    #[validate(length(min = 1, message = "Rejection reason is required"))]
     pub rejected_reason: String,
 }
 

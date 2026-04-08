@@ -1,6 +1,6 @@
 use crate::service::ProcurementService;
 use saas_nats_bus::NatsBus;
-use saas_proto::events::{ItemBelowReorderPoint, StockReceived};
+use saas_proto::events::{ItemBelowReorderPoint, PurchaseOrderSubmitted, StockReceived};
 use sqlx::SqlitePool;
 
 pub async fn register(bus: &NatsBus, service: ProcurementService) -> anyhow::Result<()> {
@@ -41,6 +41,24 @@ pub async fn register(bus: &NatsBus, service: ProcurementService) -> anyhow::Res
             );
             if let Err(e) = svc.handle_stock_received(&item_id, &warehouse_id, quantity, &reference_type, &reference_id).await {
                 tracing::error!("Failed to process stock received for PO fulfillment: {}", e);
+            }
+        }
+    }).await.ok();
+
+    // Self-subscriber: PO submitted for audit/approval workflow logging
+    let svc = service.clone();
+    bus.subscribe::<PurchaseOrderSubmitted, _, _>("scm.procurement.po.submitted", move |envelope| {
+        let svc = svc.clone();
+        let po_id = envelope.payload.po_id.clone();
+        let supplier_id = envelope.payload.supplier_id.clone();
+        async move {
+            tracing::info!(
+                "Received procurement.po.submitted — po_id={}, supplier_id={}",
+                po_id,
+                supplier_id
+            );
+            if let Err(e) = svc.handle_po_submitted(&po_id, &supplier_id).await {
+                tracing::error!("Failed to handle PO submitted notification for {}: {}", po_id, e);
             }
         }
     }).await.ok();

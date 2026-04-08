@@ -341,6 +341,21 @@ impl PerformanceService {
         self.repo.create_feedback(&input).await
     }
 
+    /// Handle review cycle activated notification event.
+    /// Logs the cycle activation for HR awareness.
+    pub async fn handle_cycle_activated_notification(
+        &self,
+        cycle_id: &str,
+        name: &str,
+    ) -> anyhow::Result<()> {
+        tracing::info!(
+            "Notification: Review cycle activated — cycle_id={}, name='{}'. HR should ensure all participants are notified and review assignments are in place.",
+            cycle_id,
+            name
+        );
+        Ok(())
+    }
+
     /// Handle review submitted notification event.
     /// Logs the notification for the review submission.
     pub async fn handle_review_submitted_notification(
@@ -1338,6 +1353,20 @@ mod tests {
                 "reviewer-001",
                 4,
             )
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_cycle_activated_notification() {
+        let pool = setup().await;
+        let bus = saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+            .await
+            .unwrap();
+        let svc = PerformanceService::new(pool, bus);
+
+        let result = svc
+            .handle_cycle_activated_notification("cycle-001", "Q1 Annual Review")
             .await;
         assert!(result.is_ok());
     }

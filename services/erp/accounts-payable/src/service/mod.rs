@@ -3,6 +3,7 @@ use crate::repository::ApRepo;
 use saas_common::error::{AppError, AppResult};
 use saas_nats_bus::NatsBus;
 use sqlx::SqlitePool;
+use validator::Validate;
 
 #[derive(Clone)]
 pub struct ApService {
@@ -29,6 +30,9 @@ impl ApService {
     }
 
     pub async fn create_vendor(&self, input: &CreateVendorRequest) -> AppResult<Vendor> {
+        input
+            .validate()
+            .map_err(|e| AppError::Validation(e.to_string()))?;
         // Check for duplicate vendor name
         let existing = self.repo.list_vendors().await?;
         if existing.iter().any(|v| v.name.to_lowercase() == input.name.to_lowercase()) {
@@ -61,6 +65,9 @@ impl ApService {
         &self,
         input: &CreateApInvoiceRequest,
     ) -> AppResult<ApInvoiceWithLines> {
+        input
+            .validate()
+            .map_err(|e| AppError::Validation(e.to_string()))?;
         if input.lines.is_empty() {
             return Err(AppError::Validation(
                 "At least one invoice line is required".into(),
@@ -169,6 +176,9 @@ impl ApService {
     }
 
     pub async fn create_payment(&self, input: &CreatePaymentRequest) -> AppResult<Payment> {
+        input
+            .validate()
+            .map_err(|e| AppError::Validation(e.to_string()))?;
         // Validate amount is positive
         if input.amount_cents <= 0 {
             return Err(AppError::Validation(
@@ -389,6 +399,9 @@ impl ApService {
     // --- Tax Codes ---
 
     pub async fn create_tax_code(&self, input: &CreateTaxCodeRequest) -> AppResult<TaxCode> {
+        input
+            .validate()
+            .map_err(|e| AppError::Validation(e.to_string()))?;
         if input.rate < 0.0 || input.rate > 1.0 {
             return Err(AppError::Validation(
                 "Tax rate must be between 0 and 1".into(),
@@ -1283,5 +1296,284 @@ mod tests {
 
         let result = svc.handle_period_closed("period-001", "Jan-2025", 2025).await;
         assert!(result.is_ok());
+    }
+
+    // --- Validation tests ---
+
+    async fn setup_svc() -> ApService {
+        let pool = setup().await;
+        ApService {
+            repo: ApRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_vendor_validation_empty_name() {
+        let svc = setup_svc().await;
+        let result = svc
+            .create_vendor(&CreateVendorRequest {
+                name: "".into(),
+                email: None,
+                phone: None,
+                address: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("name"),
+            "Expected name validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_vendor_validation_invalid_email() {
+        let svc = setup_svc().await;
+        let result = svc
+            .create_vendor(&CreateVendorRequest {
+                name: "Valid Name".into(),
+                email: Some("not-an-email".into()),
+                phone: None,
+                address: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("email"),
+            "Expected email validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_ap_invoice_validation_empty_vendor_id() {
+        let svc = setup_svc().await;
+        let result = svc
+            .create_invoice(&CreateApInvoiceRequest {
+                vendor_id: "".into(),
+                invoice_number: "INV-001".into(),
+                invoice_date: "2025-01-01".into(),
+                due_date: "2025-02-01".into(),
+                lines: vec![CreateApInvoiceLineRequest {
+                    description: Some("Test".into()),
+                    account_code: "5000".into(),
+                    amount_cents: 1000,
+                }],
+                tax_code: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("vendor_id"),
+            "Expected vendor_id validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_ap_invoice_validation_empty_invoice_number() {
+        let svc = setup_svc().await;
+        let result = svc
+            .create_invoice(&CreateApInvoiceRequest {
+                vendor_id: "some-id".into(),
+                invoice_number: "".into(),
+                invoice_date: "2025-01-01".into(),
+                due_date: "2025-02-01".into(),
+                lines: vec![CreateApInvoiceLineRequest {
+                    description: Some("Test".into()),
+                    account_code: "5000".into(),
+                    amount_cents: 1000,
+                }],
+                tax_code: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("invoice_number"),
+            "Expected invoice_number validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_ap_invoice_line_validation_empty_account_code() {
+        let svc = setup_svc().await;
+        let result = svc
+            .create_invoice(&CreateApInvoiceRequest {
+                vendor_id: "some-id".into(),
+                invoice_number: "INV-001".into(),
+                invoice_date: "2025-01-01".into(),
+                due_date: "2025-02-01".into(),
+                lines: vec![CreateApInvoiceLineRequest {
+                    description: Some("Test".into()),
+                    account_code: "".into(),
+                    amount_cents: 1000,
+                }],
+                tax_code: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("account_code"),
+            "Expected account_code validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_ap_invoice_line_validation_zero_amount() {
+        let svc = setup_svc().await;
+        let result = svc
+            .create_invoice(&CreateApInvoiceRequest {
+                vendor_id: "some-id".into(),
+                invoice_number: "INV-001".into(),
+                invoice_date: "2025-01-01".into(),
+                due_date: "2025-02-01".into(),
+                lines: vec![CreateApInvoiceLineRequest {
+                    description: Some("Test".into()),
+                    account_code: "5000".into(),
+                    amount_cents: 0,
+                }],
+                tax_code: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("amount_cents"),
+            "Expected amount_cents validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_payment_validation_empty_invoice_id() {
+        let svc = setup_svc().await;
+        let result = svc
+            .create_payment(&CreatePaymentRequest {
+                invoice_id: "".into(),
+                vendor_id: "some-id".into(),
+                amount_cents: 1000,
+                payment_date: "2025-02-01".into(),
+                method: None,
+                reference: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("invoice_id"),
+            "Expected invoice_id validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_payment_validation_empty_vendor_id() {
+        let svc = setup_svc().await;
+        let result = svc
+            .create_payment(&CreatePaymentRequest {
+                invoice_id: "some-id".into(),
+                vendor_id: "".into(),
+                amount_cents: 1000,
+                payment_date: "2025-02-01".into(),
+                method: None,
+                reference: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("vendor_id"),
+            "Expected vendor_id validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_payment_validation_zero_amount() {
+        let svc = setup_svc().await;
+        let result = svc
+            .create_payment(&CreatePaymentRequest {
+                invoice_id: "some-id".into(),
+                vendor_id: "some-id".into(),
+                amount_cents: 0,
+                payment_date: "2025-02-01".into(),
+                method: None,
+                reference: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("amount_cents"),
+            "Expected amount_cents validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_tax_code_validation_empty_code() {
+        let svc = setup_svc().await;
+        let result = svc
+            .create_tax_code(&CreateTaxCodeRequest {
+                code: "".into(),
+                rate: 0.10,
+                description: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("code"),
+            "Expected code validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_tax_code_validation_rate_above_max() {
+        let svc = setup_svc().await;
+        let result = svc
+            .create_tax_code(&CreateTaxCodeRequest {
+                code: "INVALID".into(),
+                rate: 1.5,
+                description: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("rate"),
+            "Expected rate validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_tax_code_validation_rate_below_min() {
+        let svc = setup_svc().await;
+        let result = svc
+            .create_tax_code(&CreateTaxCodeRequest {
+                code: "NEGATIVE".into(),
+                rate: -0.1,
+                description: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("rate"),
+            "Expected rate validation error, got: {}",
+            err
+        );
     }
 }

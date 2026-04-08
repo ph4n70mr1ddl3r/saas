@@ -1,6 +1,6 @@
 use crate::service::PayrollService;
 use saas_nats_bus::NatsBus;
-use saas_proto::events::{EmployeeCreated, EmployeeTerminated, EmployeeUpdated, EmployeeEnrolled, EnrollmentCancelled, TimesheetApproved, TimesheetSubmitted, LeaveRequestSubmitted};
+use saas_proto::events::{BenefitPlanDeactivated, EmployeeCreated, EmployeeTerminated, EmployeeUpdated, EmployeeEnrolled, EnrollmentCancelled, TimesheetApproved, TimesheetSubmitted, LeaveRequestSubmitted};
 
 pub async fn subscribe(bus: &NatsBus, service: PayrollService) -> anyhow::Result<()> {
     let svc1 = service.clone();
@@ -139,6 +139,24 @@ pub async fn subscribe(bus: &NatsBus, service: PayrollService) -> anyhow::Result
             );
             if let Err(e) = svc8.handle_leave_submitted(&request_id, &employee_id, &leave_type, &start_date, &end_date).await {
                 tracing::error!("Failed to handle leave submitted for {}: {}", employee_id, e);
+            }
+        }
+    })
+    .await?;
+
+    let svc9 = service.clone();
+    bus.subscribe::<BenefitPlanDeactivated, _, _>("hcm.benefits.plan.deactivated", move |envelope| {
+        let svc9 = svc9.clone();
+        let plan_id = envelope.payload.plan_id.clone();
+        let name = envelope.payload.name.clone();
+        async move {
+            tracing::info!(
+                "Received benefits.plan.deactivated for plan {} ('{}') — reviewing benefit deductions",
+                plan_id,
+                name
+            );
+            if let Err(e) = svc9.handle_benefit_plan_deactivated(&plan_id, &name).await {
+                tracing::error!("Failed to handle benefit plan deactivated for plan {}: {}", plan_id, e);
             }
         }
     })

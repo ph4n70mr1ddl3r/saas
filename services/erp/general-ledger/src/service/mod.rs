@@ -4,6 +4,7 @@ use saas_common::error::{AppError, AppResult};
 use saas_nats_bus::NatsBus;
 use saas_proto::events::{JournalEntryPosted, JournalEntryReversed, PeriodClosed, BudgetActivated};
 use sqlx::SqlitePool;
+use validator::Validate;
 
 #[derive(Clone)]
 pub struct LedgerService {
@@ -30,6 +31,7 @@ impl LedgerService {
     }
 
     pub async fn create_account(&self, input: &CreateAccountRequest) -> AppResult<Account> {
+        input.validate().map_err(|e| AppError::Validation(e.to_string()))?;
         let valid_types = ["asset", "liability", "equity", "revenue", "expense"];
         if !valid_types.contains(&input.account_type.as_str()) {
             return Err(AppError::Validation(format!(
@@ -59,6 +61,7 @@ impl LedgerService {
     }
 
     pub async fn create_period(&self, input: &CreatePeriodRequest) -> AppResult<Period> {
+        input.validate().map_err(|e| AppError::Validation(e.to_string()))?;
         if input.start_date >= input.end_date {
             return Err(AppError::Validation(
                 "start_date must be before end_date".into(),
@@ -121,6 +124,7 @@ impl LedgerService {
         input: &CreateJournalEntryRequest,
         created_by: &str,
     ) -> AppResult<JournalEntryWithLines> {
+        input.validate().map_err(|e| AppError::Validation(e.to_string()))?;
         // Validate at least one line
         if input.lines.is_empty() {
             return Err(AppError::Validation(
@@ -336,6 +340,7 @@ impl LedgerService {
         input: &CreateBudgetRequest,
         created_by: &str,
     ) -> AppResult<BudgetWithLines> {
+        input.validate().map_err(|e| AppError::Validation(e.to_string()))?;
         if input.lines.is_empty() {
             return Err(AppError::Validation(
                 "At least one budget line is required".into(),
@@ -3456,5 +3461,153 @@ mod tests {
             .handle_journal_entry_reversed_audit("je-rev-002", "je-orig-002", "admin")
             .await;
         assert!(result.is_ok());
+    }
+
+    // --- Validation tests ---
+
+    #[tokio::test]
+    async fn test_create_account_empty_code_rejected() {
+        let repo = setup_repo().await;
+        let svc = LedgerService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc.create_account(&CreateAccountRequest {
+            code: "".into(),
+            name: "Cash".into(),
+            account_type: "asset".into(),
+            parent_id: None,
+        }).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_create_account_empty_name_rejected() {
+        let repo = setup_repo().await;
+        let svc = LedgerService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc.create_account(&CreateAccountRequest {
+            code: "1000".into(),
+            name: "".into(),
+            account_type: "asset".into(),
+            parent_id: None,
+        }).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_create_period_empty_name_rejected() {
+        let repo = setup_repo().await;
+        let svc = LedgerService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc.create_period(&CreatePeriodRequest {
+            name: "".into(),
+            start_date: "2025-01-01".into(),
+            end_date: "2025-03-31".into(),
+            fiscal_year: 2025,
+        }).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_create_period_empty_dates_rejected() {
+        let repo = setup_repo().await;
+        let svc = LedgerService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Empty start_date
+        let result = svc.create_period(&CreatePeriodRequest {
+            name: "Q1".into(),
+            start_date: "".into(),
+            end_date: "2025-03-31".into(),
+            fiscal_year: 2025,
+        }).await;
+        assert!(result.is_err());
+
+        // Empty end_date
+        let result = svc.create_period(&CreatePeriodRequest {
+            name: "Q1".into(),
+            start_date: "2025-01-01".into(),
+            end_date: "".into(),
+            fiscal_year: 2025,
+        }).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_create_journal_entry_empty_period_id_rejected() {
+        let repo = setup_repo().await;
+        let svc = LedgerService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc.create_journal_entry(&CreateJournalEntryRequest {
+            description: None,
+            period_id: "".into(),
+            lines: vec![],
+        }, "user-1").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_create_budget_empty_name_rejected() {
+        let repo = setup_repo().await;
+        let svc = LedgerService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc.create_budget(&CreateBudgetRequest {
+            name: "".into(),
+            period_id: "some-period".into(),
+            lines: vec![CreateBudgetLineRequest {
+                account_id: "some-account".into(),
+                budgeted_cents: 1000,
+            }],
+        }, "admin").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_create_budget_empty_period_id_rejected() {
+        let repo = setup_repo().await;
+        let svc = LedgerService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc.create_budget(&CreateBudgetRequest {
+            name: "Q1 Budget".into(),
+            period_id: "".into(),
+            lines: vec![CreateBudgetLineRequest {
+                account_id: "some-account".into(),
+                budgeted_cents: 1000,
+            }],
+        }, "admin").await;
+        assert!(result.is_err());
     }
 }

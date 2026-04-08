@@ -1,6 +1,6 @@
 use crate::service::PerformanceService;
 use saas_nats_bus::NatsBus;
-use saas_proto::events::{EmployeeCreated, ReviewSubmitted};
+use saas_proto::events::{EmployeeCreated, ReviewCycleActivated, ReviewSubmitted};
 
 pub async fn subscribe(bus: &NatsBus, service: PerformanceService) -> anyhow::Result<()> {
     let svc1 = service.clone();
@@ -57,6 +57,28 @@ pub async fn subscribe(bus: &NatsBus, service: PerformanceService) -> anyhow::Re
                 tracing::error!(
                     "Failed to handle review.submitted notification for assignment {}: {}",
                     assignment_id,
+                    e
+                );
+            }
+        }
+    })
+    .await?;
+
+    let svc3 = service.clone();
+    bus.subscribe::<ReviewCycleActivated, _, _>("hcm.performance.cycle.activated", move |envelope| {
+        let svc3 = svc3.clone();
+        let cycle_id = envelope.payload.cycle_id.clone();
+        let name = envelope.payload.name.clone();
+        async move {
+            tracing::info!(
+                "Received performance.cycle.activated event — cycle_id={}, name='{}'",
+                cycle_id,
+                name
+            );
+            if let Err(e) = svc3.handle_cycle_activated_notification(&cycle_id, &name).await {
+                tracing::error!(
+                    "Failed to handle cycle.activated notification for cycle {}: {}",
+                    cycle_id,
                     e
                 );
             }

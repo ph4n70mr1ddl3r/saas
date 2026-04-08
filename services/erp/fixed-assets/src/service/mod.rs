@@ -4,6 +4,7 @@ use saas_common::error::{AppError, AppResult};
 use saas_nats_bus::NatsBus;
 use saas_proto::events::{AssetCreated, AssetDisposed, DepreciationRunCompleted};
 use sqlx::SqlitePool;
+use validator::Validate;
 
 #[derive(Clone)]
 pub struct FixedAssetsService {
@@ -30,6 +31,7 @@ impl FixedAssetsService {
     }
 
     pub async fn create_asset(&self, input: &CreateAssetRequest) -> AppResult<Asset> {
+        input.validate().map_err(|e| AppError::Validation(e.to_string()))?;
         if input.purchase_cost_cents < 0 {
             return Err(AppError::Validation(
                 "Purchase cost must be non-negative".into(),
@@ -258,6 +260,9 @@ impl FixedAssetsService {
     /// Run depreciation for a given period. Uses a database-level check
     /// inside a transaction to prevent concurrent runs for the same period.
     pub async fn run_depreciation(&self, period: &str) -> AppResult<Vec<DepreciationSchedule>> {
+        RunDepreciationRequest { period: period.to_string() }
+            .validate()
+            .map_err(|e| AppError::Validation(e.to_string()))?;
         // Pre-check: eagerly fail if ANY active asset already has depreciation
         // for this period, before doing any work.
         let assets = self.repo.list_active_assets().await?;
@@ -1101,5 +1106,141 @@ mod tests {
             useful_life_months: 12,
             depreciation_method: None,
         }).await.unwrap();
+    }
+
+    // --- Validation tests ---
+
+    #[tokio::test]
+    async fn test_create_asset_empty_name_rejected() {
+        let repo = setup_repo().await;
+        let svc = FixedAssetsService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc.create_asset(&CreateAssetRequest {
+            name: "".into(),
+            description: None,
+            asset_number: "ASSET-001".into(),
+            category: "equipment".into(),
+            purchase_date: "2025-01-01".into(),
+            purchase_cost_cents: 10_000,
+            salvage_value_cents: Some(0),
+            useful_life_months: 12,
+            depreciation_method: None,
+        }).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_create_asset_empty_asset_number_rejected() {
+        let repo = setup_repo().await;
+        let svc = FixedAssetsService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc.create_asset(&CreateAssetRequest {
+            name: "Laptop".into(),
+            description: None,
+            asset_number: "".into(),
+            category: "equipment".into(),
+            purchase_date: "2025-01-01".into(),
+            purchase_cost_cents: 10_000,
+            salvage_value_cents: Some(0),
+            useful_life_months: 12,
+            depreciation_method: None,
+        }).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_create_asset_empty_category_rejected() {
+        let repo = setup_repo().await;
+        let svc = FixedAssetsService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc.create_asset(&CreateAssetRequest {
+            name: "Laptop".into(),
+            description: None,
+            asset_number: "ASSET-002".into(),
+            category: "".into(),
+            purchase_date: "2025-01-01".into(),
+            purchase_cost_cents: 10_000,
+            salvage_value_cents: Some(0),
+            useful_life_months: 12,
+            depreciation_method: None,
+        }).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_create_asset_zero_cost_rejected() {
+        let repo = setup_repo().await;
+        let svc = FixedAssetsService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc.create_asset(&CreateAssetRequest {
+            name: "Laptop".into(),
+            description: None,
+            asset_number: "ASSET-003".into(),
+            category: "equipment".into(),
+            purchase_date: "2025-01-01".into(),
+            purchase_cost_cents: 0,
+            salvage_value_cents: Some(0),
+            useful_life_months: 12,
+            depreciation_method: None,
+        }).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_create_asset_zero_useful_life_rejected() {
+        let repo = setup_repo().await;
+        let svc = FixedAssetsService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc.create_asset(&CreateAssetRequest {
+            name: "Laptop".into(),
+            description: None,
+            asset_number: "ASSET-004".into(),
+            category: "equipment".into(),
+            purchase_date: "2025-01-01".into(),
+            purchase_cost_cents: 10_000,
+            salvage_value_cents: Some(0),
+            useful_life_months: 0,
+            depreciation_method: None,
+        }).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_run_depreciation_empty_period_rejected() {
+        let repo = setup_repo().await;
+        let svc = FixedAssetsService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc.run_depreciation("").await;
+        assert!(result.is_err());
     }
 }

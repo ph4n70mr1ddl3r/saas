@@ -4,6 +4,7 @@ use saas_common::error::{AppError, AppResult};
 use saas_nats_bus::NatsBus;
 use saas_proto::events::PayRunCompleted;
 use sqlx::SqlitePool;
+use validator::Validate;
 
 #[derive(Clone)]
 pub struct PayrollService {
@@ -40,11 +41,9 @@ impl PayrollService {
         &self,
         input: CreateCompensationRequest,
     ) -> AppResult<Compensation> {
-        if input.amount_cents < 0 {
-            return Err(AppError::Validation(
-                "amount_cents must be non-negative".into(),
-            ));
-        }
+        input
+            .validate()
+            .map_err(|e| AppError::Validation(e.to_string()))?;
         let comp = self.repo.create_compensation(&input).await?;
         if let Err(e) = self
             .bus
@@ -72,6 +71,9 @@ impl PayrollService {
         id: &str,
         input: UpdateCompensationRequest,
     ) -> AppResult<Compensation> {
+        input
+            .validate()
+            .map_err(|e| AppError::Validation(e.to_string()))?;
         let comp = self.repo.update_compensation(id, &input).await?;
         if let Err(e) = self
             .bus
@@ -105,6 +107,9 @@ impl PayrollService {
     }
 
     pub async fn create_pay_run(&self, input: CreatePayRunRequest) -> AppResult<PayRun> {
+        input
+            .validate()
+            .map_err(|e| AppError::Validation(e.to_string()))?;
         self.repo.create_pay_run(&input).await
     }
 
@@ -207,11 +212,9 @@ impl PayrollService {
     }
 
     pub async fn create_deduction(&self, input: CreateDeductionRequest) -> AppResult<Deduction> {
-        if input.amount_cents < 0 {
-            return Err(AppError::Validation(
-                "amount_cents must be non-negative".into(),
-            ));
-        }
+        input
+            .validate()
+            .map_err(|e| AppError::Validation(e.to_string()))?;
         self.repo.create_deduction(&input).await
     }
 
@@ -380,6 +383,25 @@ impl PayrollService {
         Ok(())
     }
 
+    /// When a benefit plan is deactivated, log and flag that deductions should be reviewed.
+    /// Active deductions tied to this plan may need to be ended.
+    pub async fn handle_benefit_plan_deactivated(
+        &self,
+        plan_id: &str,
+        name: &str,
+    ) -> AppResult<()> {
+        tracing::info!(
+            "Benefit plan deactivated — plan_id={}, name='{}'. Deductions tied to this plan should be reviewed and ended if necessary.",
+            plan_id,
+            name
+        );
+        tracing::warn!(
+            "Payroll action required: review all active deductions with code 'BEN-{}' for deactivation",
+            plan_id
+        );
+        Ok(())
+    }
+
     // --- Tax Brackets ---
 
     pub async fn list_tax_brackets(&self) -> AppResult<Vec<TaxBracket>> {
@@ -391,6 +413,9 @@ impl PayrollService {
     }
 
     pub async fn create_tax_bracket(&self, input: CreateTaxBracketRequest) -> AppResult<TaxBracket> {
+        input
+            .validate()
+            .map_err(|e| AppError::Validation(e.to_string()))?;
         if input.rate_percent < 0.0 || input.rate_percent > 100.0 {
             return Err(AppError::Validation(
                 "rate_percent must be between 0 and 100".into(),
@@ -1325,5 +1350,502 @@ mod tests {
             .handle_leave_submitted("lr-001", "emp-lr-001", "vacation", "2025-07-01", "2025-07-05")
             .await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_benefit_plan_deactivated() {
+        let repo = setup_repo().await;
+        let svc = PayrollService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .handle_benefit_plan_deactivated("plan-dental", "Dental Plus")
+            .await;
+        assert!(result.is_ok());
+    }
+
+    // --- Validation tests ---
+
+    #[tokio::test]
+    async fn test_create_compensation_validation_empty_employee_id() {
+        let repo = setup_repo().await;
+        let svc = PayrollService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_compensation(CreateCompensationRequest {
+                employee_id: "".into(),
+                salary_type: "salaried".into(),
+                amount_cents: 50_000_00,
+                currency: Some("USD".into()),
+                effective_date: "2025-01-01".into(),
+                end_date: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("employee_id"),
+            "Expected employee_id validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_compensation_validation_empty_salary_type() {
+        let repo = setup_repo().await;
+        let svc = PayrollService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_compensation(CreateCompensationRequest {
+                employee_id: "emp-001".into(),
+                salary_type: "".into(),
+                amount_cents: 50_000_00,
+                currency: Some("USD".into()),
+                effective_date: "2025-01-01".into(),
+                end_date: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("salary_type"),
+            "Expected salary_type validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_compensation_validation_negative_amount() {
+        let repo = setup_repo().await;
+        let svc = PayrollService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_compensation(CreateCompensationRequest {
+                employee_id: "emp-001".into(),
+                salary_type: "salaried".into(),
+                amount_cents: -1,
+                currency: Some("USD".into()),
+                effective_date: "2025-01-01".into(),
+                end_date: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("amount"),
+            "Expected amount validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_compensation_validation_valid_succeeds() {
+        let repo = setup_repo().await;
+        let svc = PayrollService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let comp = svc
+            .create_compensation(CreateCompensationRequest {
+                employee_id: "emp-val-001".into(),
+                salary_type: "salaried".into(),
+                amount_cents: 0,
+                currency: Some("USD".into()),
+                effective_date: "2025-01-01".into(),
+                end_date: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(comp.employee_id, "emp-val-001");
+    }
+
+    #[tokio::test]
+    async fn test_update_compensation_validation_negative_amount() {
+        let repo = setup_repo().await;
+        let svc = PayrollService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let comp = svc
+            .create_compensation(CreateCompensationRequest {
+                employee_id: "emp-upd-val".into(),
+                salary_type: "salaried".into(),
+                amount_cents: 50_000_00,
+                currency: Some("USD".into()),
+                effective_date: "2025-01-01".into(),
+                end_date: None,
+            })
+            .await
+            .unwrap();
+
+        let result = svc
+            .update_compensation(
+                &comp.id,
+                UpdateCompensationRequest {
+                    salary_type: None,
+                    amount_cents: Some(-100),
+                    currency: None,
+                    effective_date: None,
+                    end_date: None,
+                },
+            )
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("amount"),
+            "Expected amount validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_compensation_validation_empty_salary_type() {
+        let repo = setup_repo().await;
+        let svc = PayrollService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let comp = svc
+            .create_compensation(CreateCompensationRequest {
+                employee_id: "emp-upd-val2".into(),
+                salary_type: "salaried".into(),
+                amount_cents: 50_000_00,
+                currency: Some("USD".into()),
+                effective_date: "2025-01-01".into(),
+                end_date: None,
+            })
+            .await
+            .unwrap();
+
+        let result = svc
+            .update_compensation(
+                &comp.id,
+                UpdateCompensationRequest {
+                    salary_type: Some("".into()),
+                    amount_cents: None,
+                    currency: None,
+                    effective_date: None,
+                    end_date: None,
+                },
+            )
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("salary_type"),
+            "Expected salary_type validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_pay_run_validation_empty_fields() {
+        let repo = setup_repo().await;
+        let svc = PayrollService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_pay_run(CreatePayRunRequest {
+                period_start: "".into(),
+                period_end: "2025-06-30".into(),
+                pay_date: "2025-07-01".into(),
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("period_start"),
+            "Expected period_start validation error, got: {}",
+            err
+        );
+
+        let result = svc
+            .create_pay_run(CreatePayRunRequest {
+                period_start: "2025-06-01".into(),
+                period_end: "".into(),
+                pay_date: "2025-07-01".into(),
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("period_end"),
+            "Expected period_end validation error, got: {}",
+            err
+        );
+
+        let result = svc
+            .create_pay_run(CreatePayRunRequest {
+                period_start: "2025-06-01".into(),
+                period_end: "2025-06-30".into(),
+                pay_date: "".into(),
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("pay_date"),
+            "Expected pay_date validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_pay_run_validation_valid_succeeds() {
+        let repo = setup_repo().await;
+        let svc = PayrollService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let pay_run = svc
+            .create_pay_run(CreatePayRunRequest {
+                period_start: "2025-06-01".into(),
+                period_end: "2025-06-30".into(),
+                pay_date: "2025-07-01".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(pay_run.status, "draft");
+    }
+
+    #[tokio::test]
+    async fn test_create_deduction_validation_empty_employee_id() {
+        let repo = setup_repo().await;
+        let svc = PayrollService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_deduction(CreateDeductionRequest {
+                employee_id: "".into(),
+                code: "HEALTH".into(),
+                amount_cents: 5_000,
+                recurring: Some(true),
+                start_date: "2025-01-01".into(),
+                end_date: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("employee_id"),
+            "Expected employee_id validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_deduction_validation_empty_code() {
+        let repo = setup_repo().await;
+        let svc = PayrollService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_deduction(CreateDeductionRequest {
+                employee_id: "emp-001".into(),
+                code: "".into(),
+                amount_cents: 5_000,
+                recurring: Some(true),
+                start_date: "2025-01-01".into(),
+                end_date: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("code"),
+            "Expected code validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_deduction_validation_zero_amount() {
+        let repo = setup_repo().await;
+        let svc = PayrollService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_deduction(CreateDeductionRequest {
+                employee_id: "emp-001".into(),
+                code: "HEALTH".into(),
+                amount_cents: 0,
+                recurring: Some(true),
+                start_date: "2025-01-01".into(),
+                end_date: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("amount"),
+            "Expected amount validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_deduction_validation_valid_succeeds() {
+        let repo = setup_repo().await;
+        let svc = PayrollService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let deduction = svc
+            .create_deduction(CreateDeductionRequest {
+                employee_id: "emp-ded-val".into(),
+                code: "HEALTH".into(),
+                amount_cents: 5_000,
+                recurring: Some(true),
+                start_date: "2025-01-01".into(),
+                end_date: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(deduction.employee_id, "emp-ded-val");
+    }
+
+    #[tokio::test]
+    async fn test_create_tax_bracket_validation_empty_name() {
+        let repo = setup_repo().await;
+        let svc = PayrollService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_tax_bracket(CreateTaxBracketRequest {
+                name: "".into(),
+                min_income_cents: 0,
+                max_income_cents: None,
+                rate_percent: 10.0,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("name"),
+            "Expected name validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_tax_bracket_validation_rate_out_of_range() {
+        let repo = setup_repo().await;
+        let svc = PayrollService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Negative rate
+        let result = svc
+            .create_tax_bracket(CreateTaxBracketRequest {
+                name: "Invalid".into(),
+                min_income_cents: 0,
+                max_income_cents: None,
+                rate_percent: -1.0,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("rate"),
+            "Expected rate validation error, got: {}",
+            err
+        );
+
+        // Rate over 100
+        let result = svc
+            .create_tax_bracket(CreateTaxBracketRequest {
+                name: "Invalid2".into(),
+                min_income_cents: 0,
+                max_income_cents: None,
+                rate_percent: 101.0,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("rate"),
+            "Expected rate validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_tax_bracket_validation_valid_succeeds() {
+        let repo = setup_repo().await;
+        let svc = PayrollService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let bracket = svc
+            .create_tax_bracket(CreateTaxBracketRequest {
+                name: "Valid Bracket".into(),
+                min_income_cents: 0,
+                max_income_cents: None,
+                rate_percent: 22.0,
+            })
+            .await
+            .unwrap();
+        assert_eq!(bracket.name, "Valid Bracket");
     }
 }

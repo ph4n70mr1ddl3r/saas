@@ -6,6 +6,7 @@ use saas_proto::events::{
     ExpenseReportApproved, ExpenseReportRejected, ExpenseReportPaid, ExpenseReportSubmitted,
 };
 use sqlx::SqlitePool;
+use validator::Validate;
 
 #[derive(Clone)]
 pub struct ExpenseService {
@@ -35,6 +36,9 @@ impl ExpenseService {
         &self,
         input: &CreateExpenseCategoryRequest,
     ) -> AppResult<ExpenseCategory> {
+        input
+            .validate()
+            .map_err(|e| AppError::Validation(e.to_string()))?;
         self.repo.create_category(input).await
     }
 
@@ -76,6 +80,9 @@ impl ExpenseService {
         &self,
         input: &CreateExpenseReportRequest,
     ) -> AppResult<ExpenseReport> {
+        input
+            .validate()
+            .map_err(|e| AppError::Validation(e.to_string()))?;
         self.repo.create_report(input).await
     }
 
@@ -187,6 +194,11 @@ impl ExpenseService {
     }
 
     pub async fn reject_report(&self, id: &str, reason: &str) -> AppResult<ExpenseReport> {
+        let req = RejectReportRequest {
+            rejected_reason: reason.to_string(),
+        };
+        req.validate()
+            .map_err(|e| AppError::Validation(e.to_string()))?;
         let report = self.repo.get_report(id).await?;
 
         if report.status != "submitted" {
@@ -282,6 +294,9 @@ impl ExpenseService {
     // --- Expense Lines ---
 
     pub async fn create_line(&self, input: &CreateExpenseLineRequest) -> AppResult<ExpenseLine> {
+        input
+            .validate()
+            .map_err(|e| AppError::Validation(e.to_string()))?;
         let report = self.repo.get_report(&input.report_id).await?;
 
         if report.status != "draft" {
@@ -325,6 +340,9 @@ impl ExpenseService {
     // --- Per Diems ---
 
     pub async fn create_per_diem(&self, input: &CreatePerDiemRequest) -> AppResult<PerDiem> {
+        input
+            .validate()
+            .map_err(|e| AppError::Validation(e.to_string()))?;
         let report = self.repo.get_report(&input.report_id).await?;
         if report.status != "draft" {
             return Err(AppError::Validation(format!(
@@ -352,6 +370,9 @@ impl ExpenseService {
     // --- Mileage ---
 
     pub async fn create_mileage(&self, input: &CreateMileageRequest) -> AppResult<Mileage> {
+        input
+            .validate()
+            .map_err(|e| AppError::Validation(e.to_string()))?;
         let report = self.repo.get_report(&input.report_id).await?;
         if report.status != "draft" {
             return Err(AppError::Validation(format!(
@@ -1257,5 +1278,513 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
+    }
+
+    // --- Validation tests ---
+
+    #[tokio::test]
+    async fn test_create_category_validation_empty_name() {
+        let pool = setup().await;
+        let svc = ExpenseService {
+            repo: ExpenseRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_category(&CreateExpenseCategoryRequest {
+                name: "".into(),
+                description: None,
+                limit_cents: None,
+                requires_receipt: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("name"),
+            "Expected name validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_category_validation_valid_succeeds() {
+        let pool = setup().await;
+        let svc = ExpenseService {
+            repo: ExpenseRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let cat = svc
+            .create_category(&CreateExpenseCategoryRequest {
+                name: "Travel".into(),
+                description: None,
+                limit_cents: None,
+                requires_receipt: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(cat.name, "Travel");
+    }
+
+    #[tokio::test]
+    async fn test_create_report_validation_empty_employee_id() {
+        let pool = setup().await;
+        let svc = ExpenseService {
+            repo: ExpenseRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_report(&CreateExpenseReportRequest {
+                employee_id: "".into(),
+                title: "Q3 Expenses".into(),
+                description: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("employee_id"),
+            "Expected employee_id validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_report_validation_empty_title() {
+        let pool = setup().await;
+        let svc = ExpenseService {
+            repo: ExpenseRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_report(&CreateExpenseReportRequest {
+                employee_id: "emp-1".into(),
+                title: "".into(),
+                description: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("title"),
+            "Expected title validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_report_validation_valid_succeeds() {
+        let pool = setup().await;
+        let svc = ExpenseService {
+            repo: ExpenseRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let report = svc
+            .create_report(&CreateExpenseReportRequest {
+                employee_id: "emp-1".into(),
+                title: "Q3 Expenses".into(),
+                description: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(report.employee_id, "emp-1");
+    }
+
+    #[tokio::test]
+    async fn test_create_expense_line_validation_empty_report_id() {
+        let pool = setup().await;
+        let svc = ExpenseService {
+            repo: ExpenseRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_line(&CreateExpenseLineRequest {
+                report_id: "".into(),
+                expense_date: "2025-06-01".into(),
+                category_id: "cat-1".into(),
+                amount_cents: 5000,
+                description: None,
+                receipt_url: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("report_id"),
+            "Expected report_id validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_expense_line_validation_empty_category_id() {
+        let pool = setup().await;
+        let svc = ExpenseService {
+            repo: ExpenseRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_line(&CreateExpenseLineRequest {
+                report_id: "rpt-1".into(),
+                expense_date: "2025-06-01".into(),
+                category_id: "".into(),
+                amount_cents: 5000,
+                description: None,
+                receipt_url: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("category_id"),
+            "Expected category_id validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_expense_line_validation_zero_amount() {
+        let pool = setup().await;
+        let svc = ExpenseService {
+            repo: ExpenseRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_line(&CreateExpenseLineRequest {
+                report_id: "rpt-1".into(),
+                expense_date: "2025-06-01".into(),
+                category_id: "cat-1".into(),
+                amount_cents: 0,
+                description: None,
+                receipt_url: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("amount"),
+            "Expected amount validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_per_diem_validation_empty_report_id() {
+        let pool = setup().await;
+        let svc = ExpenseService {
+            repo: ExpenseRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_per_diem(&CreatePerDiemRequest {
+                report_id: "".into(),
+                location: "NYC".into(),
+                start_date: "2025-07-01".into(),
+                end_date: "2025-07-03".into(),
+                daily_rate_cents: 15000,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("report_id"),
+            "Expected report_id validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_per_diem_validation_empty_location() {
+        let pool = setup().await;
+        let svc = ExpenseService {
+            repo: ExpenseRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_per_diem(&CreatePerDiemRequest {
+                report_id: "rpt-1".into(),
+                location: "".into(),
+                start_date: "2025-07-01".into(),
+                end_date: "2025-07-03".into(),
+                daily_rate_cents: 15000,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("location"),
+            "Expected location validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_per_diem_validation_negative_daily_rate() {
+        let pool = setup().await;
+        let svc = ExpenseService {
+            repo: ExpenseRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_per_diem(&CreatePerDiemRequest {
+                report_id: "rpt-1".into(),
+                location: "NYC".into(),
+                start_date: "2025-07-01".into(),
+                end_date: "2025-07-03".into(),
+                daily_rate_cents: -1,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("daily_rate"),
+            "Expected daily_rate validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_mileage_validation_empty_report_id() {
+        let pool = setup().await;
+        let svc = ExpenseService {
+            repo: ExpenseRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_mileage(&CreateMileageRequest {
+                report_id: "".into(),
+                origin: "Office".into(),
+                destination: "Client".into(),
+                distance_miles: 50.0,
+                rate_per_mile_cents: 67,
+                expense_date: "2025-07-10".into(),
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("report_id"),
+            "Expected report_id validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_mileage_validation_empty_origin() {
+        let pool = setup().await;
+        let svc = ExpenseService {
+            repo: ExpenseRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_mileage(&CreateMileageRequest {
+                report_id: "rpt-1".into(),
+                origin: "".into(),
+                destination: "Client".into(),
+                distance_miles: 50.0,
+                rate_per_mile_cents: 67,
+                expense_date: "2025-07-10".into(),
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("origin"),
+            "Expected origin validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_mileage_validation_empty_destination() {
+        let pool = setup().await;
+        let svc = ExpenseService {
+            repo: ExpenseRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_mileage(&CreateMileageRequest {
+                report_id: "rpt-1".into(),
+                origin: "Office".into(),
+                destination: "".into(),
+                distance_miles: 50.0,
+                rate_per_mile_cents: 67,
+                expense_date: "2025-07-10".into(),
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("destination"),
+            "Expected destination validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_mileage_validation_negative_distance() {
+        let pool = setup().await;
+        let svc = ExpenseService {
+            repo: ExpenseRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_mileage(&CreateMileageRequest {
+                report_id: "rpt-1".into(),
+                origin: "Office".into(),
+                destination: "Client".into(),
+                distance_miles: -10.0,
+                rate_per_mile_cents: 67,
+                expense_date: "2025-07-10".into(),
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("distance"),
+            "Expected distance validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_reject_report_validation_empty_reason() {
+        let pool = setup().await;
+        let svc = ExpenseService {
+            repo: ExpenseRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let report = svc
+            .create_report(&CreateExpenseReportRequest {
+                employee_id: "emp-1".into(),
+                title: "Test Report".into(),
+                description: None,
+            })
+            .await
+            .unwrap();
+
+        // Submit the report first so reject would otherwise succeed
+        svc.repo.submit_report(&report.id).await.unwrap();
+
+        let result = svc.reject_report(&report.id, "").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("rejected_reason"),
+            "Expected rejected_reason validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_mileage_validation_valid_succeeds() {
+        let pool = setup().await;
+        let svc = ExpenseService {
+            repo: ExpenseRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let report = svc
+            .create_report(&CreateExpenseReportRequest {
+                employee_id: "emp-1".into(),
+                title: "Trip".into(),
+                description: None,
+            })
+            .await
+            .unwrap();
+
+        let mileage = svc
+            .create_mileage(&CreateMileageRequest {
+                report_id: report.id.clone(),
+                origin: "Office".into(),
+                destination: "Client".into(),
+                distance_miles: 50.0,
+                rate_per_mile_cents: 67,
+                expense_date: "2025-07-10".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(mileage.report_id, report.id);
+    }
+
+    #[tokio::test]
+    async fn test_create_per_diem_validation_valid_succeeds() {
+        let pool = setup().await;
+        let svc = ExpenseService {
+            repo: ExpenseRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let report = svc
+            .create_report(&CreateExpenseReportRequest {
+                employee_id: "emp-1".into(),
+                title: "Conference".into(),
+                description: None,
+            })
+            .await
+            .unwrap();
+
+        let pd = svc
+            .create_per_diem(&CreatePerDiemRequest {
+                report_id: report.id.clone(),
+                location: "NYC".into(),
+                start_date: "2025-07-01".into(),
+                end_date: "2025-07-03".into(),
+                daily_rate_cents: 15000,
+            })
+            .await
+            .unwrap();
+        assert_eq!(pd.report_id, report.id);
     }
 }

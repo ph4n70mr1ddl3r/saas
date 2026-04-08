@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use validator::Validate;
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Account {
@@ -11,9 +12,11 @@ pub struct Account {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreateAccountRequest {
+    #[validate(length(min = 1))]
     pub code: String,
+    #[validate(length(min = 1))]
     pub name: String,
     pub account_type: String,
     pub parent_id: Option<String>,
@@ -29,10 +32,13 @@ pub struct Period {
     pub fiscal_year: i64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreatePeriodRequest {
+    #[validate(length(min = 1))]
     pub name: String,
+    #[validate(length(min = 1))]
     pub start_date: String,
+    #[validate(length(min = 1))]
     pub end_date: String,
     pub fiscal_year: i64,
 }
@@ -50,15 +56,17 @@ pub struct JournalEntry {
     pub reversal_of: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreateJournalEntryRequest {
     pub description: Option<String>,
+    #[validate(length(min = 1))]
     pub period_id: String,
     pub lines: Vec<CreateJournalLineRequest>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreateJournalLineRequest {
+    #[validate(length(min = 1))]
     pub account_id: String,
     pub debit_cents: i64,
     pub credit_cents: i64,
@@ -131,15 +139,18 @@ pub struct Budget {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreateBudgetRequest {
+    #[validate(length(min = 1))]
     pub name: String,
+    #[validate(length(min = 1))]
     pub period_id: String,
     pub lines: Vec<CreateBudgetLineRequest>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreateBudgetLineRequest {
+    #[validate(length(min = 1))]
     pub account_id: String,
     pub budgeted_cents: i64,
 }

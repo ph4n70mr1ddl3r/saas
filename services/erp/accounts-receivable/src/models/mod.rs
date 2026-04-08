@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use validator::Validate;
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Customer {
@@ -11,9 +12,11 @@ pub struct Customer {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreateCustomerRequest {
+    #[validate(length(min = 1))]
     pub name: String,
+    #[validate(email)]
     pub email: Option<String>,
     pub phone: Option<String>,
     pub address: Option<String>,
@@ -40,18 +43,22 @@ pub struct ArInvoice {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreateArInvoiceRequest {
+    #[validate(length(min = 1))]
     pub customer_id: String,
+    #[validate(length(min = 1))]
     pub invoice_number: String,
     pub invoice_date: String,
     pub due_date: String,
+    #[validate(nested)]
     pub lines: Vec<CreateArInvoiceLineRequest>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreateArInvoiceLineRequest {
     pub description: Option<String>,
+    #[validate(range(min = 1))]
     pub amount_cents: i64,
 }
 
@@ -74,10 +81,13 @@ pub struct Receipt {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreateReceiptRequest {
+    #[validate(length(min = 1))]
     pub invoice_id: String,
+    #[validate(length(min = 1))]
     pub customer_id: String,
+    #[validate(range(min = 1))]
     pub amount_cents: i64,
     pub receipt_date: String,
     pub method: Option<String>,
@@ -101,9 +111,11 @@ pub struct CreditMemo {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreateCreditMemoRequest {
+    #[validate(length(min = 1))]
     pub customer_id: String,
+    #[validate(range(min = 1))]
     pub amount_cents: i64,
     pub reason: Option<String>,
 }

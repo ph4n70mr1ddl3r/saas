@@ -3,6 +3,7 @@ use crate::repository::ArRepo;
 use saas_common::error::{AppError, AppResult};
 use saas_nats_bus::NatsBus;
 use sqlx::SqlitePool;
+use validator::Validate;
 
 #[derive(Clone)]
 pub struct ArService {
@@ -29,6 +30,9 @@ impl ArService {
     }
 
     pub async fn create_customer(&self, input: &CreateCustomerRequest) -> AppResult<Customer> {
+        input
+            .validate()
+            .map_err(|e| AppError::Validation(e.to_string()))?;
         // Check for duplicate customer name
         let existing = self.repo.list_customers().await?;
         if existing.iter().any(|c| c.name.to_lowercase() == input.name.to_lowercase()) {
@@ -65,6 +69,9 @@ impl ArService {
         &self,
         input: &CreateArInvoiceRequest,
     ) -> AppResult<ArInvoiceWithLines> {
+        input
+            .validate()
+            .map_err(|e| AppError::Validation(e.to_string()))?;
         if input.lines.is_empty() {
             return Err(AppError::Validation(
                 "At least one invoice line is required".into(),
@@ -169,6 +176,9 @@ impl ArService {
     }
 
     pub async fn create_receipt(&self, input: &CreateReceiptRequest) -> AppResult<Receipt> {
+        input
+            .validate()
+            .map_err(|e| AppError::Validation(e.to_string()))?;
         // Validate amount is positive
         if input.amount_cents <= 0 {
             return Err(AppError::Validation(
@@ -238,6 +248,9 @@ impl ArService {
         &self,
         input: &CreateCreditMemoRequest,
     ) -> AppResult<CreditMemo> {
+        input
+            .validate()
+            .map_err(|e| AppError::Validation(e.to_string()))?;
         if input.amount_cents <= 0 {
             return Err(AppError::Validation(
                 "Credit memo amount must be positive".into(),
@@ -1318,5 +1331,230 @@ mod tests {
 
         let result = svc.handle_period_closed("period-001", "Jan-2025", 2025).await;
         assert!(result.is_ok());
+    }
+
+    // --- Validation tests ---
+
+    async fn setup_svc() -> ArService {
+        let pool = setup().await;
+        ArService {
+            repo: ArRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_customer_validation_empty_name() {
+        let svc = setup_svc().await;
+        let result = svc
+            .create_customer(&CreateCustomerRequest {
+                name: "".into(),
+                email: None,
+                phone: None,
+                address: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("name"),
+            "Expected name validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_customer_validation_invalid_email() {
+        let svc = setup_svc().await;
+        let result = svc
+            .create_customer(&CreateCustomerRequest {
+                name: "Valid Name".into(),
+                email: Some("not-an-email".into()),
+                phone: None,
+                address: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("email"),
+            "Expected email validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_invoice_validation_empty_customer_id() {
+        let svc = setup_svc().await;
+        let result = svc
+            .create_invoice(&CreateArInvoiceRequest {
+                customer_id: "".into(),
+                invoice_number: "AR-001".into(),
+                invoice_date: "2025-01-01".into(),
+                due_date: "2025-02-01".into(),
+                lines: vec![CreateArInvoiceLineRequest {
+                    description: Some("Test".into()),
+                    amount_cents: 1000,
+                }],
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("customer_id"),
+            "Expected customer_id validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_invoice_validation_empty_invoice_number() {
+        let svc = setup_svc().await;
+        let result = svc
+            .create_invoice(&CreateArInvoiceRequest {
+                customer_id: "some-id".into(),
+                invoice_number: "".into(),
+                invoice_date: "2025-01-01".into(),
+                due_date: "2025-02-01".into(),
+                lines: vec![CreateArInvoiceLineRequest {
+                    description: Some("Test".into()),
+                    amount_cents: 1000,
+                }],
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("invoice_number"),
+            "Expected invoice_number validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_invoice_line_validation_zero_amount() {
+        let svc = setup_svc().await;
+        let result = svc
+            .create_invoice(&CreateArInvoiceRequest {
+                customer_id: "some-id".into(),
+                invoice_number: "AR-001".into(),
+                invoice_date: "2025-01-01".into(),
+                due_date: "2025-02-01".into(),
+                lines: vec![CreateArInvoiceLineRequest {
+                    description: Some("Test".into()),
+                    amount_cents: 0,
+                }],
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("amount_cents"),
+            "Expected amount_cents validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_receipt_validation_empty_invoice_id() {
+        let svc = setup_svc().await;
+        let result = svc
+            .create_receipt(&CreateReceiptRequest {
+                invoice_id: "".into(),
+                customer_id: "some-id".into(),
+                amount_cents: 1000,
+                receipt_date: "2025-02-01".into(),
+                method: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("invoice_id"),
+            "Expected invoice_id validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_receipt_validation_empty_customer_id() {
+        let svc = setup_svc().await;
+        let result = svc
+            .create_receipt(&CreateReceiptRequest {
+                invoice_id: "some-id".into(),
+                customer_id: "".into(),
+                amount_cents: 1000,
+                receipt_date: "2025-02-01".into(),
+                method: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("customer_id"),
+            "Expected customer_id validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_receipt_validation_zero_amount() {
+        let svc = setup_svc().await;
+        let result = svc
+            .create_receipt(&CreateReceiptRequest {
+                invoice_id: "some-id".into(),
+                customer_id: "some-id".into(),
+                amount_cents: 0,
+                receipt_date: "2025-02-01".into(),
+                method: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("amount_cents"),
+            "Expected amount_cents validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_credit_memo_validation_empty_customer_id() {
+        let svc = setup_svc().await;
+        let result = svc
+            .create_credit_memo(&CreateCreditMemoRequest {
+                customer_id: "".into(),
+                amount_cents: 1000,
+                reason: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("customer_id"),
+            "Expected customer_id validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_credit_memo_validation_zero_amount() {
+        let svc = setup_svc().await;
+        let result = svc
+            .create_credit_memo(&CreateCreditMemoRequest {
+                customer_id: "some-id".into(),
+                amount_cents: 0,
+                reason: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("amount_cents"),
+            "Expected amount_cents validation error, got: {}",
+            err
+        );
     }
 }

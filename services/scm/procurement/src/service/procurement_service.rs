@@ -456,6 +456,21 @@ impl ProcurementService {
 
         Ok(())
     }
+
+    /// Handle PO submitted notification for audit/logging.
+    /// Logs the PO submission for approval workflow tracking.
+    pub async fn handle_po_submitted(
+        &self,
+        po_id: &str,
+        supplier_id: &str,
+    ) -> anyhow::Result<()> {
+        tracing::info!(
+            "PO submitted for approval — po_id={}, supplier_id={}. Approval workflow tracking initiated.",
+            po_id,
+            supplier_id
+        );
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1255,5 +1270,24 @@ mod tests {
 
         let detail = svc.get_purchase_order(&po.id).await.unwrap();
         assert_eq!(detail.order.status, "received");
+    }
+
+    #[tokio::test]
+    async fn test_handle_po_submitted() {
+        let pool = setup().await;
+        let svc = ProcurementService {
+            pool: pool.clone(),
+            supplier_repo: SupplierRepo::new(pool.clone()),
+            po_repo: PurchaseOrderRepo::new(pool.clone()),
+            goods_receipt_repo: GoodsReceiptRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .handle_po_submitted("po-001", "supplier-001")
+            .await;
+        assert!(result.is_ok());
     }
 }

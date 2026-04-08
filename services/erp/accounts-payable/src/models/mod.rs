@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use validator::Validate;
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Vendor {
@@ -11,9 +12,11 @@ pub struct Vendor {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreateVendorRequest {
+    #[validate(length(min = 1))]
     pub name: String,
+    #[validate(email)]
     pub email: Option<String>,
     pub phone: Option<String>,
     pub address: Option<String>,
@@ -41,20 +44,25 @@ pub struct ApInvoice {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreateApInvoiceRequest {
+    #[validate(length(min = 1))]
     pub vendor_id: String,
+    #[validate(length(min = 1))]
     pub invoice_number: String,
     pub invoice_date: String,
     pub due_date: String,
+    #[validate(nested)]
     pub lines: Vec<CreateApInvoiceLineRequest>,
     pub tax_code: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreateApInvoiceLineRequest {
     pub description: Option<String>,
+    #[validate(length(min = 1))]
     pub account_code: String,
+    #[validate(range(min = 1))]
     pub amount_cents: i64,
 }
 
@@ -79,10 +87,13 @@ pub struct Payment {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreatePaymentRequest {
+    #[validate(length(min = 1))]
     pub invoice_id: String,
+    #[validate(length(min = 1))]
     pub vendor_id: String,
+    #[validate(range(min = 1))]
     pub amount_cents: i64,
     pub payment_date: String,
     pub method: Option<String>,
@@ -105,9 +116,11 @@ pub struct TaxCode {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreateTaxCodeRequest {
+    #[validate(length(min = 1))]
     pub code: String,
+    #[validate(range(min = 0.0, max = 1.0))]
     pub rate: f64,
     pub description: Option<String>,
 }

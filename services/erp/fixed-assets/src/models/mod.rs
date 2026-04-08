@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use validator::Validate;
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Asset {
@@ -16,15 +17,20 @@ pub struct Asset {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreateAssetRequest {
+    #[validate(length(min = 1))]
     pub name: String,
     pub description: Option<String>,
+    #[validate(length(min = 1))]
     pub asset_number: String,
+    #[validate(length(min = 1))]
     pub category: String,
     pub purchase_date: String,
+    #[validate(range(min = 1))]
     pub purchase_cost_cents: i64,
     pub salvage_value_cents: Option<i64>,
+    #[validate(range(min = 1))]
     pub useful_life_months: i64,
     pub depreciation_method: Option<String>,
 }
@@ -47,7 +53,8 @@ pub struct DepreciationSchedule {
     pub net_book_value_cents: i64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct RunDepreciationRequest {
+    #[validate(length(min = 1))]
     pub period: String,
 }
