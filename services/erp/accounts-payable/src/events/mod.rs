@@ -1,7 +1,7 @@
 use crate::routes::AppState;
 use saas_common::error::AppResult;
 use saas_nats_bus::NatsBus;
-use saas_proto::events::{PeriodClosed, PurchaseOrderReceived, StockReceived};
+use saas_proto::events::{PeriodClosed, PurchaseOrderReceived, StockReceived, YearEndClosed};
 
 pub async fn register(bus: &NatsBus, state: &AppState) -> AppResult<()> {
     // PO Received -> auto-create AP invoice (three-way match)
@@ -53,6 +53,21 @@ pub async fn register(bus: &NatsBus, state: &AppState) -> AppResult<()> {
             if let Err(e) = svc.handle_period_closed(&period_id, &name, fiscal_year).await {
                 tracing::error!(
                     "Failed to handle GL period closed for period {}: {}", period_id, e
+                );
+            }
+        }
+    }).await.ok();
+
+    // GL Year-End Closed -> block AP transactions for closed fiscal year
+    let svc = state.service.clone();
+    bus.subscribe::<YearEndClosed, _, _>("erp.gl.year_end.closed", move |envelope| {
+        let svc = svc.clone();
+        let fiscal_year = envelope.payload.fiscal_year;
+        let entry_id = envelope.payload.entry_id.clone();
+        async move {
+            if let Err(e) = svc.handle_year_end_closed(fiscal_year, &entry_id).await {
+                tracing::error!(
+                    "Failed to handle GL year-end close for fiscal year {}: {}", fiscal_year, e
                 );
             }
         }

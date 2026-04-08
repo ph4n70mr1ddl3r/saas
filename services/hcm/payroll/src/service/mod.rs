@@ -348,6 +348,38 @@ impl PayrollService {
         Ok(())
     }
 
+    /// When a timesheet is submitted, log for payroll tracking/notifications.
+    /// Payroll processing will wait for manager approval before using this timesheet.
+    pub async fn handle_timesheet_submitted(
+        &self,
+        timesheet_id: &str,
+        employee_id: &str,
+        week_start: &str,
+    ) -> AppResult<()> {
+        tracing::info!(
+            "Timesheet {} submitted for employee {} — week starting {}. Payroll processing will wait for manager approval.",
+            timesheet_id, employee_id, week_start
+        );
+        Ok(())
+    }
+
+    /// When a leave request is submitted, log for payroll awareness.
+    /// Leave may affect pay depending on type and duration.
+    pub async fn handle_leave_submitted(
+        &self,
+        request_id: &str,
+        employee_id: &str,
+        leave_type: &str,
+        start_date: &str,
+        end_date: &str,
+    ) -> AppResult<()> {
+        tracing::info!(
+            "Leave request {} submitted for employee {} — type: {}, dates: {} to {}. Leave may affect pay.",
+            request_id, employee_id, leave_type, start_date, end_date
+        );
+        Ok(())
+    }
+
     // --- Tax Brackets ---
 
     pub async fn list_tax_brackets(&self) -> AppResult<Vec<TaxBracket>> {
@@ -1261,5 +1293,37 @@ mod tests {
         let comps = repo.list_compensation_by_employee("emp-upd-001").await.unwrap();
         assert_eq!(comps.len(), 1);
         assert_eq!(comps[0].amount_cents, 75_000_00);
+    }
+
+    #[tokio::test]
+    async fn test_handle_timesheet_submitted() {
+        let repo = setup_repo().await;
+        let svc = PayrollService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .handle_timesheet_submitted("ts-001", "emp-ts-001", "2025-06-02")
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_leave_submitted() {
+        let repo = setup_repo().await;
+        let svc = PayrollService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .handle_leave_submitted("lr-001", "emp-lr-001", "vacation", "2025-07-01", "2025-07-05")
+            .await;
+        assert!(result.is_ok());
     }
 }

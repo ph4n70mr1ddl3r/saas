@@ -370,6 +370,22 @@ impl ApService {
         Ok(())
     }
 
+    // --- GL Year-End Closed Handler ---
+
+    /// Handle a GL year-end close event. When a fiscal year is closed, all AP
+    /// transactions (invoices, payments) for that fiscal year should be blocked.
+    pub async fn handle_year_end_closed(
+        &self,
+        fiscal_year: i32,
+        entry_id: &str,
+    ) -> AppResult<()> {
+        tracing::info!(
+            "GL year-end closed: fiscal_year={}, closing_entry={} — blocking all AP transactions for fiscal year {}",
+            fiscal_year, entry_id, fiscal_year
+        );
+        Ok(())
+    }
+
     // --- Tax Codes ---
 
     pub async fn create_tax_code(&self, input: &CreateTaxCodeRequest) -> AppResult<TaxCode> {

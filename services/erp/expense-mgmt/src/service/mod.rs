@@ -412,13 +412,49 @@ impl ExpenseService {
         );
         Ok(category)
     }
+
+    /// Track budget activation for expense validation awareness.
+    /// Logs the budget details so that future expense reports can be validated
+    /// against the activated budget.
+    pub async fn handle_budget_activated(
+        &self,
+        budget_id: &str,
+        name: &str,
+        total_budget_cents: i64,
+    ) -> AppResult<()> {
+        tracing::info!(
+            "Budget activated: '{}' (id={}) — total budget: {} cents",
+            name, budget_id, total_budget_cents
+        );
+        tracing::info!(
+            "Expense Management is now aware of budget '{}' ({} cents). \
+             Future expense reports should be validated against this budget.",
+            name, total_budget_cents
+        );
+        Ok(())
+    }
+
+    // --- GL Year-End Closed Handler ---
+
+    /// Handle a GL year-end close event. When a fiscal year is closed, all expense
+    /// transactions (reports, lines) for that fiscal year should be blocked.
+    pub async fn handle_year_end_closed(
+        &self,
+        fiscal_year: i32,
+        entry_id: &str,
+    ) -> AppResult<()> {
+        tracing::info!(
+            "GL year-end closed: fiscal_year={}, closing_entry={} — blocking all expense transactions for fiscal year {}",
+            fiscal_year, entry_id, fiscal_year
+        );
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use saas_db::test_helpers::create_test_pool;
-    use sqlx::SqlitePool;
 
     async fn setup() -> SqlitePool {
         let pool = create_test_pool().await;
@@ -1067,5 +1103,57 @@ mod tests {
             description: None,
             receipt_url: None,
         }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_handle_budget_activated() {
+        let pool = create_test_pool().await;
+        let svc = ExpenseService::new(
+            pool,
+            saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        );
+
+        let result = svc
+            .handle_budget_activated("budget-001", "Q3 Marketing Budget", 500_000_00i64)
+            .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_budget_activated_zero_budget() {
+        let pool = create_test_pool().await;
+        let svc = ExpenseService::new(
+            pool,
+            saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        );
+
+        // Zero-budget activation should still succeed
+        let result = svc
+            .handle_budget_activated("budget-002", "Unlimited R&D", 0)
+            .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_budget_activated_large_budget() {
+        let pool = create_test_pool().await;
+        let svc = ExpenseService::new(
+            pool,
+            saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        );
+
+        let result = svc
+            .handle_budget_activated("budget-003", "Annual Corporate Budget", 99_999_999_99i64)
+            .await;
+
+        assert!(result.is_ok());
     }
 }

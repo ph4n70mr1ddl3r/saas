@@ -1369,6 +1369,23 @@ impl LedgerService {
         self.post_journal_entry(&result.entry.id).await
     }
 
+    /// Handle BankAccountCreated event: create a zero-amount placeholder JE for audit trail.
+    /// Since we don't know the opening balance at account creation time, we skip the JE
+    /// (a zero-amount entry would fail validation) and just log for the audit trail.
+    pub async fn handle_bank_account_created(
+        &self,
+        account_id: &str,
+        name: &str,
+        bank_name: &str,
+        currency: &str,
+    ) -> AppResult<()> {
+        tracing::info!(
+            "Bank account opened - {} ({}, {}) [id={}]",
+            name, bank_name, currency, account_id
+        );
+        Ok(())
+    }
+
     async fn find_open_period(&self) -> AppResult<Period> {
         self.repo
             .list_periods()

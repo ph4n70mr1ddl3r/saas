@@ -10,6 +10,8 @@ use saas_common::response::ApiListResponse;
 use saas_nats_bus::NatsBus;
 use saas_proto::events::ApplicationStatusChanged;
 use saas_proto::events::UserCreated;
+use saas_proto::events::UserUpdated;
+use saas_proto::events::UserDeactivated;
 use sqlx::SqlitePool;
 use validator::Validate;
 
@@ -314,6 +316,81 @@ impl EmployeeService {
             .await?;
         Ok(dept.id)
     }
+
+    /// Handle IAM user updated event — sync email changes to employee record.
+    pub async fn handle_user_updated(&self, user_id: &str, username: &str, email: &str) {
+        tracing::info!(
+            "IAM user updated event: user_id={}, username={}, email={}",
+            user_id, username, email
+        );
+
+        let pag = PaginationParams { page: Some(1), per_page: Some(1000) };
+        let filters = EmployeeFilters { department_id: None, status: None };
+        let result = match self.emp_repo.list(&pag, &filters).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("Failed to list employees for IAM user update sync: {}", e);
+                return;
+            }
+        };
+
+        let emp_number = format!("EMP-IAM-{}", &user_id[..8.min(user_id.len())]);
+        if let Some(emp) = result.0.iter().find(|e| e.employee_number == emp_number) {
+            if emp.email != email {
+                tracing::info!(
+                    "Syncing email update for employee {} (IAM user {}): {} -> {}",
+                    emp.id, user_id, emp.email, email
+                );
+                let update = UpdateEmployee {
+                    first_name: None,
+                    last_name: None,
+                    email: Some(email.to_string()),
+                    phone: None,
+                    department_id: None,
+                    reports_to: None,
+                    job_title: None,
+                    status: None,
+                };
+                if let Err(e) = self.update_employee(&emp.id, update).await {
+                    tracing::error!(
+                        "Failed to sync email for employee {} from IAM update: {}", emp.id, e
+                    );
+                }
+            }
+        } else {
+            tracing::warn!(
+                "No employee found matching IAM user {} (looked for employee_number={})",
+                user_id, emp_number
+            );
+        }
+    }
+
+    /// Handle IAM user deactivated event — log for HR awareness.
+    /// Auto-termination is an HR decision, not automatic.
+    pub async fn handle_user_deactivated(&self, user_id: &str, username: &str) {
+        tracing::info!(
+            "IAM user deactivated event: user_id={}, username={} — employee termination may be required",
+            user_id, username
+        );
+
+        let pag = PaginationParams { page: Some(1), per_page: Some(1000) };
+        let filters = EmployeeFilters { department_id: None, status: None };
+        let result = match self.emp_repo.list(&pag, &filters).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("Failed to list employees for IAM user deactivation check: {}", e);
+                return;
+            }
+        };
+
+        let emp_number = format!("EMP-IAM-{}", &user_id[..8.min(user_id.len())]);
+        if let Some(emp) = result.0.iter().find(|e| e.employee_number == emp_number) {
+            tracing::warn!(
+                "Employee {} ({}) corresponds to deactivated IAM user {} — HR should review for termination",
+                emp.id, emp.email, user_id
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -414,5 +491,55 @@ mod tests {
 
         let jscount = employees.data.iter().filter(|e| e.email == "jsmith@example.com").count();
         assert_eq!(jscount, 1);
+    }
+
+    #[tokio::test]
+    async fn test_handle_user_updated_syncs_email() {
+        let svc = setup().await;
+
+        // Auto-create employee from IAM user
+        svc.handle_user_created("user-upd-001", "jane", "jane@old.com").await;
+
+        // Verify initial email
+        let employees = svc.list_employees(
+            &PaginationParams { page: Some(1), per_page: Some(50) },
+            &EmployeeFilters { department_id: None, status: None },
+        ).await.unwrap();
+        let emp = &employees.data[0];
+        assert_eq!(emp.email, "jane@old.com");
+        let emp_id = emp.id.clone();
+
+        // Simulate IAM user update with new email
+        svc.handle_user_updated("user-upd-001", "jane", "jane@new.com").await;
+
+        // Verify email was synced
+        let updated = svc.get_employee(&emp_id).await.unwrap();
+        assert_eq!(updated.email, "jane@new.com");
+    }
+
+    #[tokio::test]
+    async fn test_handle_user_updated_no_matching_employee() {
+        let svc = setup().await;
+
+        // Should not panic when no employee exists
+        svc.handle_user_updated("user-nomatch", "nobody", "nobody@example.com").await;
+    }
+
+    #[tokio::test]
+    async fn test_handle_user_deactivated_flags_employee() {
+        let svc = setup().await;
+
+        // Auto-create employee from IAM user
+        svc.handle_user_created("user-deact-01", "bob", "bob@example.com").await;
+
+        // Should not panic — just logs a warning
+        svc.handle_user_deactivated("user-deact-01", "bob").await;
+
+        // Employee should still exist (not auto-terminated)
+        let employees = svc.list_employees(
+            &PaginationParams { page: Some(1), per_page: Some(50) },
+            &EmployeeFilters { department_id: None, status: None },
+        ).await.unwrap();
+        assert_eq!(employees.data.len(), 1);
     }
 }

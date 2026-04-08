@@ -1,6 +1,6 @@
 use crate::service::PayrollService;
 use saas_nats_bus::NatsBus;
-use saas_proto::events::{EmployeeCreated, EmployeeTerminated, EmployeeUpdated, EmployeeEnrolled, EnrollmentCancelled, TimesheetApproved};
+use saas_proto::events::{EmployeeCreated, EmployeeTerminated, EmployeeUpdated, EmployeeEnrolled, EnrollmentCancelled, TimesheetApproved, TimesheetSubmitted, LeaveRequestSubmitted};
 
 pub async fn subscribe(bus: &NatsBus, service: PayrollService) -> anyhow::Result<()> {
     let svc1 = service.clone();
@@ -101,6 +101,44 @@ pub async fn subscribe(bus: &NatsBus, service: PayrollService) -> anyhow::Result
             );
             if let Err(e) = svc6.handle_benefit_enrollment_cancelled(&enrollment_id, &employee_id, &plan_id).await {
                 tracing::error!("Failed to cancel benefit deduction for employee {} plan {}: {}", employee_id, plan_id, e);
+            }
+        }
+    })
+    .await?;
+
+    let svc7 = service.clone();
+    bus.subscribe::<TimesheetSubmitted, _, _>("hcm.timelabor.timesheet.submitted", move |envelope| {
+        let svc7 = svc7.clone();
+        let timesheet_id = envelope.payload.timesheet_id.clone();
+        let employee_id = envelope.payload.employee_id.clone();
+        let week_start = envelope.payload.week_start.clone();
+        async move {
+            tracing::info!(
+                "Received timesheet.submitted for employee {} — week starting {}",
+                employee_id, week_start
+            );
+            if let Err(e) = svc7.handle_timesheet_submitted(&timesheet_id, &employee_id, &week_start).await {
+                tracing::error!("Failed to handle timesheet submitted for {}: {}", employee_id, e);
+            }
+        }
+    })
+    .await?;
+
+    let svc8 = service.clone();
+    bus.subscribe::<LeaveRequestSubmitted, _, _>("hcm.timelabor.leave.submitted", move |envelope| {
+        let svc8 = svc8.clone();
+        let request_id = envelope.payload.request_id.clone();
+        let employee_id = envelope.payload.employee_id.clone();
+        let leave_type = envelope.payload.leave_type.clone();
+        let start_date = envelope.payload.start_date.clone();
+        let end_date = envelope.payload.end_date.clone();
+        async move {
+            tracing::info!(
+                "Received leave.submitted for employee {} — type: {}, dates: {} to {}",
+                employee_id, leave_type, start_date, end_date
+            );
+            if let Err(e) = svc8.handle_leave_submitted(&request_id, &employee_id, &leave_type, &start_date, &end_date).await {
+                tracing::error!("Failed to handle leave submitted for {}: {}", employee_id, e);
             }
         }
     })

@@ -1,7 +1,7 @@
 use crate::routes::AppState;
 use saas_common::error::AppResult;
 use saas_nats_bus::NatsBus;
-use saas_proto::events::{EmployeeCreated, BenefitPlanCreated};
+use saas_proto::events::{EmployeeCreated, BenefitPlanCreated, BudgetActivated, YearEndClosed};
 
 pub async fn register(bus: &NatsBus, state: &AppState) -> AppResult<()> {
     // Employee Created -> auto-create onboarding expense report
@@ -41,6 +41,42 @@ pub async fn register(bus: &NatsBus, state: &AppState) -> AppResult<()> {
                 tracing::error!(
                     "Failed to create expense category for benefit plan {}: {}",
                     plan_id, e
+                );
+            }
+        }
+    }).await.ok();
+
+    // Budget Activated -> track budget for expense validation awareness
+    let svc = state.service.clone();
+    bus.subscribe::<BudgetActivated, _, _>("erp.gl.budget.activated", move |envelope| {
+        let svc = svc.clone();
+        let budget_id = envelope.payload.budget_id.clone();
+        let name = envelope.payload.name.clone();
+        let total_budget_cents = envelope.payload.total_budget_cents;
+        async move {
+            tracing::info!(
+                "Budget activated event received: '{}' (id={})",
+                name, budget_id
+            );
+            if let Err(e) = svc.handle_budget_activated(&budget_id, &name, total_budget_cents).await {
+                tracing::error!(
+                    "Failed to process budget activation for budget {}: {}",
+                    budget_id, e
+                );
+            }
+        }
+    }).await.ok();
+
+    // GL Year-End Closed -> block expense transactions for closed fiscal year
+    let svc = state.service.clone();
+    bus.subscribe::<YearEndClosed, _, _>("erp.gl.year_end.closed", move |envelope| {
+        let svc = svc.clone();
+        let fiscal_year = envelope.payload.fiscal_year;
+        let entry_id = envelope.payload.entry_id.clone();
+        async move {
+            if let Err(e) = svc.handle_year_end_closed(fiscal_year, &entry_id).await {
+                tracing::error!(
+                    "Failed to handle GL year-end close for fiscal year {}: {}", fiscal_year, e
                 );
             }
         }

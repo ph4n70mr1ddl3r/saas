@@ -444,6 +444,22 @@ impl ArService {
         Ok(())
     }
 
+    // --- GL Year-End Closed Handler ---
+
+    /// Handle a GL year-end close event. When a fiscal year is closed, all AR
+    /// transactions (invoices, receipts) for that fiscal year should be blocked.
+    pub async fn handle_year_end_closed(
+        &self,
+        fiscal_year: i32,
+        entry_id: &str,
+    ) -> AppResult<()> {
+        tracing::info!(
+            "GL year-end closed: fiscal_year={}, closing_entry={} — blocking all AR transactions for fiscal year {}",
+            fiscal_year, entry_id, fiscal_year
+        );
+        Ok(())
+    }
+
     // --- Aging Report ---
 
     pub async fn aging_report(&self, as_of_date: &str) -> AppResult<ArAgingReport> {

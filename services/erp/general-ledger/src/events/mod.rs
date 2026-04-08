@@ -3,7 +3,7 @@ use saas_common::error::AppResult;
 use saas_nats_bus::NatsBus;
 use saas_proto::events::{
     ApInvoiceCancelled, ApPaymentCreated, ArInvoiceApproved, ArInvoiceCancelled, ArReceiptCreated, AssetCreated, AssetDisposed,
-    CycleCountPosted, DepreciationRunCompleted, ExpenseReportApproved, PayRunCompleted,
+    BankAccountCreated, CycleCountPosted, DepreciationRunCompleted, ExpenseReportApproved, PayRunCompleted,
     ReconciliationCompleted, ReturnProcessed, TransferCompleted, VendorInvoiceApproved,
     CustomerInvoiceCreated,
 };
@@ -251,6 +251,22 @@ pub async fn register(bus: &NatsBus, service: &LedgerService) -> AppResult<()> {
             tracing::info!("Return processed: {} (order: {}, {} cents)", return_id, order_id, refund_amount_cents);
             if let Err(e) = svc.handle_return_processed(&return_id, &order_id, refund_amount_cents).await {
                 tracing::error!("Failed to create auto-JE for return {}: {}", return_id, e);
+            }
+        }
+    }).await.ok();
+
+    // Bank Account Created -> audit trail log for opening balance
+    let svc = service.clone();
+    bus.subscribe::<BankAccountCreated, _, _>("erp.cash.account.created", move |envelope| {
+        let svc = svc.clone();
+        let account_id = envelope.payload.account_id.clone();
+        let name = envelope.payload.name.clone();
+        let bank_name = envelope.payload.bank_name.clone();
+        let currency = envelope.payload.currency.clone();
+        async move {
+            tracing::info!("Bank account created: {} ({}, {})", name, bank_name, currency);
+            if let Err(e) = svc.handle_bank_account_created(&account_id, &name, &bank_name, &currency).await {
+                tracing::error!("Failed to handle bank account created event for {}: {}", account_id, e);
             }
         }
     }).await.ok();

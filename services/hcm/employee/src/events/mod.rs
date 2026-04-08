@@ -1,7 +1,7 @@
 // Event subscriber registration - subscribes to cross-service events
 use crate::service::EmployeeService;
 use saas_nats_bus::NatsBus;
-use saas_proto::events::{ApplicationStatusChanged, UserCreated};
+use saas_proto::events::{ApplicationStatusChanged, UserCreated, UserUpdated, UserDeactivated};
 
 pub async fn register(bus: &NatsBus, service: EmployeeService) -> anyhow::Result<()> {
     let svc1 = service.clone();
@@ -45,6 +45,45 @@ pub async fn register(bus: &NatsBus, service: EmployeeService) -> anyhow::Result
                     user_id
                 );
                 svc2.handle_user_created(&user_id, &username, &email).await;
+            }
+        },
+    )
+    .await?;
+
+    // IAM user updated -> sync employee email
+    let svc3 = service.clone();
+    bus.subscribe::<UserUpdated, _, _>(
+        "iam.user.updated",
+        move |envelope| {
+            let svc3 = svc3.clone();
+            let user_id = envelope.payload.user_id.clone();
+            let username = envelope.payload.username.clone();
+            let email = envelope.payload.email.clone();
+            async move {
+                tracing::info!(
+                    "Received iam.user.updated for user_id={} — syncing employee",
+                    user_id
+                );
+                svc3.handle_user_updated(&user_id, &username, &email).await;
+            }
+        },
+    )
+    .await?;
+
+    // IAM user deactivated -> flag employee for HR review
+    let svc4 = service.clone();
+    bus.subscribe::<UserDeactivated, _, _>(
+        "iam.user.deactivated",
+        move |envelope| {
+            let svc4 = svc4.clone();
+            let user_id = envelope.payload.user_id.clone();
+            let username = envelope.payload.username.clone();
+            async move {
+                tracing::info!(
+                    "Received iam.user.deactivated for user_id={} — flagging employee",
+                    user_id
+                );
+                svc4.handle_user_deactivated(&user_id, &username).await;
             }
         },
     )
