@@ -39,6 +39,11 @@ impl ManufacturingService {
         input
             .validate()
             .map_err(|e| saas_common::error::AppError::Validation(e.to_string()))?;
+        if input.quantity <= 0 {
+            return Err(saas_common::error::AppError::Validation(
+                "Work order quantity must be positive".into(),
+            ));
+        }
         self.work_order_repo.create(&input).await
     }
 

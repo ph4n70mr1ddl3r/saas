@@ -915,28 +915,10 @@ impl LedgerService {
         difference_cents: i64,
     ) -> AppResult<JournalEntryWithLines> {
         if difference_cents == 0 {
-            // No adjustment needed
-            let period = self.find_open_period().await?;
-            let input = CreateJournalEntryRequest {
-                description: Some(format!("Reconciliation {} - no adjustment needed", reconciliation_id)),
-                period_id: period.id,
-                lines: vec![
-                    CreateJournalLineRequest {
-                        account_id: self.repo.find_account_by_type_async("asset").await?.id.clone(),
-                        debit_cents: 0,
-                        credit_cents: 0,
-                        description: Some("Zero adjustment".into()),
-                    },
-                    CreateJournalLineRequest {
-                        account_id: self.repo.find_account_by_type_async("asset").await?.id.clone(),
-                        debit_cents: 0,
-                        credit_cents: 0,
-                        description: Some("Zero adjustment".into()),
-                    },
-                ],
-            };
-            let result = self.create_journal_entry(&input, "system").await?;
-            return self.post_journal_entry(&result.entry.id).await;
+            // No GL adjustment needed for balanced reconciliation
+            return Err(AppError::Validation(
+                format!("Reconciliation {} is balanced - no GL adjustment needed", reconciliation_id)
+            ));
         }
 
         let period = self.find_open_period().await?;

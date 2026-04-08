@@ -78,6 +78,18 @@ impl ProcurementService {
         input
             .validate()
             .map_err(|e| saas_common::error::AppError::Validation(e.to_string()))?;
+        for line in &input.lines {
+            if line.quantity <= 0 {
+                return Err(AppError::Validation(
+                    "PO line quantities must be positive".into(),
+                ));
+            }
+            if line.unit_price_cents < 0 {
+                return Err(AppError::Validation(
+                    "PO line unit prices must be non-negative".into(),
+                ));
+            }
+        }
         self.po_repo.create(&input).await
     }
 

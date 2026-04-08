@@ -44,6 +44,13 @@ impl OrderManagementService {
         input
             .validate()
             .map_err(|e| saas_common::error::AppError::Validation(e.to_string()))?;
+        for line in &input.lines {
+            if line.unit_price_cents < 0 {
+                return Err(saas_common::error::AppError::Validation(
+                    "Sales order line unit prices must be non-negative".into(),
+                ));
+            }
+        }
         self.order_repo.create(&input).await
     }
 
@@ -276,7 +283,27 @@ impl OrderManagementService {
                 "Only requested returns can be approved".into(),
             ));
         }
-        self.return_repo.update_status(id, "approved").await
+        let approved = self.return_repo.update_status(id, "approved").await?;
+        if let Err(e) = self
+            .bus
+            .publish(
+                "scm.orders.return.approved",
+                saas_proto::events::ReturnApproved {
+                    return_id: approved.id.clone(),
+                    order_id: approved.order_id.clone(),
+                    item_id: approved.order_line_id.clone(),
+                    quantity: approved.quantity,
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "scm.orders.return.approved",
+                e
+            );
+        }
+        Ok(approved)
     }
 
     pub async fn reject_return(&self, id: &str) -> AppResult<ReturnResponse> {
@@ -302,7 +329,26 @@ impl OrderManagementService {
             ));
         }
         self.return_repo.update_refund_amount(id, refund_amount_cents).await?;
-        self.return_repo.update_status(id, "processed").await
+        let processed = self.return_repo.update_status(id, "processed").await?;
+        if let Err(e) = self
+            .bus
+            .publish(
+                "scm.orders.return.processed",
+                saas_proto::events::ReturnProcessed {
+                    return_id: processed.id.clone(),
+                    order_id: processed.order_id.clone(),
+                    refund_amount_cents,
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "scm.orders.return.processed",
+                e
+            );
+        }
+        Ok(processed)
     }
 }
 

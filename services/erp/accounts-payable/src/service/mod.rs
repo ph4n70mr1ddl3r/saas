@@ -191,6 +191,21 @@ impl ApService {
             ));
         }
 
+        // Check for overpayment at service level
+        let existing_payments = self.repo.list_payments().await?;
+        let total_paid: i64 = existing_payments
+            .iter()
+            .filter(|p| p.invoice_id == input.invoice_id)
+            .map(|p| p.amount_cents)
+            .sum();
+        let remaining = invoice.total_cents - total_paid;
+        if input.amount_cents > remaining {
+            return Err(AppError::Validation(format!(
+                "Payment amount ({}) exceeds remaining invoice balance ({}). Invoice total: {}, Already paid: {}",
+                input.amount_cents, remaining, invoice.total_cents, total_paid
+            )));
+        }
+
         let payment = self.repo.create_payment(input).await?;
 
         // Publish AP payment created event

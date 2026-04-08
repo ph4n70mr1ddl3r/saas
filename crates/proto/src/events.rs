@@ -423,6 +423,21 @@ pub struct ReturnCreated {
     pub quantity: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReturnApproved {
+    pub return_id: String,
+    pub order_id: String,
+    pub item_id: String,
+    pub quantity: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReturnProcessed {
+    pub return_id: String,
+    pub order_id: String,
+    pub refund_amount_cents: i64,
+}
+
 // IAM Role Events
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoleDeleted {
