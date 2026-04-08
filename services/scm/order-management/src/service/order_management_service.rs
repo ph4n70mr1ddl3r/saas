@@ -366,16 +366,44 @@ impl OrderManagementService {
             .validate()
             .map_err(|e| saas_common::error::AppError::Validation(e.to_string()))?;
 
-        // Validate return quantity doesn't exceed ordered quantity
+        // Check order status — only allow returns if status is at least "confirmed"
+        let order = self.order_repo.get_by_id(&input.order_id).await?;
+        if order.status == "draft" || order.status == "cancelled" {
+            return Err(saas_common::error::AppError::Validation(format!(
+                "Cannot create return for order in '{}' status. Order must be at least confirmed.",
+                order.status
+            )));
+        }
+
+        // Validate order line belongs to this order
         let order_lines = self.order_repo.get_lines(&input.order_id).await?;
-        let order_line = order_lines.iter().find(|ol| ol.id == input.order_line_id);
-        if let Some(ol) = order_line {
-            if input.quantity > ol.quantity {
-                return Err(saas_common::error::AppError::Validation(format!(
-                    "Return quantity ({}) exceeds ordered quantity ({})",
-                    input.quantity, ol.quantity
-                )));
-            }
+        let order_line = order_lines
+            .iter()
+            .find(|ol| ol.id == input.order_line_id)
+            .ok_or_else(|| {
+                saas_common::error::AppError::Validation(
+                    "Order line does not belong to this order".into(),
+                )
+            })?;
+
+        // Validate return quantity doesn't exceed ordered quantity
+        if input.quantity > order_line.quantity {
+            return Err(saas_common::error::AppError::Validation(format!(
+                "Return quantity ({}) exceeds ordered quantity ({})",
+                input.quantity, order_line.quantity
+            )));
+        }
+
+        // Check cumulative return quantity
+        let existing_returns = self.return_repo.list_by_order_line(&input.order_line_id).await?;
+        let existing_returned_qty: i64 = existing_returns.iter().map(|r| r.quantity).sum();
+        if existing_returned_qty + input.quantity > order_line.quantity {
+            return Err(saas_common::error::AppError::Validation(format!(
+                "Cumulative return quantity ({}) would exceed ordered quantity ({}). Already returned: {}",
+                existing_returned_qty + input.quantity,
+                order_line.quantity,
+                existing_returned_qty
+            )));
         }
 
         let ret = self.return_repo.create(&input).await?;
@@ -438,7 +466,13 @@ impl OrderManagementService {
                 "Only requested returns can be rejected".into(),
             ));
         }
-        self.return_repo.update_status(id, "rejected").await
+        let rejected = self.return_repo.update_status(id, "rejected").await?;
+        // No ReturnRejected event type exists in saas_proto; log the rejection for observability
+        tracing::info!(
+            "Return '{}' for order '{}' rejected (order_line_id: {}, quantity: {})",
+            rejected.id, rejected.order_id, rejected.order_line_id, rejected.quantity
+        );
+        Ok(rejected)
     }
 
     pub async fn process_return(&self, id: &str, refund_amount_cents: i64) -> AppResult<ReturnResponse> {
@@ -856,6 +890,7 @@ mod tests {
                 unit_price_cents: 5000,
             }],
         }).await.unwrap();
+        svc.confirm_sales_order(&order.id).await.unwrap();
         let lines = svc.order_repo.get_lines(&order.id).await.unwrap();
 
         let ret = svc.create_return(CreateReturn {
@@ -899,6 +934,7 @@ mod tests {
                 unit_price_cents: 1000,
             }],
         }).await.unwrap();
+        svc.confirm_sales_order(&order.id).await.unwrap();
         let lines = svc.order_repo.get_lines(&order.id).await.unwrap();
 
         let ret = svc.create_return(CreateReturn {
@@ -935,6 +971,7 @@ mod tests {
                 unit_price_cents: 500,
             }],
         }).await.unwrap();
+        svc.confirm_sales_order(&order.id).await.unwrap();
         let lines = svc.order_repo.get_lines(&order.id).await.unwrap();
 
         let ret = svc.create_return(CreateReturn {
@@ -975,6 +1012,7 @@ mod tests {
                 unit_price_cents: 100,
             }],
         }).await.unwrap();
+        svc.confirm_sales_order(&order.id).await.unwrap();
         let lines = svc.order_repo.get_lines(&order.id).await.unwrap();
 
         let ret = svc.create_return(CreateReturn {
@@ -1012,6 +1050,7 @@ mod tests {
                 unit_price_cents: 100,
             }],
         }).await.unwrap();
+        svc.confirm_sales_order(&order.id).await.unwrap();
         let lines = svc.order_repo.get_lines(&order.id).await.unwrap();
 
         let ret = svc.create_return(CreateReturn {
@@ -1527,5 +1566,168 @@ mod tests {
         svc.order_repo.update_status(&order.id, "fulfilled").await.unwrap();
         let fulfilled = svc.order_repo.get_by_id(&order.id).await.unwrap();
         assert_eq!(fulfilled.status, "fulfilled");
+    }
+
+    #[tokio::test]
+    async fn test_return_with_invalid_order_line_id() {
+        let pool = setup().await;
+        let svc = OrderManagementService {
+            order_repo: SalesOrderRepo::new(pool.clone()),
+            fulfillment_repo: FulfillmentRepo::new(pool.clone()),
+            return_repo: ReturnRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Create and confirm an order
+        let order = svc.order_repo.create(&CreateSalesOrder {
+            customer_id: "CUST-INVLINE".into(),
+            order_date: "2026-04-01".into(),
+            shipping_address: None,
+            notes: None,
+            lines: vec![CreateSalesOrderLine {
+                item_id: "ITEM-INVLINE".into(),
+                quantity: 5,
+                unit_price_cents: 1000,
+            }],
+        }).await.unwrap();
+        svc.confirm_sales_order(&order.id).await.unwrap();
+
+        // Try to create a return with a completely made-up order_line_id
+        let result = svc.create_return(CreateReturn {
+            order_id: order.id,
+            order_line_id: "nonexistent-line-id-99999".into(),
+            quantity: 1,
+            reason: None,
+        }).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Order line does not belong to this order"));
+    }
+
+    #[tokio::test]
+    async fn test_cumulative_return_exceeds_ordered() {
+        let pool = setup().await;
+        let svc = OrderManagementService {
+            order_repo: SalesOrderRepo::new(pool.clone()),
+            fulfillment_repo: FulfillmentRepo::new(pool.clone()),
+            return_repo: ReturnRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Create and confirm an order with qty=5
+        let order = svc.order_repo.create(&CreateSalesOrder {
+            customer_id: "CUST-CUMUL".into(),
+            order_date: "2026-04-01".into(),
+            shipping_address: None,
+            notes: None,
+            lines: vec![CreateSalesOrderLine {
+                item_id: "ITEM-CUMUL".into(),
+                quantity: 5,
+                unit_price_cents: 500,
+            }],
+        }).await.unwrap();
+        svc.confirm_sales_order(&order.id).await.unwrap();
+        let lines = svc.order_repo.get_lines(&order.id).await.unwrap();
+
+        // First return: qty=3 — valid
+        let ret1 = svc.create_return(CreateReturn {
+            order_id: order.id.clone(),
+            order_line_id: lines[0].id.clone(),
+            quantity: 3,
+            reason: Some("Defective".into()),
+        }).await.unwrap();
+        assert_eq!(ret1.quantity, 3);
+
+        // Second return: qty=3 — should fail because 3+3=6 > 5 ordered
+        let result = svc.create_return(CreateReturn {
+            order_id: order.id,
+            order_line_id: lines[0].id.clone(),
+            quantity: 3,
+            reason: Some("More defective".into()),
+        }).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Cumulative return quantity"));
+    }
+
+    #[tokio::test]
+    async fn test_return_on_draft_order_blocked() {
+        let pool = setup().await;
+        let svc = OrderManagementService {
+            order_repo: SalesOrderRepo::new(pool.clone()),
+            fulfillment_repo: FulfillmentRepo::new(pool.clone()),
+            return_repo: ReturnRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Create order — stays in "draft" status
+        let order = svc.order_repo.create(&CreateSalesOrder {
+            customer_id: "CUST-DRAFTRET".into(),
+            order_date: "2026-04-01".into(),
+            shipping_address: None,
+            notes: None,
+            lines: vec![CreateSalesOrderLine {
+                item_id: "ITEM-DRAFTRET".into(),
+                quantity: 5,
+                unit_price_cents: 1000,
+            }],
+        }).await.unwrap();
+        assert_eq!(order.status, "draft");
+
+        let lines = svc.order_repo.get_lines(&order.id).await.unwrap();
+
+        // Try to create a return on a draft order — should fail
+        let result = svc.create_return(CreateReturn {
+            order_id: order.id,
+            order_line_id: lines[0].id.clone(),
+            quantity: 1,
+            reason: Some("Changed mind".into()),
+        }).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Cannot create return for order in 'draft' status"));
+    }
+
+    #[tokio::test]
+    async fn test_return_on_cancelled_order_blocked() {
+        let pool = setup().await;
+        let svc = OrderManagementService {
+            order_repo: SalesOrderRepo::new(pool.clone()),
+            fulfillment_repo: FulfillmentRepo::new(pool.clone()),
+            return_repo: ReturnRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let order = svc.order_repo.create(&CreateSalesOrder {
+            customer_id: "CUST-CANCEL".into(),
+            order_date: "2025-11-01".into(),
+            shipping_address: None,
+            notes: None,
+            lines: vec![CreateSalesOrderLine {
+                item_id: "ITEM-CANCEL".into(),
+                quantity: 2,
+                unit_price_cents: 100,
+            }],
+        }).await.unwrap();
+        svc.order_repo.update_status(&order.id, "cancelled").await.unwrap();
+        let lines = svc.order_repo.get_lines(&order.id).await.unwrap();
+
+        let result = svc.create_return(CreateReturn {
+            order_id: order.id,
+            order_line_id: lines[0].id.clone(),
+            quantity: 1,
+            reason: None,
+        }).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("cancelled"), "Expected cancelled status error, got: {}", err);
     }
 }

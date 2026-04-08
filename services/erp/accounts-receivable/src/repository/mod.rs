@@ -308,6 +308,41 @@ impl ArRepo {
         self.get_credit_memo(memo_id).await
     }
 
+    // --- Period Close Enforcement ---
+
+    pub async fn close_period(&self, period_name: &str, fiscal_year: i32, period_start: &str, period_end: &str) -> AppResult<()> {
+        let id = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT OR IGNORE INTO closed_periods (id, period_name, fiscal_year, period_start, period_end) VALUES (?, ?, ?, ?, ?)")
+            .bind(&id).bind(period_name).bind(fiscal_year).bind(period_start).bind(period_end)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn close_fiscal_year(&self, fiscal_year: i32) -> AppResult<()> {
+        let id = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT OR IGNORE INTO closed_fiscal_years (id, fiscal_year) VALUES (?, ?)")
+            .bind(&id).bind(fiscal_year)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn is_date_in_closed_period(&self, date: &str) -> AppResult<bool> {
+        let closed: bool = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM closed_periods WHERE ? >= period_start AND ? <= period_end"
+        )
+        .bind(date).bind(date)
+        .fetch_one(&self.pool).await? > 0;
+        if closed { return Ok(true); }
+        // Also check fiscal year
+        let year: i32 = date[..4].parse().unwrap_or(0);
+        let year_closed: bool = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM closed_fiscal_years WHERE fiscal_year = ?"
+        )
+        .bind(year)
+        .fetch_one(&self.pool).await? > 0;
+        Ok(year_closed)
+    }
+
     // --- Aging Report ---
 
     pub async fn aging_report(&self, as_of_date: &str) -> AppResult<Vec<ArAgingRow>> {

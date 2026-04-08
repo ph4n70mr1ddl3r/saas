@@ -5,6 +5,25 @@ use saas_nats_bus::NatsBus;
 use sqlx::SqlitePool;
 use validator::Validate;
 
+fn derive_period_dates(name: &str, fiscal_year: i32) -> (String, String) {
+    let year = fiscal_year;
+    match name.to_lowercase().as_str() {
+        n if n.starts_with("jan") => (format!("{}-01-01", year), format!("{}-01-31", year)),
+        n if n.starts_with("feb") => (format!("{}-02-01", year), format!("{}-02-28", year)),
+        n if n.starts_with("mar") => (format!("{}-03-01", year), format!("{}-03-31", year)),
+        n if n.starts_with("apr") => (format!("{}-04-01", year), format!("{}-04-30", year)),
+        n if n.starts_with("may") => (format!("{}-05-01", year), format!("{}-05-31", year)),
+        n if n.starts_with("jun") => (format!("{}-06-01", year), format!("{}-06-30", year)),
+        n if n.starts_with("jul") => (format!("{}-07-01", year), format!("{}-07-31", year)),
+        n if n.starts_with("aug") => (format!("{}-08-01", year), format!("{}-08-31", year)),
+        n if n.starts_with("sep") => (format!("{}-09-01", year), format!("{}-09-30", year)),
+        n if n.starts_with("oct") => (format!("{}-10-01", year), format!("{}-10-31", year)),
+        n if n.starts_with("nov") => (format!("{}-11-01", year), format!("{}-11-30", year)),
+        n if n.starts_with("dec") => (format!("{}-12-01", year), format!("{}-12-31", year)),
+        _ => (format!("{}-01-01", year), format!("{}-12-31", year)),
+    }
+}
+
 #[derive(Clone)]
 pub struct ArService {
     repo: ArRepo,
@@ -76,6 +95,30 @@ impl ArService {
             return Err(AppError::Validation(
                 "At least one invoice line is required".into(),
             ));
+        }
+
+        // Check if invoice date falls in a closed period
+        if self.repo.is_date_in_closed_period(&input.invoice_date).await? {
+            return Err(AppError::Validation(format!(
+                "Cannot create invoice — date '{}' falls within a closed accounting period",
+                input.invoice_date
+            )));
+        }
+
+        // Validate due_date >= invoice_date
+        if input.due_date < input.invoice_date {
+            return Err(AppError::Validation(
+                "Due date must be on or after the invoice date".into(),
+            ));
+        }
+
+        // Check for duplicate invoice number
+        let existing = self.repo.list_invoices().await?;
+        if existing.iter().any(|inv| inv.invoice_number == input.invoice_number) {
+            return Err(AppError::Validation(format!(
+                "Invoice number '{}' already exists",
+                input.invoice_number
+            )));
         }
 
         // Validate customer exists
@@ -184,6 +227,14 @@ impl ArService {
             return Err(AppError::Validation(
                 "Receipt amount must be positive".into(),
             ));
+        }
+
+        // Check if receipt date falls in a closed period
+        if self.repo.is_date_in_closed_period(&input.receipt_date).await? {
+            return Err(AppError::Validation(format!(
+                "Cannot create receipt — date '{}' falls within a closed accounting period",
+                input.receipt_date
+            )));
         }
 
         // Validate invoice exists and is in sent or partial status
@@ -450,8 +501,10 @@ impl ArService {
         name: &str,
         fiscal_year: i32,
     ) -> AppResult<()> {
+        let (period_start, period_end) = derive_period_dates(name, fiscal_year);
+        self.repo.close_period(name, fiscal_year, &period_start, &period_end).await?;
         tracing::info!(
-            "GL period closed: period_id={}, name={}, fiscal_year={} — blocking AR transactions for this period",
+            "GL period closed and enforced: period_id={}, name={}, fiscal_year={}",
             period_id, name, fiscal_year
         );
         Ok(())
@@ -466,9 +519,10 @@ impl ArService {
         fiscal_year: i32,
         entry_id: &str,
     ) -> AppResult<()> {
+        self.repo.close_fiscal_year(fiscal_year).await?;
         tracing::info!(
-            "GL year-end closed: fiscal_year={}, closing_entry={} — blocking all AR transactions for fiscal year {}",
-            fiscal_year, entry_id, fiscal_year
+            "GL year-end closed and enforced: fiscal_year={}, closing_entry={}",
+            fiscal_year, entry_id
         );
         Ok(())
     }
@@ -520,6 +574,7 @@ mod tests {
             include_str!("../../migrations/004_create_receipts.sql"),
             include_str!("../../migrations/005_create_credit_memos.sql"),
             include_str!("../../migrations/006_add_approved_status.sql"),
+            include_str!("../../migrations/007_create_closed_periods.sql"),
         ];
         let migration_names = [
             "001_create_customers.sql",
@@ -528,6 +583,7 @@ mod tests {
             "004_create_receipts.sql",
             "005_create_credit_memos.sql",
             "006_add_approved_status.sql",
+            "007_create_closed_periods.sql",
         ];
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS _migrations (filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)",
@@ -1560,7 +1616,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_year_end_closed() {
-        let pool = create_test_pool().await;
+        let pool = setup().await;
         let svc = ArService::new(
             pool,
             saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
@@ -1574,7 +1630,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_year_end_closed_different_years() {
-        let pool = create_test_pool().await;
+        let pool = setup().await;
         let svc = ArService::new(
             pool,
             saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
@@ -1591,5 +1647,196 @@ mod tests {
 
         let result3 = svc.handle_year_end_closed(2030, "closing-2030").await;
         assert!(result3.is_ok());
+    }
+
+    // --- Period Close Enforcement Tests ---
+
+    #[tokio::test]
+    async fn test_period_close_blocks_invoice_creation() {
+        let pool = setup().await;
+        let svc = ArService {
+            repo: ArRepo::new(pool.clone()),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+        let customer = create_test_customer(&svc.repo, "Period Block Client").await;
+
+        // Close the period that covers Jan 2025
+        svc.handle_period_closed("period-001", "Jan-2025", 2025).await.unwrap();
+
+        // Try to create an invoice dated in the closed period
+        let result = svc.create_invoice(&CreateArInvoiceRequest {
+            customer_id: customer.id,
+            invoice_number: "AR-CLOSED".into(),
+            invoice_date: "2025-01-15".into(),
+            due_date: "2025-02-15".into(),
+            lines: vec![CreateArInvoiceLineRequest {
+                description: Some("Test".into()),
+                amount_cents: 1000,
+            }],
+        }).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("closed accounting period"));
+    }
+
+    #[tokio::test]
+    async fn test_period_close_allows_open_period() {
+        let pool = setup().await;
+        let svc = ArService {
+            repo: ArRepo::new(pool.clone()),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+        let customer = create_test_customer(&svc.repo, "Open Period Client").await;
+
+        // Close Jan 2025, then create invoice for Feb 2025
+        svc.handle_period_closed("period-001", "Jan-2025", 2025).await.unwrap();
+
+        let result = svc.create_invoice(&CreateArInvoiceRequest {
+            customer_id: customer.id,
+            invoice_number: "AR-OPEN".into(),
+            invoice_date: "2025-02-15".into(),
+            due_date: "2025-03-15".into(),
+            lines: vec![CreateArInvoiceLineRequest {
+                description: Some("Test".into()),
+                amount_cents: 1000,
+            }],
+        }).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_period_close_blocks_receipt() {
+        let pool = setup().await;
+        let svc = ArService {
+            repo: ArRepo::new(pool.clone()),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+        let customer = create_test_customer(&svc.repo, "Receipt Period Client").await;
+
+        // Create and send an invoice before period close (using repo directly to bypass service period check)
+        let invoice = svc.repo
+            .create_invoice(&CreateArInvoiceRequest {
+                customer_id: customer.id.clone(),
+                invoice_number: "AR-RCT-001".into(),
+                invoice_date: "2025-01-15".into(),
+                due_date: "2025-02-15".into(),
+                lines: vec![CreateArInvoiceLineRequest {
+                    description: Some("Test".into()),
+                    amount_cents: 5000,
+                }],
+            })
+            .await
+            .unwrap();
+        svc.repo.mark_invoice_sent(&invoice.id).await.unwrap();
+
+        // Close the period that covers Feb 2025
+        svc.handle_period_closed("period-002", "Feb-2025", 2025).await.unwrap();
+
+        // Try to create a receipt dated in the closed period
+        let result = svc.create_receipt(&CreateReceiptRequest {
+            invoice_id: invoice.id,
+            customer_id: customer.id,
+            amount_cents: 5000,
+            receipt_date: "2025-02-15".into(),
+            method: None,
+        }).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("closed"));
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_invoice_number_prevention() {
+        let pool = setup().await;
+        let svc = ArService {
+            repo: ArRepo::new(pool.clone()),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+        let customer = create_test_customer(&svc.repo, "Dup Invoice Client").await;
+
+        // Create first invoice
+        svc.create_invoice(&CreateArInvoiceRequest {
+            customer_id: customer.id.clone(),
+            invoice_number: "AR-DUP-001".into(),
+            invoice_date: "2025-03-01".into(),
+            due_date: "2025-04-01".into(),
+            lines: vec![CreateArInvoiceLineRequest {
+                description: Some("First".into()),
+                amount_cents: 1000,
+            }],
+        }).await.unwrap();
+
+        // Try to create second invoice with same number
+        let result = svc.create_invoice(&CreateArInvoiceRequest {
+            customer_id: customer.id,
+            invoice_number: "AR-DUP-001".into(),
+            invoice_date: "2025-03-15".into(),
+            due_date: "2025-04-15".into(),
+            lines: vec![CreateArInvoiceLineRequest {
+                description: Some("Second".into()),
+                amount_cents: 2000,
+            }],
+        }).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("already exists"), "Expected duplicate error, got: {}", err);
+    }
+
+    #[tokio::test]
+    async fn test_due_date_before_invoice_date_rejected() {
+        let pool = setup().await;
+        let svc = ArService {
+            repo: ArRepo::new(pool.clone()),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+        let customer = create_test_customer(&svc.repo, "Due Date Client").await;
+
+        // due_date < invoice_date should fail
+        let result = svc.create_invoice(&CreateArInvoiceRequest {
+            customer_id: customer.id,
+            invoice_number: "AR-DUEDATE-001".into(),
+            invoice_date: "2025-03-15".into(),
+            due_date: "2025-02-15".into(), // before invoice date
+            lines: vec![CreateArInvoiceLineRequest {
+                description: Some("Test".into()),
+                amount_cents: 1000,
+            }],
+        }).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Due date"), "Expected due date error, got: {}", err);
+    }
+
+    #[tokio::test]
+    async fn test_due_date_equals_invoice_date_allowed() {
+        let pool = setup().await;
+        let svc = ArService {
+            repo: ArRepo::new(pool.clone()),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+        let customer = create_test_customer(&svc.repo, "Same Date Client").await;
+
+        // due_date == invoice_date should succeed
+        let result = svc.create_invoice(&CreateArInvoiceRequest {
+            customer_id: customer.id,
+            invoice_number: "AR-SAMEDATE-001".into(),
+            invoice_date: "2025-03-15".into(),
+            due_date: "2025-03-15".into(), // same as invoice date
+            lines: vec![CreateArInvoiceLineRequest {
+                description: Some("Test".into()),
+                amount_cents: 1000,
+            }],
+        }).await;
+        assert!(result.is_ok());
     }
 }

@@ -355,6 +355,15 @@ impl LedgerService {
             self.repo.get_account(&line.account_id).await?;
         }
         self.repo.get_period(&input.period_id).await?;
+
+        // Prevent duplicate budgets for the same period (one active budget per period)
+        let existing_budgets = self.repo.list_budgets().await?;
+        if existing_budgets.iter().any(|b| b.period_id == input.period_id && b.status != "closed") {
+            return Err(AppError::Validation(
+                "A budget already exists for this period. Close the existing budget before creating a new one.".into(),
+            ));
+        }
+
         let budget = self.repo.create_budget(input, created_by).await?;
         let lines = self.repo.get_budget_lines(&budget.id).await?;
         Ok(BudgetWithLines { budget, lines })
@@ -4064,5 +4073,91 @@ mod tests {
             .handle_bank_account_created("bank-jpy", "JPY Account", "Mizuho", "JPY")
             .await;
         assert!(result3.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_budget_for_same_period_prevented() {
+        let pool = setup().await;
+        let repo = LedgerRepo::new(pool);
+        let svc = LedgerService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let expense = create_test_account(&repo, "5100", "Test Exp Dupe", "expense").await;
+        let period = create_test_period(&repo, "Q-Dupe-2025").await;
+
+        // First budget succeeds
+        let input = CreateBudgetRequest {
+            name: "Budget A".into(),
+            period_id: period.id.clone(),
+            lines: vec![CreateBudgetLineRequest {
+                account_id: expense.id.clone(),
+                budgeted_cents: 5000,
+            }],
+        };
+        let budget = svc.create_budget(&input, "admin").await.unwrap();
+        assert_eq!(budget.budget.status, "draft");
+
+        // Second budget for same period fails
+        let input2 = CreateBudgetRequest {
+            name: "Budget B".into(),
+            period_id: period.id.clone(),
+            lines: vec![CreateBudgetLineRequest {
+                account_id: expense.id.clone(),
+                budgeted_cents: 10000,
+            }],
+        };
+        let result = svc.create_budget(&input2, "admin").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("budget already exists"),
+            "Expected duplicate budget error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_budget_allowed_after_closing_existing() {
+        let pool = setup().await;
+        let repo = LedgerRepo::new(pool);
+        let svc = LedgerService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let expense = create_test_account(&repo, "5200", "Test Exp Closed", "expense").await;
+        let period = create_test_period(&repo, "Q-Closed-2025").await;
+
+        // Create and close first budget
+        let input = CreateBudgetRequest {
+            name: "Budget C".into(),
+            period_id: period.id.clone(),
+            lines: vec![CreateBudgetLineRequest {
+                account_id: expense.id.clone(),
+                budgeted_cents: 5000,
+            }],
+        };
+        let budget = svc.create_budget(&input, "admin").await.unwrap();
+        repo.update_budget_status(&budget.budget.id, "approved").await.unwrap();
+        repo.update_budget_status(&budget.budget.id, "active").await.unwrap();
+        repo.update_budget_status(&budget.budget.id, "closed").await.unwrap();
+
+        // Second budget for same period should now succeed (old one is closed)
+        let input2 = CreateBudgetRequest {
+            name: "Budget D".into(),
+            period_id: period.id.clone(),
+            lines: vec![CreateBudgetLineRequest {
+                account_id: expense.id.clone(),
+                budgeted_cents: 10000,
+            }],
+        };
+        let budget2 = svc.create_budget(&input2, "admin").await.unwrap();
+        assert_eq!(budget2.budget.name, "Budget D");
     }
 }

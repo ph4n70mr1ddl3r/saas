@@ -39,6 +39,19 @@ impl ExpenseService {
         input
             .validate()
             .map_err(|e| AppError::Validation(e.to_string()))?;
+
+        // Duplicate category name prevention (case-insensitive)
+        let existing = self.repo.list_categories().await?;
+        if existing
+            .iter()
+            .any(|c| c.name.to_lowercase() == input.name.to_lowercase())
+        {
+            return Err(AppError::Validation(format!(
+                "Category with name '{}' already exists",
+                input.name
+            )));
+        }
+
         self.repo.create_category(input).await
     }
 
@@ -83,6 +96,19 @@ impl ExpenseService {
         input
             .validate()
             .map_err(|e| AppError::Validation(e.to_string()))?;
+
+        // Duplicate report title prevention for the same employee (case-insensitive)
+        let existing = self.repo.list_reports().await?;
+        if existing.iter().any(|r| {
+            r.employee_id == input.employee_id
+                && r.title.to_lowercase() == input.title.to_lowercase()
+        }) {
+            return Err(AppError::Validation(format!(
+                "Expense report with title '{}' already exists for this employee",
+                input.title
+            )));
+        }
+
         self.repo.create_report(input).await
     }
 
@@ -154,6 +180,13 @@ impl ExpenseService {
                 "Cannot approve report in '{}' status. Only 'submitted' reports can be approved.",
                 report.status
             )));
+        }
+
+        // Self-approval prevention: employee cannot approve their own report
+        if report.employee_id == user_id {
+            return Err(AppError::Validation(
+                "Cannot approve own expense report".into(),
+            ));
         }
 
         let report = self.repo.approve_report(id, user_id).await?;
@@ -1821,5 +1854,156 @@ mod tests {
 
         let result3 = svc.handle_year_end_closed(2030, "closing-2030").await;
         assert!(result3.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_self_approval_prevention() {
+        let pool = setup().await;
+        let svc = ExpenseService {
+            repo: ExpenseRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Create a report owned by emp-1
+        let report = svc
+            .create_report(&CreateExpenseReportRequest {
+                employee_id: "emp-1".into(),
+                title: "Self-Approval Test".into(),
+                description: None,
+            })
+            .await
+            .unwrap();
+
+        // Submit the report
+        svc.submit_report(&report.id).await.unwrap();
+
+        // Try to approve with the same employee_id — should fail
+        let result = svc.approve_report(&report.id, "emp-1").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Cannot approve own expense report"),
+            "Expected self-approval error, got: {}",
+            err
+        );
+
+        // Approving with a different user_id should succeed
+        let approved = svc.approve_report(&report.id, "mgr-1").await.unwrap();
+        assert_eq!(approved.status, "approved");
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_category_name_prevention() {
+        let pool = setup().await;
+        let svc = ExpenseService {
+            repo: ExpenseRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Create category "Travel"
+        let cat = svc
+            .create_category(&CreateExpenseCategoryRequest {
+                name: "Travel".into(),
+                description: None,
+                limit_cents: None,
+                requires_receipt: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(cat.name, "Travel");
+
+        // Try to create "TRAVEL" (case-insensitive duplicate) — should fail
+        let result = svc
+            .create_category(&CreateExpenseCategoryRequest {
+                name: "TRAVEL".into(),
+                description: None,
+                limit_cents: None,
+                requires_receipt: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("already exists"),
+            "Expected duplicate category error, got: {}",
+            err
+        );
+
+        // A different name should succeed
+        let cat2 = svc
+            .create_category(&CreateExpenseCategoryRequest {
+                name: "Meals".into(),
+                description: None,
+                limit_cents: None,
+                requires_receipt: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(cat2.name, "Meals");
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_report_title_prevention() {
+        let pool = setup().await;
+        let svc = ExpenseService {
+            repo: ExpenseRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Create a report with title "Q3 Expenses" for emp-1
+        let report = svc
+            .create_report(&CreateExpenseReportRequest {
+                employee_id: "emp-1".into(),
+                title: "Q3 Expenses".into(),
+                description: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(report.title, "Q3 Expenses");
+
+        // Try to create another report with the same title for the same employee — should fail
+        let result = svc
+            .create_report(&CreateExpenseReportRequest {
+                employee_id: "emp-1".into(),
+                title: "q3 expenses".into(), // case-insensitive
+                description: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("already exists"),
+            "Expected duplicate report title error, got: {}",
+            err
+        );
+
+        // Same title but different employee should succeed
+        let report2 = svc
+            .create_report(&CreateExpenseReportRequest {
+                employee_id: "emp-2".into(),
+                title: "Q3 Expenses".into(),
+                description: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(report2.title, "Q3 Expenses");
+        assert_eq!(report2.employee_id, "emp-2");
+
+        // Different title, same employee should succeed
+        let report3 = svc
+            .create_report(&CreateExpenseReportRequest {
+                employee_id: "emp-1".into(),
+                title: "Q4 Expenses".into(),
+                description: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(report3.title, "Q4 Expenses");
     }
 }

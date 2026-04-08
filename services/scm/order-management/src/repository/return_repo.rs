@@ -56,4 +56,14 @@ impl ReturnRepo {
             .await?;
         self.get_by_id(id).await
     }
+
+    pub async fn list_by_order_line(&self, order_line_id: &str) -> AppResult<Vec<ReturnResponse>> {
+        let rows = sqlx::query_as::<_, ReturnResponse>(
+            "SELECT id, order_id, order_line_id, quantity, reason, status, refund_amount_cents, created_at FROM returns WHERE order_line_id = ? ORDER BY created_at DESC"
+        )
+            .bind(order_line_id)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows)
+    }
 }
