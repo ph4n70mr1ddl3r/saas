@@ -129,6 +129,13 @@ impl InventoryService {
             )));
         }
 
+        // Transfer movements require a source warehouse
+        if input.movement_type == "transfer" && input.from_warehouse_id.is_none() {
+            return Err(AppError::Validation(
+                "Transfer movements require a source warehouse (from_warehouse_id)".into(),
+            ));
+        }
+
         // Check for negative stock on deduct operations
         match input.movement_type.as_str() {
             "transfer" | "issue" | "pick" => {
@@ -2733,5 +2740,108 @@ mod tests {
         assert_eq!(movements[0].quantity, 15);
         assert_eq!(movements[0].reference_type, Some("sales_return".to_string()));
         assert_eq!(movements[0].reference_id, Some("RET-CREATED-001".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_transfer_without_from_warehouse_rejected() {
+        let pool = setup().await;
+        let svc = InventoryService::new(
+            pool.clone(),
+            saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        );
+
+        let wh = svc.warehouse_repo.create(&CreateWarehouse {
+            name: "WH-XFER-NOSRC".into(),
+            address: None,
+        }).await.unwrap();
+        let item = svc.item_repo.create(&CreateItem {
+            sku: "SKU-XFER-NOSRC".into(),
+            name: "Transfer No Source Item".into(),
+            description: None,
+            unit_of_measure: None,
+            item_type: "finished".into(),
+            reorder_point: 0,
+            safety_stock: 0,
+            economic_order_qty: 0,
+            unit_price_cents: None,
+        }).await.unwrap();
+
+        // Transfer with from_warehouse_id = None should be rejected
+        let result = svc.create_stock_movement(CreateStockMovement {
+            item_id: item.id,
+            from_warehouse_id: None,
+            to_warehouse_id: wh.id,
+            quantity: 10,
+            movement_type: "transfer".into(),
+            reference_type: None,
+            reference_id: None,
+        }).await;
+
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("Transfer movements require a source warehouse (from_warehouse_id)"));
+    }
+
+    #[tokio::test]
+    async fn test_transfer_with_from_warehouse_succeeds() {
+        let pool = setup().await;
+        let svc = InventoryService::new(
+            pool.clone(),
+            saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        );
+
+        let wh_src = svc.warehouse_repo.create(&CreateWarehouse {
+            name: "WH-XFER-SRC".into(),
+            address: None,
+        }).await.unwrap();
+        let wh_dst = svc.warehouse_repo.create(&CreateWarehouse {
+            name: "WH-XFER-DST".into(),
+            address: None,
+        }).await.unwrap();
+        let item = svc.item_repo.create(&CreateItem {
+            sku: "SKU-XFER-OK".into(),
+            name: "Transfer OK Item".into(),
+            description: None,
+            unit_of_measure: None,
+            item_type: "finished".into(),
+            reorder_point: 0,
+            safety_stock: 0,
+            economic_order_qty: 0,
+            unit_price_cents: None,
+        }).await.unwrap();
+
+        // Put 100 units in source warehouse
+        svc.stock_level_repo.upsert_receipt(&item.id, &wh_src.id, 100).await.unwrap();
+
+        // Transfer 30 units from source to destination
+        let movement = svc.create_stock_movement(CreateStockMovement {
+            item_id: item.id.clone(),
+            from_warehouse_id: Some(wh_src.id.clone()),
+            to_warehouse_id: wh_dst.id.clone(),
+            quantity: 30,
+            movement_type: "transfer".into(),
+            reference_type: None,
+            reference_id: None,
+        }).await.unwrap();
+
+        assert_eq!(movement.movement_type, "transfer");
+        assert_eq!(movement.quantity, 30);
+        assert_eq!(movement.from_warehouse_id, Some(wh_src.id.clone()));
+
+        // Verify source warehouse stock decreased
+        let src_sl = svc.stock_level_repo
+            .get_by_item_warehouse(&item.id, &wh_src.id)
+            .await.unwrap().unwrap();
+        assert_eq!(src_sl.quantity_on_hand, 70);
+
+        // Verify destination warehouse stock increased
+        let dst_sl = svc.stock_level_repo
+            .get_by_item_warehouse(&item.id, &wh_dst.id)
+            .await.unwrap().unwrap();
+        assert_eq!(dst_sl.quantity_on_hand, 30);
     }
 }

@@ -87,6 +87,14 @@ impl ManufacturingService {
                 "Only in-progress work orders can be completed".into(),
             ));
         }
+        // Verify all routing steps are completed
+        let routing_steps = self.routing_step_repo.list_by_work_order(id).await?;
+        if let Some(incomplete) = routing_steps.iter().find(|s| s.status != "completed") {
+            return Err(saas_common::error::AppError::Validation(format!(
+                "Cannot complete work order: routing step {} (step {}) has status '{}', expected 'completed'",
+                incomplete.id, incomplete.step_number, incomplete.status
+            )));
+        }
         let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string();
         self.work_order_repo
             .update_status(id, "completed", None, Some(&now))
@@ -1143,5 +1151,84 @@ mod tests {
             "Expected quantity validation error, got: {}",
             err
         );
+    }
+
+    #[tokio::test]
+    async fn test_complete_work_order_with_incomplete_routing_steps() {
+        let pool = setup().await;
+        let svc = ManufacturingService {
+            work_order_repo: WorkOrderRepo::new(pool.clone()),
+            bom_repo: BomRepo::new(pool.clone()),
+            routing_step_repo: RoutingStepRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Create and start a work order
+        let wo = svc.create_work_order(CreateWorkOrder {
+            item_id: "ITEM-ROUTE-INCOMPLETE".into(),
+            quantity: 10,
+            planned_start: None,
+            planned_end: None,
+        }).await.unwrap();
+        svc.start_work_order(&wo.id).await.unwrap();
+
+        // Add a routing step (defaults to "pending" status)
+        svc.routing_step_repo
+            .create(&wo.id, 1, "Assemble components")
+            .await
+            .unwrap();
+
+        // Try to complete the work order — should fail because routing step is not completed
+        let result = svc.complete_work_order(&wo.id).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("routing step") && err.contains("expected 'completed'"),
+            "Expected routing steps error, got: {}",
+            err
+        );
+
+        // Verify work order is still in_progress
+        let wo_check = svc.get_work_order(&wo.id).await.unwrap();
+        assert_eq!(wo_check.status, "in_progress");
+    }
+
+    #[tokio::test]
+    async fn test_complete_work_order_with_all_routing_steps_completed() {
+        let pool = setup().await;
+        let svc = ManufacturingService {
+            work_order_repo: WorkOrderRepo::new(pool.clone()),
+            bom_repo: BomRepo::new(pool.clone()),
+            routing_step_repo: RoutingStepRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Create and start a work order
+        let wo = svc.create_work_order(CreateWorkOrder {
+            item_id: "ITEM-ROUTE-DONE".into(),
+            quantity: 25,
+            planned_start: None,
+            planned_end: None,
+        }).await.unwrap();
+        svc.start_work_order(&wo.id).await.unwrap();
+
+        // Add a routing step and complete it
+        let step = svc.routing_step_repo
+            .create(&wo.id, 1, "Quality check")
+            .await
+            .unwrap();
+        svc.routing_step_repo
+            .update_status(&step.id, "completed")
+            .await
+            .unwrap();
+
+        // Complete the work order — should succeed
+        let completed = svc.complete_work_order(&wo.id).await.unwrap();
+        assert_eq!(completed.status, "completed");
+        assert!(completed.actual_end.is_some());
     }
 }

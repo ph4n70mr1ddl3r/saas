@@ -243,6 +243,16 @@ impl LedgerService {
                 "Only posted entries can be reversed".into(),
             ));
         }
+
+        // Validate period is still open
+        let period = self.repo.get_period(&entry.period_id).await?;
+        if period.status != "open" {
+            return Err(AppError::Validation(format!(
+                "Cannot reverse entry in closed period '{}'",
+                period.name
+            )));
+        }
+
         let (original, _reversal) = self.repo.reverse_journal_entry(id).await?;
         let lines = self.repo.get_journal_lines(id).await?;
 
@@ -4118,6 +4128,129 @@ mod tests {
             "Expected duplicate budget error, got: {}",
             err
         );
+    }
+
+    #[tokio::test]
+    async fn test_reverse_in_closed_period_blocked() {
+        let pool = setup().await;
+        let repo = LedgerRepo::new(pool.clone());
+        let svc = LedgerService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let cash = create_test_account(&repo, "1000", "Cash", "asset").await;
+        let revenue = create_test_account(&repo, "4000", "Revenue", "revenue").await;
+        let period = create_test_period(&repo, "Closed Period Reverse Test").await;
+
+        // Create and post a journal entry
+        let je = svc
+            .create_journal_entry(
+                &CreateJournalEntryRequest {
+                    description: Some("Entry to reverse in closed period".into()),
+                    period_id: period.id.clone(),
+                    lines: vec![
+                        CreateJournalLineRequest {
+                            account_id: cash.id.clone(),
+                            debit_cents: 5000,
+                            credit_cents: 0,
+                            description: None,
+                        },
+                        CreateJournalLineRequest {
+                            account_id: revenue.id.clone(),
+                            debit_cents: 0,
+                            credit_cents: 5000,
+                            description: None,
+                        },
+                    ],
+                },
+                "tester",
+            )
+            .await
+            .unwrap();
+        svc.post_journal_entry(&je.entry.id).await.unwrap();
+
+        // Close the period
+        svc.close_period(&period.id).await.unwrap();
+
+        // Attempt to reverse should fail
+        let result = svc.reverse_journal_entry(&je.entry.id).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Cannot reverse entry in closed period"),
+            "Expected closed period reversal error, got: {}",
+            err
+        );
+        assert!(
+            err.contains("Closed Period Reverse Test"),
+            "Error should contain period name, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_reverse_in_open_period_succeeds() {
+        let pool = setup().await;
+        let repo = LedgerRepo::new(pool.clone());
+        let svc = LedgerService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let cash = create_test_account(&repo, "1000", "Cash", "asset").await;
+        let revenue = create_test_account(&repo, "4000", "Revenue", "revenue").await;
+        let period = create_test_period(&repo, "Open Period Reverse Test").await;
+
+        // Create and post a journal entry
+        let je = svc
+            .create_journal_entry(
+                &CreateJournalEntryRequest {
+                    description: Some("Entry to reverse in open period".into()),
+                    period_id: period.id.clone(),
+                    lines: vec![
+                        CreateJournalLineRequest {
+                            account_id: cash.id.clone(),
+                            debit_cents: 7000,
+                            credit_cents: 0,
+                            description: None,
+                        },
+                        CreateJournalLineRequest {
+                            account_id: revenue.id.clone(),
+                            debit_cents: 0,
+                            credit_cents: 7000,
+                            description: None,
+                        },
+                    ],
+                },
+                "tester",
+            )
+            .await
+            .unwrap();
+        svc.post_journal_entry(&je.entry.id).await.unwrap();
+
+        // Period is still open — reversal should succeed
+        let result = svc.reverse_journal_entry(&je.entry.id).await;
+        assert!(result.is_ok(), "Reversal in open period should succeed");
+
+        let reversed = result.unwrap();
+        assert_eq!(reversed.entry.status, "reversed");
+
+        // Verify the reversal entry exists and is posted
+        let reversal_entry = repo.find_reversal_for(&je.entry.id).await.unwrap().unwrap();
+        assert_eq!(reversal_entry.status, "posted");
+
+        // Reversal lines should have swapped debit/credit
+        let reversal_lines = repo.get_journal_lines(&reversal_entry.id).await.unwrap();
+        assert_eq!(reversal_lines.len(), 2);
+
+        let total_debits: i64 = reversal_lines.iter().map(|l| l.debit_cents).sum();
+        let total_credits: i64 = reversal_lines.iter().map(|l| l.credit_cents).sum();
+        assert_eq!(total_debits, total_credits);
     }
 
     #[tokio::test]
