@@ -123,7 +123,26 @@ impl UserService {
     }
 
     pub async fn delete(&self, id: &str) -> AppResult<()> {
-        self.repo.soft_delete(id).await
+        let user = self.repo.get_by_id(id).await?;
+        self.repo.soft_delete(id).await?;
+        if let Err(e) = self
+            .bus
+            .publish(
+                "iam.user.deactivated",
+                saas_proto::events::UserDeactivated {
+                    user_id: user.id.clone(),
+                    username: user.username.clone(),
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "iam.user.deactivated",
+                e
+            );
+        }
+        Ok(())
     }
 
     pub async fn assign_roles(&self, user_id: &str, role_ids: Vec<String>) -> AppResult<()> {

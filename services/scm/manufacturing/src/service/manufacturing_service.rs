@@ -156,6 +156,17 @@ impl ManufacturingService {
         input
             .validate()
             .map_err(|e| saas_common::error::AppError::Validation(e.to_string()))?;
+        // Check for duplicate BOM for the same finished item
+        let existing = self.bom_repo.list().await?;
+        if existing
+            .iter()
+            .any(|b| b.finished_item_id == input.finished_item_id)
+        {
+            return Err(saas_common::error::AppError::Validation(format!(
+                "BOM for item '{}' already exists",
+                input.finished_item_id
+            )));
+        }
         self.bom_repo.create(&input).await
     }
 

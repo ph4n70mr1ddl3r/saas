@@ -61,6 +61,12 @@ impl ApService {
         &self,
         input: &CreateApInvoiceRequest,
     ) -> AppResult<ApInvoiceWithLines> {
+        if input.lines.is_empty() {
+            return Err(AppError::Validation(
+                "At least one invoice line is required".into(),
+            ));
+        }
+
         // Validate vendor exists
         self.repo.get_vendor(&input.vendor_id).await?;
 
@@ -135,7 +141,25 @@ impl ApService {
                 "Only draft invoices can be cancelled".into(),
             ));
         }
-        self.repo.cancel_invoice(id).await
+        let cancelled = self.repo.cancel_invoice(id).await?;
+        if let Err(e) = self
+            .bus
+            .publish(
+                "erp.ap.invoice.cancelled",
+                saas_proto::events::ApInvoiceCancelled {
+                    invoice_id: cancelled.id.clone(),
+                    vendor_id: cancelled.vendor_id.clone(),
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "erp.ap.invoice.cancelled",
+                e
+            );
+        }
+        Ok(cancelled)
     }
 
     // --- Payments ---

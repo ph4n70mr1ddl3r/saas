@@ -1,15 +1,11 @@
 use crate::service::OrderManagementService;
 use saas_nats_bus::NatsBus;
 use saas_proto::events::WorkOrderCompleted;
-use sqlx::SqlitePool;
 
 pub async fn register(bus: &NatsBus, service: OrderManagementService) -> anyhow::Result<()> {
-    // Work order completed -> log for order fulfillment tracking
-    // When a work order for an item completes, it means manufactured items are now available.
-    // The inventory service handles stock addition; here we log for visibility.
     let svc = service.clone();
     bus.subscribe::<WorkOrderCompleted, _, _>("scm.manufacturing.work_order.completed", move |envelope| {
-        let _svc = svc.clone();
+        let svc = svc.clone();
         let work_order_id = envelope.payload.work_order_id.clone();
         let item_id = envelope.payload.item_id.clone();
         let quantity = envelope.payload.quantity;
@@ -18,7 +14,30 @@ pub async fn register(bus: &NatsBus, service: OrderManagementService) -> anyhow:
                 "Work order {} completed: item {} qty {} now available for fulfillment",
                 work_order_id, item_id, quantity
             );
-            // Future: could check pending sales orders for this item and update status
+
+            // Check confirmed/picking sales orders for lines with this item
+            match svc.list_sales_orders().await {
+                Ok(orders) => {
+                    for order in &orders {
+                        if order.status != "confirmed" && order.status != "picking" {
+                            continue;
+                        }
+                        if let Ok(detail) = svc.get_sales_order(&order.id).await {
+                            for line in &detail.lines {
+                                if line.item_id == item_id {
+                                    tracing::info!(
+                                        "Order {} (status: {}) has pending line for item {} (qty: {}) - now fulfillable",
+                                        order.order_number, order.status, item_id, line.quantity
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to list sales orders for fulfillment check: {}", e);
+                }
+            }
         }
     }).await.ok();
 

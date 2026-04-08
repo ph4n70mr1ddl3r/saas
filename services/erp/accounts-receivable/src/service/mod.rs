@@ -65,6 +65,12 @@ impl ArService {
         &self,
         input: &CreateArInvoiceRequest,
     ) -> AppResult<ArInvoiceWithLines> {
+        if input.lines.is_empty() {
+            return Err(AppError::Validation(
+                "At least one invoice line is required".into(),
+            ));
+        }
+
         // Validate customer exists
         self.repo.get_customer(&input.customer_id).await?;
 
@@ -103,7 +109,25 @@ impl ArService {
                 "Only draft or sent invoices can be cancelled".into(),
             ));
         }
-        self.repo.cancel_invoice(id).await
+        let cancelled = self.repo.cancel_invoice(id).await?;
+        if let Err(e) = self
+            .bus
+            .publish(
+                "erp.ar.invoice.cancelled",
+                saas_proto::events::ArInvoiceCancelled {
+                    invoice_id: cancelled.id.clone(),
+                    customer_id: cancelled.customer_id.clone(),
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "erp.ar.invoice.cancelled",
+                e
+            );
+        }
+        Ok(cancelled)
     }
 
     pub async fn approve_invoice(&self, id: &str) -> AppResult<ArInvoiceWithLines> {

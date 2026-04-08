@@ -64,6 +64,20 @@ impl LedgerService {
                 "start_date must be before end_date".into(),
             ));
         }
+        // Validate no overlapping periods
+        let existing_periods = self.repo.list_periods().await?;
+        for p in &existing_periods {
+            if p.status == "closed" {
+                continue; // Skip closed periods
+            }
+            let overlaps = input.start_date < p.end_date && input.end_date > p.start_date;
+            if overlaps {
+                return Err(AppError::Validation(format!(
+                    "Period '{}' ({}) overlaps with existing period '{}' ({} to {})",
+                    input.name, input.start_date, p.name, p.start_date, p.end_date
+                )));
+            }
+        }
         self.repo.create_period(input).await
     }
 

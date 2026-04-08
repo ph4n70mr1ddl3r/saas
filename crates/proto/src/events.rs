@@ -376,6 +376,12 @@ pub struct TokenRevoked {
     pub expires_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserDeactivated {
+    pub user_id: String,
+    pub username: String,
+}
+
 // SCM Manufacturing Events
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkOrderCompleted {
@@ -441,6 +447,18 @@ pub struct PurchaseOrderCancelled {
     pub reason: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PurchaseOrderSubmitted {
+    pub po_id: String,
+    pub supplier_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PurchaseOrderApproved {
+    pub po_id: String,
+    pub supplier_id: String,
+}
+
 // ERP Payment Events
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApPaymentCreated {
@@ -471,6 +489,13 @@ pub struct ArInvoiceApproved {
 pub struct ApInvoiceCancelled {
     pub invoice_id: String,
     pub vendor_id: String,
+}
+
+// AR Invoice Events
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArInvoiceCancelled {
+    pub invoice_id: String,
+    pub customer_id: String,
 }
 
 // GL Events

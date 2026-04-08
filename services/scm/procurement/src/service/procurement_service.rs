@@ -89,7 +89,25 @@ impl ProcurementService {
             ));
         }
         self.po_repo.update_status(id, "submitted").await?;
-        self.po_repo.get_by_id(id).await
+        let po = self.po_repo.get_by_id(id).await?;
+        if let Err(e) = self
+            .bus
+            .publish(
+                "scm.procurement.po.submitted",
+                saas_proto::events::PurchaseOrderSubmitted {
+                    po_id: po.id.clone(),
+                    supplier_id: po.supplier_id.clone(),
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "scm.procurement.po.submitted",
+                e
+            );
+        }
+        Ok(po)
     }
 
     pub async fn approve_purchase_order(&self, id: &str) -> AppResult<PurchaseOrderResponse> {
@@ -100,7 +118,25 @@ impl ProcurementService {
             ));
         }
         self.po_repo.update_status(id, "approved").await?;
-        self.po_repo.get_by_id(id).await
+        let po = self.po_repo.get_by_id(id).await?;
+        if let Err(e) = self
+            .bus
+            .publish(
+                "scm.procurement.po.approved",
+                saas_proto::events::PurchaseOrderApproved {
+                    po_id: po.id.clone(),
+                    supplier_id: po.supplier_id.clone(),
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to publish event '{}': {}. Data may be inconsistent.",
+                "scm.procurement.po.approved",
+                e
+            );
+        }
+        Ok(po)
     }
 
     pub async fn cancel_purchase_order(&self, id: &str) -> AppResult<PurchaseOrderResponse> {
