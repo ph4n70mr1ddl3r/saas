@@ -2,7 +2,7 @@ use crate::service::InventoryService;
 use saas_nats_bus::NatsBus;
 use saas_proto::events::{
     OrderFulfilled, OrderFulfilledLine, PurchaseOrderReceived, ReturnCreated,
-    SalesOrderConfirmed, WorkOrderCompleted, WorkOrderCancelled,
+    SalesOrderConfirmed, WorkOrderCompleted, WorkOrderCancelled, WorkOrderStarted,
 };
 
 pub async fn register(bus: &NatsBus, service: InventoryService) -> anyhow::Result<()> {
@@ -124,6 +124,25 @@ pub async fn register(bus: &NatsBus, service: InventoryService) -> anyhow::Resul
                 &envelope.payload.work_order_id,
             ).await {
                 tracing::error!("Failed to handle work order cancelled: {}", e);
+            }
+        }
+    }).await.ok();
+
+    // Work order started -> log material requirements and check stock availability
+    let svc = service.clone();
+    bus.subscribe::<WorkOrderStarted, _, _>("scm.manufacturing.work_order.started", move |envelope| {
+        let svc = svc.clone();
+        async move {
+            tracing::info!(
+                "Processing work order started: wo_id={}, item={}, qty={}",
+                envelope.payload.work_order_id, envelope.payload.item_id, envelope.payload.quantity
+            );
+            if let Err(e) = svc.handle_work_order_started(
+                &envelope.payload.work_order_id,
+                &envelope.payload.item_id,
+                envelope.payload.quantity,
+            ).await {
+                tracing::error!("Failed to handle work order started: {}", e);
             }
         }
     }).await.ok();

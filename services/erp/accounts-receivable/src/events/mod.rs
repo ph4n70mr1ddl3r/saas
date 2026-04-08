@@ -1,7 +1,7 @@
 use crate::routes::AppState;
 use saas_common::error::AppResult;
 use saas_nats_bus::NatsBus;
-use saas_proto::events::OrderFulfilled;
+use saas_proto::events::{OrderFulfilled, ReturnApproved};
 
 pub async fn register(bus: &NatsBus, state: &AppState) -> AppResult<()> {
     // Order Fulfilled -> auto-create AR invoice
@@ -22,6 +22,25 @@ pub async fn register(bus: &NatsBus, state: &AppState) -> AppResult<()> {
             );
             if let Err(e) = svc.handle_order_fulfilled(&order_id, &order_number, &customer_id, &lines).await {
                 tracing::error!("Failed to create auto-invoice for order {}: {}", order_number, e);
+            }
+        }
+    }).await.ok();
+
+    // Return Approved -> auto-create credit memo
+    let svc2 = state.service.clone();
+    bus.subscribe::<ReturnApproved, _, _>("scm.orders.return.approved", move |envelope| {
+        let svc = svc2.clone();
+        let return_id = envelope.payload.return_id.clone();
+        let order_id = envelope.payload.order_id.clone();
+        let item_id = envelope.payload.item_id.clone();
+        let quantity = envelope.payload.quantity;
+        async move {
+            tracing::info!(
+                "Return approved event received: return_id={}, order_id={}",
+                return_id, order_id
+            );
+            if let Err(e) = svc.handle_return_approved(&return_id, &order_id, &item_id, quantity).await {
+                tracing::error!("Failed to create credit memo for return {}: {}", return_id, e);
             }
         }
     }).await.ok();

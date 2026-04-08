@@ -3,7 +3,7 @@ use saas_common::error::AppResult;
 use saas_nats_bus::NatsBus;
 use saas_proto::events::{
     ApInvoiceCancelled, ApPaymentCreated, ArInvoiceCancelled, ArReceiptCreated, AssetCreated, AssetDisposed,
-    DepreciationRunCompleted, ExpenseReportApproved, PayRunCompleted,
+    CycleCountPosted, DepreciationRunCompleted, ExpenseReportApproved, PayRunCompleted,
     ReconciliationCompleted, TransferCompleted, VendorInvoiceApproved,
     CustomerInvoiceCreated,
 };
@@ -173,31 +173,55 @@ pub async fn register(bus: &NatsBus, service: &LedgerService) -> AppResult<()> {
         }
     }).await.ok();
 
-    // AP Invoice Cancelled -> log for audit (original JE reversal would be manual)
+    // AP Invoice Cancelled -> reverse the original auto-created JE
     let svc = service.clone();
     bus.subscribe::<ApInvoiceCancelled, _, _>("erp.ap.invoice.cancelled", move |envelope| {
-        let _svc = svc.clone();
+        let svc = svc.clone();
         let invoice_id = envelope.payload.invoice_id.clone();
         let vendor_id = envelope.payload.vendor_id.clone();
         async move {
             tracing::info!(
-                "AP invoice cancelled: {} (vendor: {}) - manual JE reversal may be required",
+                "AP invoice cancelled: {} (vendor: {}) - reversing original JE",
                 invoice_id, vendor_id
             );
+            if let Err(e) = svc.handle_ap_invoice_cancelled(&invoice_id, &vendor_id).await {
+                tracing::error!("Failed to reverse JE for cancelled AP invoice {}: {}", invoice_id, e);
+            }
         }
     }).await.ok();
 
-    // AR Invoice Cancelled -> log for audit (original JE reversal would be manual)
+    // AR Invoice Cancelled -> reverse the original auto-created JE
     let svc = service.clone();
     bus.subscribe::<ArInvoiceCancelled, _, _>("erp.ar.invoice.cancelled", move |envelope| {
-        let _svc = svc.clone();
+        let svc = svc.clone();
         let invoice_id = envelope.payload.invoice_id.clone();
         let customer_id = envelope.payload.customer_id.clone();
         async move {
             tracing::info!(
-                "AR invoice cancelled: {} (customer: {}) - manual JE reversal may be required",
+                "AR invoice cancelled: {} (customer: {}) - reversing original JE",
                 invoice_id, customer_id
             );
+            if let Err(e) = svc.handle_ar_invoice_cancelled(&invoice_id, &customer_id).await {
+                tracing::error!("Failed to reverse JE for cancelled AR invoice {}: {}", invoice_id, e);
+            }
+        }
+    }).await.ok();
+
+    // Cycle Count Posted -> auto-create inventory adjustment journal entry
+    let svc = service.clone();
+    bus.subscribe::<CycleCountPosted, _, _>("scm.inventory.cycle_count.posted", move |envelope| {
+        let svc = svc.clone();
+        let session_id = envelope.payload.session_id.clone();
+        let warehouse_id = envelope.payload.warehouse_id.clone();
+        let adjustment_count = envelope.payload.adjustment_count;
+        async move {
+            tracing::info!(
+                "Cycle count posted: session={}, warehouse={}, {} adjustments",
+                session_id, warehouse_id, adjustment_count
+            );
+            if let Err(e) = svc.handle_cycle_count_posted(&session_id, &warehouse_id, adjustment_count).await {
+                tracing::error!("Failed to create auto-JE for cycle count session {}: {}", session_id, e);
+            }
         }
     }).await.ok();
 

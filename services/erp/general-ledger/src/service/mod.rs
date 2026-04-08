@@ -729,6 +729,86 @@ impl LedgerService {
         self.post_journal_entry(&result.entry.id).await
     }
 
+    /// Handle AP invoice cancellation by finding and reversing the original auto-created JE.
+    /// The original JE description contains the invoice_id (e.g., "AP Invoice INV-001 approved").
+    /// Returns the reversal entry (posted, with swapped debit/credit lines) or None if no JE found.
+    pub async fn handle_ap_invoice_cancelled(
+        &self,
+        invoice_id: &str,
+        _vendor_id: &str,
+    ) -> AppResult<Option<JournalEntryWithLines>> {
+        // Search for the original posted JE by description pattern
+        let original = self.repo.find_posted_entry_by_description(
+            &format!("AP Invoice {}", invoice_id)
+        ).await?;
+
+        match original {
+            Some(entry) => {
+                tracing::info!(
+                    "Found original JE {} for cancelled AP invoice {}, reversing",
+                    entry.entry_number, invoice_id
+                );
+                self.reverse_journal_entry(&entry.id).await?;
+                // Look up the reversal entry (the new posted counter-entry)
+                let reversal = self.repo.find_reversal_for(&entry.id).await?;
+                match reversal {
+                    Some(rev) => {
+                        let lines = self.repo.get_journal_lines(&rev.id).await?;
+                        Ok(Some(JournalEntryWithLines { entry: rev, lines }))
+                    }
+                    None => Ok(None),
+                }
+            }
+            None => {
+                tracing::warn!(
+                    "No posted JE found for cancelled AP invoice {} - no reversal needed",
+                    invoice_id
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    /// Handle AR invoice cancellation by finding and reversing the original auto-created JE.
+    /// The original JE description contains the invoice_id (e.g., "AR Invoice INV-001 created").
+    /// Returns the reversal entry (posted, with swapped debit/credit lines) or None if no JE found.
+    pub async fn handle_ar_invoice_cancelled(
+        &self,
+        invoice_id: &str,
+        _customer_id: &str,
+    ) -> AppResult<Option<JournalEntryWithLines>> {
+        // Search for the original posted JE by description pattern
+        let original = self.repo.find_posted_entry_by_description(
+            &format!("AR Invoice {}", invoice_id)
+        ).await?;
+
+        match original {
+            Some(entry) => {
+                tracing::info!(
+                    "Found original JE {} for cancelled AR invoice {}, reversing",
+                    entry.entry_number, invoice_id
+                );
+                self.reverse_journal_entry(&entry.id).await?;
+                // Look up the reversal entry (the new posted counter-entry)
+                let reversal = self.repo.find_reversal_for(&entry.id).await?;
+                match reversal {
+                    Some(rev) => {
+                        let lines = self.repo.get_journal_lines(&rev.id).await?;
+                        Ok(Some(JournalEntryWithLines { entry: rev, lines }))
+                    }
+                    None => Ok(None),
+                }
+            }
+            None => {
+                tracing::warn!(
+                    "No posted JE found for cancelled AR invoice {} - no reversal needed",
+                    invoice_id
+                );
+                Ok(None)
+            }
+        }
+    }
+
     /// Create a journal entry when a fixed asset is capitalized.
     /// Debit Fixed Asset, Credit Cash/AP.
     pub async fn handle_asset_created(
@@ -1116,6 +1196,65 @@ impl LedgerService {
         }
 
         Ok(posted)
+    }
+
+    /// Create a journal entry when a cycle count is posted.
+    /// Debit Inventory, credit Cost of Goods Sold for the estimated adjustments.
+    pub async fn handle_cycle_count_posted(
+        &self,
+        session_id: &str,
+        warehouse_id: &str,
+        adjustment_count: u32,
+    ) -> AppResult<JournalEntryWithLines> {
+        let amount_per_adjustment: i64 = 10_000; // $100 per line adjusted (estimated)
+        let total_amount = amount_per_adjustment * (adjustment_count as i64);
+
+        let period = self.find_open_period().await?;
+        let inventory_account = match self.repo.find_account_by_code("1400").await {
+            Ok(a) => a,
+            Err(_) => match self.repo.find_account_by_type_async("asset").await {
+                Ok(a) => a,
+                Err(_) => self.repo.find_account_by_type_async("liability").await?,
+            },
+        };
+        let cogs_account = match self.repo.find_account_by_code("5100").await {
+            Ok(a) => a,
+            Err(_) => match self.repo.find_account_by_type_async("expense").await {
+                Ok(a) => a,
+                Err(_) => self.repo.find_account_by_type_async("asset").await?,
+            },
+        };
+
+        let input = CreateJournalEntryRequest {
+            description: Some(format!(
+                "Cycle count adjustment - session {}, warehouse {}, {} items",
+                session_id, warehouse_id, adjustment_count
+            )),
+            period_id: period.id,
+            lines: vec![
+                CreateJournalLineRequest {
+                    account_id: inventory_account.id.clone(),
+                    debit_cents: total_amount,
+                    credit_cents: 0,
+                    description: Some(format!(
+                        "Inventory adjustment for cycle count session {}",
+                        session_id
+                    )),
+                },
+                CreateJournalLineRequest {
+                    account_id: cogs_account.id.clone(),
+                    debit_cents: 0,
+                    credit_cents: total_amount,
+                    description: Some(format!(
+                        "COGS adjustment for cycle count session {}",
+                        session_id
+                    )),
+                },
+            ],
+        };
+
+        let result = self.create_journal_entry(&input, "system").await?;
+        self.post_journal_entry(&result.entry.id).await
     }
 
     async fn find_open_period(&self) -> AppResult<Period> {
@@ -2619,5 +2758,371 @@ mod tests {
         // A posted entry in closed period should fail because it's not draft
         let result = svc.delete_journal_entry(&entry.entry.id).await;
         assert!(result.is_err(), "Should fail: entry is posted, not draft");
+    }
+
+    #[tokio::test]
+    async fn test_handle_cycle_count_posted_creates_je() {
+        let repo = setup_repo().await;
+        let svc = LedgerService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let inventory = create_test_account(&repo, "1400", "Inventory", "asset").await;
+        let cogs = create_test_account(&repo, "5100", "Cost of Goods Sold", "expense").await;
+        let _period = create_test_period(&repo, "Cycle Count Period").await;
+
+        let result = svc
+            .handle_cycle_count_posted("SESSION-001", "WH-01", 5)
+            .await
+            .unwrap();
+
+        assert_eq!(result.entry.status, "posted");
+        assert_eq!(
+            result.entry.description,
+            Some("Cycle count adjustment - session SESSION-001, warehouse WH-01, 5 items".to_string())
+        );
+
+        let lines = repo.get_journal_lines(&result.entry.id).await.unwrap();
+        assert_eq!(lines.len(), 2);
+
+        // Total amount: 5 adjustments * 10000 cents = 50000
+        let debit_line = lines.iter().find(|l| l.debit_cents > 0).unwrap();
+        assert_eq!(debit_line.debit_cents, 50000);
+        assert_eq!(debit_line.account_id, inventory.id);
+
+        let credit_line = lines.iter().find(|l| l.credit_cents > 0).unwrap();
+        assert_eq!(credit_line.credit_cents, 50000);
+        assert_eq!(credit_line.account_id, cogs.id);
+
+        // Balanced entry
+        let total_debits: i64 = lines.iter().map(|l| l.debit_cents).sum();
+        let total_credits: i64 = lines.iter().map(|l| l.credit_cents).sum();
+        assert_eq!(total_debits, total_credits);
+    }
+
+    #[tokio::test]
+    async fn test_handle_ap_invoice_cancelled_reverses_original_je() {
+        let pool = setup().await;
+        let repo = LedgerRepo::new(pool.clone());
+        let svc = LedgerService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Set up accounts and period
+        let expense = create_test_account(&repo, "5000", "Operating Expenses", "expense").await;
+        let liability = create_test_account(&repo, "2000", "Accounts Payable", "liability").await;
+        let _period = create_test_period(&repo, "AP Cancel Test Period").await;
+
+        // First, create the original AP invoice JE via the handler
+        let original = svc
+            .handle_ap_invoice_approved("INV-AP-CANCEL-001", 10000, "5000")
+            .await
+            .unwrap();
+        assert_eq!(original.entry.status, "posted");
+
+        // Verify a single posted JE exists for this invoice
+        let found = repo
+            .find_posted_entry_by_description("AP Invoice INV-AP-CANCEL-001")
+            .await
+            .unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.as_ref().unwrap().id, original.entry.id);
+
+        // Now cancel the invoice
+        let result = svc
+            .handle_ap_invoice_cancelled("INV-AP-CANCEL-001", "VENDOR-001")
+            .await
+            .unwrap();
+        assert!(result.is_some());
+
+        let reversal_with_lines = result.unwrap();
+        let reversal_entry = &reversal_with_lines.entry;
+
+        // The reversal entry should be posted
+        assert_eq!(reversal_entry.status, "posted");
+        assert!(reversal_entry.reversal_of.is_some());
+        assert_eq!(reversal_entry.reversal_of.as_ref().unwrap(), &original.entry.id);
+
+        // Original entry should now be reversed
+        let original_refreshed = repo.get_journal_entry(&original.entry.id).await.unwrap();
+        assert_eq!(original_refreshed.status, "reversed");
+
+        // Reversal lines should have swapped debit/credit
+        let reversal_lines = repo.get_journal_lines(&reversal_entry.id).await.unwrap();
+        assert_eq!(reversal_lines.len(), 2);
+
+        let expense_line = reversal_lines
+            .iter()
+            .find(|l| l.account_id == expense.id)
+            .unwrap();
+        assert_eq!(expense_line.debit_cents, 0);
+        assert_eq!(expense_line.credit_cents, 10000);
+
+        let liability_line = reversal_lines
+            .iter()
+            .find(|l| l.account_id == liability.id)
+            .unwrap();
+        assert_eq!(liability_line.debit_cents, 10000);
+        assert_eq!(liability_line.credit_cents, 0);
+
+        // Reversal lines should be balanced
+        let total_debits: i64 = reversal_lines.iter().map(|l| l.debit_cents).sum();
+        let total_credits: i64 = reversal_lines.iter().map(|l| l.credit_cents).sum();
+        assert_eq!(total_debits, total_credits);
+    }
+
+    #[tokio::test]
+    async fn test_handle_ar_invoice_cancelled_reverses_original_je() {
+        let pool = setup().await;
+        let repo = LedgerRepo::new(pool.clone());
+        let svc = LedgerService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Set up accounts and period
+        let asset = create_test_account(&repo, "1200", "Accounts Receivable", "asset").await;
+        let revenue = create_test_account(&repo, "4000", "Revenue", "revenue").await;
+        let _period = create_test_period(&repo, "AR Cancel Test Period").await;
+
+        // First, create the original AR invoice JE via the handler
+        let original = svc
+            .handle_ar_invoice_created("INV-AR-CANCEL-001", 25000)
+            .await
+            .unwrap();
+        assert_eq!(original.entry.status, "posted");
+
+        // Verify a posted JE exists for this invoice
+        let found = repo
+            .find_posted_entry_by_description("AR Invoice INV-AR-CANCEL-001")
+            .await
+            .unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.as_ref().unwrap().id, original.entry.id);
+
+        // Now cancel the invoice
+        let result = svc
+            .handle_ar_invoice_cancelled("INV-AR-CANCEL-001", "CUSTOMER-001")
+            .await
+            .unwrap();
+        assert!(result.is_some());
+
+        let reversal_with_lines = result.unwrap();
+        let reversal_entry = &reversal_with_lines.entry;
+
+        // The reversal entry should be posted
+        assert_eq!(reversal_entry.status, "posted");
+        assert!(reversal_entry.reversal_of.is_some());
+        assert_eq!(reversal_entry.reversal_of.as_ref().unwrap(), &original.entry.id);
+
+        // Original entry should now be reversed
+        let original_refreshed = repo.get_journal_entry(&original.entry.id).await.unwrap();
+        assert_eq!(original_refreshed.status, "reversed");
+
+        // Reversal lines should have swapped debit/credit
+        let reversal_lines = repo.get_journal_lines(&reversal_entry.id).await.unwrap();
+        assert_eq!(reversal_lines.len(), 2);
+
+        let asset_line = reversal_lines
+            .iter()
+            .find(|l| l.account_id == asset.id)
+            .unwrap();
+        assert_eq!(asset_line.debit_cents, 0);
+        assert_eq!(asset_line.credit_cents, 25000);
+
+        let revenue_line = reversal_lines
+            .iter()
+            .find(|l| l.account_id == revenue.id)
+            .unwrap();
+        assert_eq!(revenue_line.debit_cents, 25000);
+        assert_eq!(revenue_line.credit_cents, 0);
+
+        // Reversal lines should be balanced
+        let total_debits: i64 = reversal_lines.iter().map(|l| l.debit_cents).sum();
+        let total_credits: i64 = reversal_lines.iter().map(|l| l.credit_cents).sum();
+        assert_eq!(total_debits, total_credits);
+    }
+
+    #[tokio::test]
+    async fn test_handle_ap_invoice_cancelled_no_original_je() {
+        let pool = setup().await;
+        let repo = LedgerRepo::new(pool.clone());
+        let svc = LedgerService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // No JE exists for this invoice - cancellation should return Ok(None)
+        let result = svc
+            .handle_ap_invoice_cancelled("INV-AP-NONE-001", "VENDOR-002")
+            .await
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_handle_ar_invoice_cancelled_no_original_je() {
+        let pool = setup().await;
+        let repo = LedgerRepo::new(pool.clone());
+        let svc = LedgerService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // No JE exists for this invoice - cancellation should return Ok(None)
+        let result = svc
+            .handle_ar_invoice_cancelled("INV-AR-NONE-001", "CUSTOMER-002")
+            .await
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_handle_ap_invoice_cancelled_already_reversed() {
+        let pool = setup().await;
+        let repo = LedgerRepo::new(pool.clone());
+        let svc = LedgerService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Set up and create original AP invoice JE
+        let _expense = create_test_account(&repo, "5100", "Expenses", "expense").await;
+        let _liability = create_test_account(&repo, "2100", "AP", "liability").await;
+        let _period = create_test_period(&repo, "AP Already Rev Period").await;
+
+        let _original = svc
+            .handle_ap_invoice_approved("INV-AP-REV-001", 5000, "5100")
+            .await
+            .unwrap();
+
+        // Cancel once - should succeed
+        let first_cancel = svc
+            .handle_ap_invoice_cancelled("INV-AP-REV-001", "VENDOR-003")
+            .await
+            .unwrap();
+        assert!(first_cancel.is_some());
+
+        // Cancel again - original JE is now "reversed", not "posted",
+        // so find_posted_entry_by_description won't find it
+        let second_cancel = svc
+            .handle_ap_invoice_cancelled("INV-AP-REV-001", "VENDOR-003")
+            .await
+            .unwrap();
+        assert!(second_cancel.is_none(), "Second cancellation should find no posted JE to reverse");
+    }
+
+    #[tokio::test]
+    async fn test_handle_ar_invoice_cancelled_already_reversed() {
+        let pool = setup().await;
+        let repo = LedgerRepo::new(pool.clone());
+        let svc = LedgerService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Set up and create original AR invoice JE
+        let _asset = create_test_account(&repo, "1300", "AR", "asset").await;
+        let _revenue = create_test_account(&repo, "4100", "Revenue", "revenue").await;
+        let _period = create_test_period(&repo, "AR Already Rev Period").await;
+
+        let _original = svc
+            .handle_ar_invoice_created("INV-AR-REV-001", 7500)
+            .await
+            .unwrap();
+
+        // Cancel once - should succeed
+        let first_cancel = svc
+            .handle_ar_invoice_cancelled("INV-AR-REV-001", "CUSTOMER-003")
+            .await
+            .unwrap();
+        assert!(first_cancel.is_some());
+
+        // Cancel again - original JE is now "reversed", not "posted",
+        // so find_posted_entry_by_description won't find it
+        let second_cancel = svc
+            .handle_ar_invoice_cancelled("INV-AR-REV-001", "CUSTOMER-003")
+            .await
+            .unwrap();
+        assert!(second_cancel.is_none(), "Second cancellation should find no posted JE to reverse");
+    }
+
+    #[tokio::test]
+    async fn test_find_posted_entry_by_description() {
+        let pool = setup().await;
+        let repo = LedgerRepo::new(pool);
+
+        let cash = create_test_account(&repo, "1000", "Cash", "asset").await;
+        let revenue = create_test_account(&repo, "4000", "Revenue", "revenue").await;
+        let period = create_test_period(&repo, "Find Desc Period").await;
+
+        // Create and post a journal entry with a specific description
+        let entry_number = repo.next_entry_number().await.unwrap();
+        let entry = repo
+            .create_journal_entry(
+                &entry_number,
+                &CreateJournalEntryRequest {
+                    description: Some("AP Invoice INV-FIND-001 approved".into()),
+                    period_id: period.id.clone(),
+                    lines: vec![
+                        CreateJournalLineRequest {
+                            account_id: cash.id.clone(),
+                            debit_cents: 5000,
+                            credit_cents: 0,
+                            description: None,
+                        },
+                        CreateJournalLineRequest {
+                            account_id: revenue.id.clone(),
+                            debit_cents: 0,
+                            credit_cents: 5000,
+                            description: None,
+                        },
+                    ],
+                },
+                "system",
+            )
+            .await
+            .unwrap();
+
+        // Not found before posting (status is draft)
+        let found = repo
+            .find_posted_entry_by_description("AP Invoice INV-FIND-001")
+            .await
+            .unwrap();
+        assert!(found.is_none());
+
+        // Post it
+        repo.post_journal_entry(&entry.id).await.unwrap();
+
+        // Now it should be found
+        let found = repo
+            .find_posted_entry_by_description("AP Invoice INV-FIND-001")
+            .await
+            .unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().id, entry.id);
+
+        // Non-matching pattern should not find it
+        let not_found = repo
+            .find_posted_entry_by_description("AR Invoice INV-FIND-001")
+            .await
+            .unwrap();
+        assert!(not_found.is_none());
     }
 }

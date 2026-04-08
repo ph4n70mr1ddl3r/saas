@@ -489,6 +489,45 @@ impl InventoryService {
         Ok(())
     }
 
+    /// Check material availability when a manufacturing work order starts.
+    /// Logs the event details and current stock levels for the required item.
+    pub async fn handle_work_order_started(
+        &self,
+        work_order_id: &str,
+        item_id: &str,
+        quantity: i64,
+    ) -> AppResult<()> {
+        tracing::info!(
+            "Work order started: wo_id={}, item={}, required qty={}",
+            work_order_id, item_id, quantity
+        );
+
+        match self.get_item_stock(item_id).await {
+            Ok(levels) => {
+                let total_on_hand: i64 = levels.iter().map(|l| l.quantity_on_hand).sum();
+                let total_available: i64 = levels.iter().map(|l| l.quantity_available).sum();
+                if total_on_hand >= quantity {
+                    tracing::info!(
+                        "Sufficient materials available for work order {}: item={}, required={}, on_hand={}, available={}",
+                        work_order_id, item_id, quantity, total_on_hand, total_available
+                    );
+                } else {
+                    tracing::warn!(
+                        "Insufficient materials for work order {}: item={}, required={}, on_hand={}, available={}",
+                        work_order_id, item_id, quantity, total_on_hand, total_available
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Could not check stock for work order {}: item={}, error={}",
+                    work_order_id, item_id, e
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Add returned items back to inventory when a customer return is processed.
     pub async fn handle_return_created(
         &self,
@@ -1926,5 +1965,100 @@ mod tests {
 
         let stock = sl_repo.get_by_item_warehouse(&item.id, &wh.id).await.unwrap().unwrap();
         assert_eq!(stock.quantity_on_hand, 9); // 7 + 2
+    }
+
+    #[tokio::test]
+    async fn test_handle_work_order_started_sufficient_stock() {
+        let pool = setup().await;
+        let svc = InventoryService::new(
+            pool.clone(),
+            saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        );
+
+        let wh = svc.warehouse_repo.create(&CreateWarehouse {
+            name: "WH-WOS".into(),
+            address: None,
+        }).await.unwrap();
+        let item = svc.item_repo.create(&CreateItem {
+            sku: "SKU-WOS".into(),
+            name: "Work Order Material".into(),
+            description: None,
+            unit_of_measure: None,
+            item_type: "raw_material".into(),
+            reorder_point: 0,
+            safety_stock: 0,
+            economic_order_qty: 0,
+            unit_price_cents: None,
+        }).await.unwrap();
+
+        // Stock 200 units
+        svc.stock_level_repo.upsert_receipt(&item.id, &wh.id, 200).await.unwrap();
+
+        // Handle work order started requiring 100 units -- should succeed
+        let result = svc.handle_work_order_started("WO-START-001", &item.id, 100).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_work_order_started_insufficient_stock() {
+        let pool = setup().await;
+        let svc = InventoryService::new(
+            pool.clone(),
+            saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        );
+
+        let wh = svc.warehouse_repo.create(&CreateWarehouse {
+            name: "WH-WOS-LOW".into(),
+            address: None,
+        }).await.unwrap();
+        let item = svc.item_repo.create(&CreateItem {
+            sku: "SKU-WOS-LOW".into(),
+            name: "Low Stock Material".into(),
+            description: None,
+            unit_of_measure: None,
+            item_type: "raw_material".into(),
+            reorder_point: 0,
+            safety_stock: 0,
+            economic_order_qty: 0,
+            unit_price_cents: None,
+        }).await.unwrap();
+
+        // Stock only 10 units
+        svc.stock_level_repo.upsert_receipt(&item.id, &wh.id, 10).await.unwrap();
+
+        // Handle work order started requiring 50 units -- still returns Ok (logs warning)
+        let result = svc.handle_work_order_started("WO-START-002", &item.id, 50).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_work_order_started_no_stock() {
+        let pool = setup().await;
+        let svc = InventoryService::new(
+            pool.clone(),
+            saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        );
+
+        let item = svc.item_repo.create(&CreateItem {
+            sku: "SKU-WOS-NONE".into(),
+            name: "No Stock Material".into(),
+            description: None,
+            unit_of_measure: None,
+            item_type: "raw_material".into(),
+            reorder_point: 0,
+            safety_stock: 0,
+            economic_order_qty: 0,
+            unit_price_cents: None,
+        }).await.unwrap();
+
+        // No stock at all -- handler should still succeed (logs warning about missing stock)
+        let result = svc.handle_work_order_started("WO-START-003", &item.id, 25).await;
+        assert!(result.is_ok());
     }
 }

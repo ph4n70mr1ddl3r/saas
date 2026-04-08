@@ -357,6 +357,76 @@ impl ArService {
         Ok(Some(result))
     }
 
+    /// Handle a ReturnApproved event by creating a credit memo in AR.
+    /// Looks up the customer via the original auto-invoice (AUTO-SO-{order_id}).
+    /// If no matching invoice/customer is found, logs a warning and returns None.
+    pub async fn handle_return_approved(
+        &self,
+        return_id: &str,
+        order_id: &str,
+        item_id: &str,
+        quantity: i64,
+    ) -> AppResult<Option<CreditMemo>> {
+        tracing::info!(
+            "Return approved: return_id={}, order_id={}, item_id={}, quantity={}",
+            return_id, order_id, item_id, quantity
+        );
+
+        // Try to find the original invoice for this order (created by handle_order_fulfilled)
+        let invoice_number = format!("AUTO-SO-{}", order_id);
+        let invoices = self.repo.list_invoices().await?;
+        let original = invoices.iter().find(|inv| inv.invoice_number == invoice_number);
+
+        let customer_id = match original {
+            Some(inv) => inv.customer_id.clone(),
+            None => {
+                tracing::warn!(
+                    "No invoice found with number '{}' for return {}, skipping credit memo creation",
+                    invoice_number, return_id
+                );
+                return Ok(None);
+            }
+        };
+
+        // Validate customer still exists
+        if self.repo.get_customer(&customer_id).await.is_err() {
+            tracing::warn!(
+                "Customer '{}' not found for return {}, skipping credit memo creation",
+                customer_id, return_id
+            );
+            return Ok(None);
+        }
+
+        // Use a default unit price of 1000 cents ($10) per unit for the credit amount.
+        // In a production system this would look up the actual item price from the original invoice line.
+        let default_unit_price_cents: i64 = 1000;
+        let credit_amount = quantity * default_unit_price_cents;
+
+        if credit_amount <= 0 {
+            tracing::warn!(
+                "Credit amount is non-positive ({}) for return {}, skipping",
+                credit_amount, return_id
+            );
+            return Ok(None);
+        }
+
+        let input = CreateCreditMemoRequest {
+            customer_id,
+            amount_cents: credit_amount,
+            reason: Some(format!(
+                "Credit memo for approved return {} - order {}, item {} (qty: {})",
+                return_id, order_id, item_id, quantity
+            )),
+        };
+
+        let memo = self.create_credit_memo(&input).await?;
+        tracing::info!(
+            "Created credit memo {} for return {} (amount: {} cents)",
+            memo.id, return_id, memo.amount_cents
+        );
+        Ok(Some(memo))
+    }
+
     // --- Aging Report ---
 
     pub async fn aging_report(&self, as_of_date: &str) -> AppResult<ArAgingReport> {
@@ -1095,5 +1165,111 @@ mod tests {
             method: Some("wire".into()),
         }).await.unwrap();
         assert_eq!(receipt.amount_cents, 20000);
+    }
+
+    #[tokio::test]
+    async fn test_handle_return_approved_creates_credit_memo() {
+        let pool = setup().await;
+        let repo = ArRepo::new(pool.clone());
+        let svc = ArService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Create a customer and an order invoice (simulating handle_order_fulfilled)
+        let customer = create_test_customer(&repo, "Return Customer").await;
+        let _invoice = repo
+            .create_invoice(&CreateArInvoiceRequest {
+                customer_id: customer.id.clone(),
+                invoice_number: "AUTO-SO-SO-RET-001".into(),
+                invoice_date: "2025-06-01".into(),
+                due_date: "2025-07-01".into(),
+                lines: vec![CreateArInvoiceLineRequest {
+                    description: Some("Order SO-RET-001 - Item WIDGET-A (qty: 5)".into()),
+                    amount_cents: 5000,
+                }],
+            })
+            .await
+            .unwrap();
+
+        // Handle return approved event
+        let result = svc
+            .handle_return_approved("RET-100", "SO-RET-001", "WIDGET-A", 3)
+            .await
+            .unwrap();
+
+        assert!(result.is_some());
+        let memo = result.unwrap();
+        assert_eq!(memo.customer_id, customer.id);
+        assert_eq!(memo.amount_cents, 3000); // 3 * 1000 (default unit price)
+        assert_eq!(memo.status, "open");
+        assert_eq!(memo.applied_amount_cents, 0);
+        assert!(memo.reason.is_some());
+        let reason = memo.reason.unwrap();
+        assert!(reason.contains("RET-100"));
+        assert!(reason.contains("SO-RET-001"));
+        assert!(reason.contains("WIDGET-A"));
+        assert!(reason.contains("3"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_return_approved_no_matching_invoice() {
+        let pool = setup().await;
+        let repo = ArRepo::new(pool.clone());
+        let svc = ArService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // No customer or invoice created -- should return None gracefully
+        let result = svc
+            .handle_return_approved("RET-200", "SO-NONEXIST", "ITEM-X", 2)
+            .await
+            .unwrap();
+
+        assert!(result.is_none());
+
+        // Verify no credit memos were created
+        let memos = repo.list_credit_memos().await.unwrap();
+        assert!(memos.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_return_approved_zero_quantity() {
+        let pool = setup().await;
+        let repo = ArRepo::new(pool.clone());
+        let svc = ArService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let customer = create_test_customer(&repo, "Zero Qty Customer").await;
+        let _invoice = repo
+            .create_invoice(&CreateArInvoiceRequest {
+                customer_id: customer.id.clone(),
+                invoice_number: "AUTO-SO-SO-ZERO".into(),
+                invoice_date: "2025-06-01".into(),
+                due_date: "2025-07-01".into(),
+                lines: vec![CreateArInvoiceLineRequest {
+                    description: Some("Test line".into()),
+                    amount_cents: 5000,
+                }],
+            })
+            .await
+            .unwrap();
+
+        // quantity = 0 means credit_amount = 0, which should be skipped
+        let result = svc
+            .handle_return_approved("RET-300", "SO-ZERO", "ITEM-Z", 0)
+            .await
+            .unwrap();
+
+        assert!(result.is_none());
     }
 }

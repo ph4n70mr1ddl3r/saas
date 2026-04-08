@@ -279,6 +279,24 @@ impl LedgerRepo {
         Ok((original, reversal))
     }
 
+    /// Find a posted, non-reversed journal entry whose description contains the given pattern.
+    /// Used to locate the original JE created for an AP/AR invoice so it can be reversed on cancellation.
+    pub async fn find_posted_entry_by_description(&self, pattern: &str) -> AppResult<Option<JournalEntry>> {
+        let like_pattern = format!("%{}%", pattern);
+        let row = sqlx::query_as::<_, JournalEntry>(
+            r#"SELECT id, entry_number, description, period_id, status, posted_at, created_by, created_at, reversal_of
+               FROM journal_entries
+               WHERE description LIKE ?
+                 AND status = 'posted'
+               ORDER BY created_at DESC
+               LIMIT 1"#,
+        )
+        .bind(&like_pattern)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
     /// Find the reversal entry for a given original entry ID.
     pub async fn find_reversal_for(&self, original_id: &str) -> AppResult<Option<JournalEntry>> {
         let row = sqlx::query_as::<_, JournalEntry>(
