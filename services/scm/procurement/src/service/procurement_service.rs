@@ -1290,4 +1290,231 @@ mod tests {
             .await;
         assert!(result.is_ok());
     }
+
+    // --- Status transition validation tests ---
+
+    /// Helper: builds a ProcurementService wired to a fresh test database.
+    async fn make_svc() -> (ProcurementService, SqlitePool) {
+        let pool = setup().await;
+        let svc = ProcurementService {
+            pool: pool.clone(),
+            supplier_repo: SupplierRepo::new(pool.clone()),
+            po_repo: PurchaseOrderRepo::new(pool.clone()),
+            goods_receipt_repo: GoodsReceiptRepo::new(pool.clone()),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+        (svc, pool)
+    }
+
+    /// Helper: creates a supplier and a single-line PO in draft state.
+    async fn create_draft_po(
+        svc: &ProcurementService,
+        supplier_name: &str,
+        item_id: &str,
+        quantity: i64,
+        unit_price_cents: i64,
+    ) -> PurchaseOrderResponse {
+        let supplier = svc
+            .create_supplier(CreateSupplier {
+                name: supplier_name.into(),
+                email: None,
+                phone: None,
+                address: None,
+            })
+            .await
+            .unwrap();
+
+        svc.create_purchase_order(CreatePurchaseOrder {
+            supplier_id: supplier.id,
+            order_date: "2025-07-01".into(),
+            lines: vec![CreatePurchaseOrderLine {
+                item_id: item_id.into(),
+                quantity,
+                unit_price_cents,
+            }],
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_submit_already_submitted_po_fails() {
+        let (svc, _pool) = make_svc().await;
+
+        let po = create_draft_po(&svc, "Submit Twice Supplier", "ITEM-ST", 10, 100).await;
+        assert_eq!(po.status, "draft");
+
+        // First submit succeeds.
+        let submitted = svc.submit_purchase_order(&po.id).await.unwrap();
+        assert_eq!(submitted.status, "submitted");
+
+        // Second submit must fail — PO is no longer draft.
+        let result = svc.submit_purchase_order(&po.id).await;
+        assert!(result.is_err(), "Submitting an already-submitted PO should fail");
+    }
+
+    #[tokio::test]
+    async fn test_approve_draft_po_fails() {
+        let (svc, _pool) = make_svc().await;
+
+        let po = create_draft_po(&svc, "Approve Draft Supplier", "ITEM-AD", 5, 200).await;
+        assert_eq!(po.status, "draft");
+
+        // Trying to approve a draft PO (skipping submit) must fail.
+        let result = svc.approve_purchase_order(&po.id).await;
+        assert!(result.is_err(), "Approving a draft PO without submitting should fail");
+    }
+
+    #[tokio::test]
+    async fn test_cancel_approved_po() {
+        let (svc, _pool) = make_svc().await;
+
+        let po = create_draft_po(&svc, "Cancel Approved Supplier", "ITEM-CA", 8, 150).await;
+
+        svc.submit_purchase_order(&po.id).await.unwrap();
+        svc.approve_purchase_order(&po.id).await.unwrap();
+
+        // Cancelling an approved PO must fail — only draft or submitted can be cancelled.
+        let result = svc.cancel_purchase_order(&po.id).await;
+        assert!(
+            result.is_err(),
+            "Cancelling an approved PO should fail — only draft or submitted orders can be cancelled"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_receive_unapproved_po_fails() {
+        let (svc, _pool) = make_svc().await;
+
+        let po = create_draft_po(&svc, "Receive Draft Supplier", "ITEM-RD", 20, 50).await;
+        let lines = svc.po_repo.get_lines(&po.id).await.unwrap();
+
+        // Attempt to receive on a draft PO — must fail.
+        let result = svc
+            .receive_purchase_order(
+                &po.id,
+                ReceivePurchaseOrder {
+                    lines: vec![ReceiveLine {
+                        po_line_id: lines[0].id.clone(),
+                        quantity_received: 5,
+                        warehouse_id: "WH-1".into(),
+                    }],
+                },
+            )
+            .await;
+        assert!(result.is_err(), "Receiving against a draft PO should fail");
+
+        // Also try after submit only (not yet approved) — must still fail.
+        svc.submit_purchase_order(&po.id).await.unwrap();
+        let result = svc
+            .receive_purchase_order(
+                &po.id,
+                ReceivePurchaseOrder {
+                    lines: vec![ReceiveLine {
+                        po_line_id: lines[0].id.clone(),
+                        quantity_received: 5,
+                        warehouse_id: "WH-1".into(),
+                    }],
+                },
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "Receiving against a submitted (non-approved) PO should fail"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_po_full_lifecycle() {
+        let (svc, _pool) = make_svc().await;
+
+        // Create PO with two lines.
+        let supplier = svc
+            .create_supplier(CreateSupplier {
+                name: "Lifecycle Supplier".into(),
+                email: None,
+                phone: None,
+                address: None,
+            })
+            .await
+            .unwrap();
+
+        let po = svc
+            .create_purchase_order(CreatePurchaseOrder {
+                supplier_id: supplier.id,
+                order_date: "2025-08-01".into(),
+                lines: vec![
+                    CreatePurchaseOrderLine {
+                        item_id: "ITEM-LC-1".into(),
+                        quantity: 10,
+                        unit_price_cents: 100,
+                    },
+                    CreatePurchaseOrderLine {
+                        item_id: "ITEM-LC-2".into(),
+                        quantity: 5,
+                        unit_price_cents: 200,
+                    },
+                ],
+            })
+            .await
+            .unwrap();
+
+        // State: draft
+        assert_eq!(po.status, "draft");
+
+        // Transition: draft -> submitted
+        let submitted = svc.submit_purchase_order(&po.id).await.unwrap();
+        assert_eq!(submitted.status, "submitted");
+
+        // Transition: submitted -> approved
+        let approved = svc.approve_purchase_order(&po.id).await.unwrap();
+        assert_eq!(approved.status, "approved");
+
+        // Partial receive on first line only -> partially_received
+        let lines = svc.po_repo.get_lines(&po.id).await.unwrap();
+        let detail = svc
+            .receive_purchase_order(
+                &po.id,
+                ReceivePurchaseOrder {
+                    lines: vec![ReceiveLine {
+                        po_line_id: lines[0].id.clone(),
+                        quantity_received: 6,
+                        warehouse_id: "WH-LC".into(),
+                    }],
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(detail.order.status, "partially_received");
+        assert_eq!(detail.lines[0].quantity_received, 6);
+        assert_eq!(detail.lines[1].quantity_received, 0);
+
+        // Full receive: remaining on line 1 + all of line 2 -> received
+        let lines = svc.po_repo.get_lines(&po.id).await.unwrap();
+        let detail = svc
+            .receive_purchase_order(
+                &po.id,
+                ReceivePurchaseOrder {
+                    lines: vec![
+                        ReceiveLine {
+                            po_line_id: lines[0].id.clone(),
+                            quantity_received: 4,
+                            warehouse_id: "WH-LC".into(),
+                        },
+                        ReceiveLine {
+                            po_line_id: lines[1].id.clone(),
+                            quantity_received: 5,
+                            warehouse_id: "WH-LC".into(),
+                        },
+                    ],
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(detail.order.status, "received");
+        assert_eq!(detail.lines[0].quantity_received, 10);
+        assert_eq!(detail.lines[1].quantity_received, 5);
+    }
 }

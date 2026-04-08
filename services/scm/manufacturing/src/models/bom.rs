@@ -9,6 +9,7 @@ pub struct CreateBom {
     #[validate(length(min = 1))]
     pub finished_item_id: String,
     pub quantity: Option<i64>,
+    #[validate(length(min = 1, message = "BOM must have at least one component"))]
     pub components: Vec<CreateBomComponent>,
 }
 

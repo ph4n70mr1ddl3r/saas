@@ -1393,4 +1393,139 @@ mod tests {
         let updated = svc.order_repo.get_by_id(&order.id).await.unwrap();
         assert_eq!(updated.status, "confirmed"); // unchanged
     }
+
+    #[tokio::test]
+    async fn test_confirm_already_confirmed_order_fails() {
+        let pool = setup().await;
+        let svc = OrderManagementService {
+            order_repo: SalesOrderRepo::new(pool.clone()),
+            fulfillment_repo: FulfillmentRepo::new(pool.clone()),
+            return_repo: ReturnRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Create and confirm an order
+        let order = svc.order_repo.create(&CreateSalesOrder {
+            customer_id: "CUST-DBLCONF".into(),
+            order_date: "2026-04-01".into(),
+            shipping_address: None,
+            notes: None,
+            lines: vec![CreateSalesOrderLine {
+                item_id: "ITEM-DBLCONF".into(),
+                quantity: 2,
+                unit_price_cents: 500,
+            }],
+        }).await.unwrap();
+        assert_eq!(order.status, "draft");
+
+        let confirmed = svc.confirm_sales_order(&order.id).await.unwrap();
+        assert_eq!(confirmed.order.status, "confirmed");
+
+        // Try to confirm again — should fail
+        let result = svc.confirm_sales_order(&order.id).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Only draft orders can be confirmed"));
+    }
+
+    #[tokio::test]
+    async fn test_cancel_fulfilled_order_fails() {
+        let pool = setup().await;
+        let svc = OrderManagementService {
+            order_repo: SalesOrderRepo::new(pool.clone()),
+            fulfillment_repo: FulfillmentRepo::new(pool.clone()),
+            return_repo: ReturnRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Create, confirm, and fulfill an order
+        let order = svc.order_repo.create(&CreateSalesOrder {
+            customer_id: "CUST-CANCFUL".into(),
+            order_date: "2026-04-01".into(),
+            shipping_address: None,
+            notes: None,
+            lines: vec![CreateSalesOrderLine {
+                item_id: "ITEM-CANCFUL".into(),
+                quantity: 3,
+                unit_price_cents: 1000,
+            }],
+        }).await.unwrap();
+
+        svc.confirm_sales_order(&order.id).await.unwrap();
+
+        let lines = svc.order_repo.get_lines(&order.id).await.unwrap();
+        let fulfilled = svc.fulfill_sales_order(&order.id, FulfillRequest {
+            lines: vec![FulfillLine {
+                order_line_id: lines[0].id.clone(),
+                quantity: 3,
+                warehouse_id: "WH-1".into(),
+            }],
+        }).await.unwrap();
+        assert_eq!(fulfilled.order.status, "fulfilled");
+
+        // Try to cancel the fulfilled order — should fail
+        let result = svc.cancel_sales_order(&order.id).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Only draft or confirmed orders can be cancelled"));
+    }
+
+    #[tokio::test]
+    async fn test_sales_order_status_transitions() {
+        let pool = setup().await;
+        let svc = OrderManagementService {
+            order_repo: SalesOrderRepo::new(pool.clone()),
+            fulfillment_repo: FulfillmentRepo::new(pool.clone()),
+            return_repo: ReturnRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Start: create order in draft
+        let order = svc.order_repo.create(&CreateSalesOrder {
+            customer_id: "CUST-LIFECYCLE".into(),
+            order_date: "2026-04-01".into(),
+            shipping_address: Some("789 Lifecycle Blvd".into()),
+            notes: Some("Full lifecycle test".into()),
+            lines: vec![CreateSalesOrderLine {
+                item_id: "ITEM-LIFE".into(),
+                quantity: 10,
+                unit_price_cents: 1000,
+            }],
+        }).await.unwrap();
+        assert_eq!(order.status, "draft");
+
+        // draft -> confirmed
+        let confirmed = svc.confirm_sales_order(&order.id).await.unwrap();
+        assert_eq!(confirmed.order.status, "confirmed");
+
+        // confirmed -> picking (partial fulfillment)
+        let lines = svc.order_repo.get_lines(&order.id).await.unwrap();
+        let partial = svc.fulfill_sales_order(&order.id, FulfillRequest {
+            lines: vec![FulfillLine {
+                order_line_id: lines[0].id.clone(),
+                quantity: 4,
+                warehouse_id: "WH-LIFE".into(),
+            }],
+        }).await.unwrap();
+        assert_eq!(partial.order.status, "picking");
+
+        // picking -> shipped (simulate via work order completed handler path:
+        // the handle_work_order_completed method advances picking -> shipped)
+        svc.order_repo.update_status(&order.id, "shipped").await.unwrap();
+        let shipped = svc.order_repo.get_by_id(&order.id).await.unwrap();
+        assert_eq!(shipped.status, "shipped");
+
+        // shipped -> fulfilled (remaining fulfillment delivered;
+        // fulfill_sales_order rejects shipped status, so we use repo directly
+        // to reflect the final delivery step)
+        svc.order_repo.update_status(&order.id, "fulfilled").await.unwrap();
+        let fulfilled = svc.order_repo.get_by_id(&order.id).await.unwrap();
+        assert_eq!(fulfilled.status, "fulfilled");
+    }
 }

@@ -3610,4 +3610,416 @@ mod tests {
         }, "admin").await;
         assert!(result.is_err());
     }
+
+    // --- Financial Reporting Tests ---
+
+    #[tokio::test]
+    async fn test_trial_balance() {
+        let pool = setup().await;
+        let repo = LedgerRepo::new(pool.clone());
+        let svc = LedgerService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Create accounts
+        let cash = create_test_account(&repo, "1000", "Cash", "asset").await;
+        let revenue = create_test_account(&repo, "4000", "Revenue", "revenue").await;
+        let expense = create_test_account(&repo, "5000", "Expenses", "expense").await;
+
+        // Create an open period
+        let period = create_test_period(&repo, "TB Test Period").await;
+
+        // Create and post a journal entry: debit cash 10000, credit revenue 10000
+        let je = svc
+            .create_journal_entry(
+                &CreateJournalEntryRequest {
+                    description: Some("Sale entry".into()),
+                    period_id: period.id.clone(),
+                    lines: vec![
+                        CreateJournalLineRequest {
+                            account_id: cash.id.clone(),
+                            debit_cents: 10000,
+                            credit_cents: 0,
+                            description: None,
+                        },
+                        CreateJournalLineRequest {
+                            account_id: revenue.id.clone(),
+                            debit_cents: 0,
+                            credit_cents: 10000,
+                            description: None,
+                        },
+                    ],
+                },
+                "tester",
+            )
+            .await
+            .unwrap();
+        svc.post_journal_entry(&je.entry.id).await.unwrap();
+
+        // Create and post a second entry: debit expense 3000, credit cash 3000
+        let je2 = svc
+            .create_journal_entry(
+                &CreateJournalEntryRequest {
+                    description: Some("Expense entry".into()),
+                    period_id: period.id,
+                    lines: vec![
+                        CreateJournalLineRequest {
+                            account_id: expense.id.clone(),
+                            debit_cents: 3000,
+                            credit_cents: 0,
+                            description: None,
+                        },
+                        CreateJournalLineRequest {
+                            account_id: cash.id.clone(),
+                            debit_cents: 0,
+                            credit_cents: 3000,
+                            description: None,
+                        },
+                    ],
+                },
+                "tester",
+            )
+            .await
+            .unwrap();
+        svc.post_journal_entry(&je2.entry.id).await.unwrap();
+
+        // Call trial_balance
+        let tb = svc.trial_balance().await.unwrap();
+
+        // Verify rows exist for our accounts
+        let cash_row = tb.iter().find(|r| r.account_code == "1000").unwrap();
+        assert_eq!(cash_row.total_debit_cents, 10000);
+        assert_eq!(cash_row.total_credit_cents, 3000);
+
+        let revenue_row = tb.iter().find(|r| r.account_code == "4000").unwrap();
+        assert_eq!(revenue_row.total_debit_cents, 0);
+        assert_eq!(revenue_row.total_credit_cents, 10000);
+
+        let expense_row = tb.iter().find(|r| r.account_code == "5000").unwrap();
+        assert_eq!(expense_row.total_debit_cents, 3000);
+        assert_eq!(expense_row.total_credit_cents, 0);
+
+        // Trial balance must balance: total debits == total credits
+        let total_debits: i64 = tb.iter().map(|r| r.total_debit_cents).sum();
+        let total_credits: i64 = tb.iter().map(|r| r.total_credit_cents).sum();
+        assert_eq!(total_debits, total_credits); // 10000 + 3000 == 3000 + 10000
+    }
+
+    #[tokio::test]
+    async fn test_balance_sheet() {
+        let pool = setup().await;
+        let repo = LedgerRepo::new(pool.clone());
+        let svc = LedgerService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Create accounts: asset, liability, equity
+        let cash = create_test_account(&repo, "1100", "Cash", "asset").await;
+        let ap = create_test_account(&repo, "2000", "Accounts Payable", "liability").await;
+        let equity = create_test_account(&repo, "3000", "Retained Earnings", "equity").await;
+
+        // Create a period
+        let period = create_test_period(&repo, "BS Test Period").await;
+
+        // JE 1: debit cash 50000, credit equity 50000 (owner investment)
+        let je1 = svc
+            .create_journal_entry(
+                &CreateJournalEntryRequest {
+                    description: Some("Owner investment".into()),
+                    period_id: period.id.clone(),
+                    lines: vec![
+                        CreateJournalLineRequest {
+                            account_id: cash.id.clone(),
+                            debit_cents: 50000,
+                            credit_cents: 0,
+                            description: None,
+                        },
+                        CreateJournalLineRequest {
+                            account_id: equity.id.clone(),
+                            debit_cents: 0,
+                            credit_cents: 50000,
+                            description: None,
+                        },
+                    ],
+                },
+                "tester",
+            )
+            .await
+            .unwrap();
+        svc.post_journal_entry(&je1.entry.id).await.unwrap();
+
+        // JE 2: debit ap 20000 (increase liability via debit would be wrong;
+        // instead record a purchase: debit some implicit expense but for balance
+        // sheet we need asset+liability. Use: credit AP 20000, debit cash 20000
+        // Actually let's do: increase AP and increase an asset.
+        // For simplicity: credit AP 15000, debit cash 15000 (borrowing)
+        let je2 = svc
+            .create_journal_entry(
+                &CreateJournalEntryRequest {
+                    description: Some("Borrow from bank".into()),
+                    period_id: period.id,
+                    lines: vec![
+                        CreateJournalLineRequest {
+                            account_id: cash.id.clone(),
+                            debit_cents: 15000,
+                            credit_cents: 0,
+                            description: None,
+                        },
+                        CreateJournalLineRequest {
+                            account_id: ap.id.clone(),
+                            debit_cents: 0,
+                            credit_cents: 15000,
+                            description: None,
+                        },
+                    ],
+                },
+                "tester",
+            )
+            .await
+            .unwrap();
+        svc.post_journal_entry(&je2.entry.id).await.unwrap();
+
+        // Call balance_sheet
+        let bs = svc.balance_sheet().await.unwrap();
+
+        // Should only contain asset/liability/equity accounts
+        assert!(bs.iter().all(|r| ["asset", "liability", "equity"].contains(&r.account_type.as_str())));
+
+        // Cash (asset): debits 50000+15000=65000, credits 0 => balance = 65000
+        let cash_row = bs.iter().find(|r| r.account_code == "1100").unwrap();
+        assert_eq!(cash_row.balance_cents, 65000);
+
+        // AP (liability): credits 15000, debits 0 => balance = 15000
+        let ap_row = bs.iter().find(|r| r.account_code == "2000").unwrap();
+        assert_eq!(ap_row.balance_cents, 15000);
+
+        // Equity: credits 50000, debits 0 => balance = 50000
+        let equity_row = bs.iter().find(|r| r.account_code == "3000").unwrap();
+        assert_eq!(equity_row.balance_cents, 50000);
+
+        // Balance sheet equation: assets == liabilities + equity
+        let total_assets: i64 = bs.iter()
+            .filter(|r| r.account_type == "asset")
+            .map(|r| r.balance_cents)
+            .sum();
+        let total_liabilities: i64 = bs.iter()
+            .filter(|r| r.account_type == "liability")
+            .map(|r| r.balance_cents)
+            .sum();
+        let total_equity: i64 = bs.iter()
+            .filter(|r| r.account_type == "equity")
+            .map(|r| r.balance_cents)
+            .sum();
+        assert_eq!(total_assets, total_liabilities + total_equity); // 65000 == 15000 + 50000
+    }
+
+    #[tokio::test]
+    async fn test_income_statement() {
+        let pool = setup().await;
+        let repo = LedgerRepo::new(pool.clone());
+        let svc = LedgerService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Create revenue and expense accounts
+        let revenue = create_test_account(&repo, "4000", "Sales Revenue", "revenue").await;
+        let expense = create_test_account(&repo, "5000", "Operating Expenses", "expense").await;
+        let cash = create_test_account(&repo, "1000", "Cash", "asset").await;
+
+        // Create a period within the query range
+        let period = repo
+            .create_period(&CreatePeriodRequest {
+                name: "IS Test Period".into(),
+                start_date: "2025-02-01".into(),
+                end_date: "2025-02-28".into(),
+                fiscal_year: 2025,
+            })
+            .await
+            .unwrap();
+
+        // JE 1: Revenue entry — debit cash 60000, credit revenue 60000
+        let je1 = svc
+            .create_journal_entry(
+                &CreateJournalEntryRequest {
+                    description: Some("Sales".into()),
+                    period_id: period.id.clone(),
+                    lines: vec![
+                        CreateJournalLineRequest {
+                            account_id: cash.id.clone(),
+                            debit_cents: 60000,
+                            credit_cents: 0,
+                            description: None,
+                        },
+                        CreateJournalLineRequest {
+                            account_id: revenue.id.clone(),
+                            debit_cents: 0,
+                            credit_cents: 60000,
+                            description: None,
+                        },
+                    ],
+                },
+                "tester",
+            )
+            .await
+            .unwrap();
+        svc.post_journal_entry(&je1.entry.id).await.unwrap();
+
+        // JE 2: Expense entry — debit expense 25000, credit cash 25000
+        let je2 = svc
+            .create_journal_entry(
+                &CreateJournalEntryRequest {
+                    description: Some("Expenses".into()),
+                    period_id: period.id,
+                    lines: vec![
+                        CreateJournalLineRequest {
+                            account_id: expense.id.clone(),
+                            debit_cents: 25000,
+                            credit_cents: 0,
+                            description: None,
+                        },
+                        CreateJournalLineRequest {
+                            account_id: cash.id.clone(),
+                            debit_cents: 0,
+                            credit_cents: 25000,
+                            description: None,
+                        },
+                    ],
+                },
+                "tester",
+            )
+            .await
+            .unwrap();
+        svc.post_journal_entry(&je2.entry.id).await.unwrap();
+
+        // Call income_statement with the period range
+        let is = svc.income_statement("2025-02-01", "2025-02-28").await.unwrap();
+
+        // Verify revenue
+        assert_eq!(is.revenue.len(), 1);
+        assert_eq!(is.revenue[0].account_code, "4000");
+        assert_eq!(is.revenue[0].balance_cents, 60000);
+        assert_eq!(is.total_revenue_cents, 60000);
+
+        // Verify expenses
+        assert_eq!(is.expenses.len(), 1);
+        assert_eq!(is.expenses[0].account_code, "5000");
+        assert_eq!(is.expenses[0].balance_cents, 25000);
+        assert_eq!(is.total_expense_cents, 25000);
+
+        // Verify net income
+        assert_eq!(is.net_income_cents, 35000); // 60000 - 25000
+    }
+
+    #[tokio::test]
+    async fn test_account_balance_for_fiscal_year() {
+        let pool = setup().await;
+        let repo = LedgerRepo::new(pool.clone());
+        let svc = LedgerService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Create accounts
+        let cash = create_test_account(&repo, "1000", "Cash", "asset").await;
+        let revenue = create_test_account(&repo, "4000", "Revenue", "revenue").await;
+        let expense = create_test_account(&repo, "5000", "Expenses", "expense").await;
+        let liability = create_test_account(&repo, "2000", "AP", "liability").await;
+
+        // Create a period for fiscal year 2025
+        let period = repo
+            .create_period(&CreatePeriodRequest {
+                name: "FY2025 Period".into(),
+                start_date: "2025-06-01".into(),
+                end_date: "2025-06-30".into(),
+                fiscal_year: 2025,
+            })
+            .await
+            .unwrap();
+
+        // JE 1: debit cash 20000, credit revenue 20000
+        let je1 = svc
+            .create_journal_entry(
+                &CreateJournalEntryRequest {
+                    description: Some("Revenue".into()),
+                    period_id: period.id.clone(),
+                    lines: vec![
+                        CreateJournalLineRequest {
+                            account_id: cash.id.clone(),
+                            debit_cents: 20000,
+                            credit_cents: 0,
+                            description: None,
+                        },
+                        CreateJournalLineRequest {
+                            account_id: revenue.id.clone(),
+                            debit_cents: 0,
+                            credit_cents: 20000,
+                            description: None,
+                        },
+                    ],
+                },
+                "tester",
+            )
+            .await
+            .unwrap();
+        svc.post_journal_entry(&je1.entry.id).await.unwrap();
+
+        // JE 2: debit expense 8000, credit liability 8000
+        let je2 = svc
+            .create_journal_entry(
+                &CreateJournalEntryRequest {
+                    description: Some("Expense on credit".into()),
+                    period_id: period.id,
+                    lines: vec![
+                        CreateJournalLineRequest {
+                            account_id: expense.id.clone(),
+                            debit_cents: 8000,
+                            credit_cents: 0,
+                            description: None,
+                        },
+                        CreateJournalLineRequest {
+                            account_id: liability.id.clone(),
+                            debit_cents: 0,
+                            credit_cents: 8000,
+                            description: None,
+                        },
+                    ],
+                },
+                "tester",
+            )
+            .await
+            .unwrap();
+        svc.post_journal_entry(&je2.entry.id).await.unwrap();
+
+        // Check balances for fiscal year 2025
+        // Cash (asset): debit_cents - credit_cents = 20000 - 0 = 20000
+        let cash_balance = repo.account_balance_for_fiscal_year(&cash.id, 2025).await.unwrap();
+        assert_eq!(cash_balance, 20000);
+
+        // Revenue: credit_cents - debit_cents = 20000 - 0 = 20000
+        let rev_balance = repo.account_balance_for_fiscal_year(&revenue.id, 2025).await.unwrap();
+        assert_eq!(rev_balance, 20000);
+
+        // Expense: debit_cents - credit_cents = 8000 - 0 = 8000
+        let exp_balance = repo.account_balance_for_fiscal_year(&expense.id, 2025).await.unwrap();
+        assert_eq!(exp_balance, 8000);
+
+        // Liability: credit_cents - debit_cents = 8000 - 0 = 8000
+        let liab_balance = repo.account_balance_for_fiscal_year(&liability.id, 2025).await.unwrap();
+        assert_eq!(liab_balance, 8000);
+
+        // A different fiscal year should have zero balance
+        let no_balance = repo.account_balance_for_fiscal_year(&cash.id, 2024).await.unwrap();
+        assert_eq!(no_balance, 0);
+    }
 }

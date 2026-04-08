@@ -161,6 +161,12 @@ impl ManufacturingService {
         input
             .validate()
             .map_err(|e| saas_common::error::AppError::Validation(e.to_string()))?;
+        // Validate each component (nested validation is not automatic)
+        for component in &input.components {
+            component
+                .validate()
+                .map_err(|e| saas_common::error::AppError::Validation(e.to_string()))?;
+        }
         // Check for duplicate BOM for the same finished item
         let existing = self.bom_repo.list().await?;
         if existing
@@ -802,5 +808,154 @@ mod tests {
             .handle_po_cancelled("PO-CANCEL-002", "SUPPLIER-002", &None)
             .await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_bom_without_components_rejected() {
+        let pool = setup().await;
+        let svc = ManufacturingService {
+            work_order_repo: WorkOrderRepo::new(pool.clone()),
+            bom_repo: BomRepo::new(pool.clone()),
+            routing_step_repo: RoutingStepRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // CreateBom has #[validate(length(min = 1))] on the components field,
+        // so an empty components list should be rejected by input.validate()
+        let result = svc.create_bom(CreateBom {
+            name: "Empty BOM".into(),
+            description: Some("BOM with no components".into()),
+            finished_item_id: "ITEM-EMPTY-BOM".into(),
+            quantity: Some(1),
+            components: vec![],
+        }).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("component"));
+    }
+
+    #[tokio::test]
+    async fn test_bom_negative_component_quantity_rejected() {
+        let pool = setup().await;
+        let svc = ManufacturingService {
+            work_order_repo: WorkOrderRepo::new(pool.clone()),
+            bom_repo: BomRepo::new(pool.clone()),
+            routing_step_repo: RoutingStepRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // CreateBomComponent has #[validate(range(min = 1))] on quantity_required,
+        // so a negative quantity should be rejected by input.validate()
+        let result = svc.create_bom(CreateBom {
+            name: "Bad Qty BOM".into(),
+            description: None,
+            finished_item_id: "ITEM-NEG-QTY".into(),
+            quantity: Some(1),
+            components: vec![CreateBomComponent {
+                component_item_id: "COMP-NEG".into(),
+                quantity_required: -5,
+            }],
+        }).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("quantity_required")
+            || err.to_string().contains("quantity")
+            || err.to_string().contains("Validation"));
+    }
+
+    #[tokio::test]
+    async fn test_work_order_status_transitions() {
+        let pool = setup().await;
+        let svc = ManufacturingService {
+            work_order_repo: WorkOrderRepo::new(pool.clone()),
+            bom_repo: BomRepo::new(pool.clone()),
+            routing_step_repo: RoutingStepRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Create work order — starts as planned
+        let wo = svc.create_work_order(CreateWorkOrder {
+            item_id: "ITEM-LIFECYCLE".into(),
+            quantity: 50,
+            planned_start: Some("2026-04-01T08:00:00".into()),
+            planned_end: Some("2026-04-10T17:00:00".into()),
+        }).await.unwrap();
+        assert_eq!(wo.status, "planned");
+
+        // planned -> in_progress
+        let started = svc.start_work_order(&wo.id).await.unwrap();
+        assert_eq!(started.status, "in_progress");
+        assert!(started.actual_start.is_some());
+
+        // in_progress -> completed
+        let completed = svc.complete_work_order(&wo.id).await.unwrap();
+        assert_eq!(completed.status, "completed");
+        assert!(completed.actual_end.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_complete_planned_work_order_fails() {
+        let pool = setup().await;
+        let svc = ManufacturingService {
+            work_order_repo: WorkOrderRepo::new(pool.clone()),
+            bom_repo: BomRepo::new(pool.clone()),
+            routing_step_repo: RoutingStepRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Create a work order (starts as planned)
+        let wo = svc.create_work_order(CreateWorkOrder {
+            item_id: "ITEM-SKIP-START".into(),
+            quantity: 20,
+            planned_start: None,
+            planned_end: None,
+        }).await.unwrap();
+        assert_eq!(wo.status, "planned");
+
+        // Try to complete without starting — should fail
+        let result = svc.complete_work_order(&wo.id).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Only in-progress work orders can be completed"));
+    }
+
+    #[tokio::test]
+    async fn test_start_completed_work_order_fails() {
+        let pool = setup().await;
+        let svc = ManufacturingService {
+            work_order_repo: WorkOrderRepo::new(pool.clone()),
+            bom_repo: BomRepo::new(pool.clone()),
+            routing_step_repo: RoutingStepRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Create, start, then complete a work order
+        let wo = svc.create_work_order(CreateWorkOrder {
+            item_id: "ITEM-RESTART".into(),
+            quantity: 15,
+            planned_start: None,
+            planned_end: None,
+        }).await.unwrap();
+
+        svc.start_work_order(&wo.id).await.unwrap();
+        svc.complete_work_order(&wo.id).await.unwrap();
+
+        // Try to start the completed work order — should fail
+        let result = svc.start_work_order(&wo.id).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Only planned work orders can be started"));
     }
 }
