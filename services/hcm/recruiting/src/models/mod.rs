@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use validator::Validate;
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct JobPosting {
@@ -12,9 +13,11 @@ pub struct JobPosting {
     pub closed_at: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreateJobRequest {
+    #[validate(length(min = 1))]
     pub title: String,
+    #[validate(length(min = 1))]
     pub department_id: String,
     pub description: Option<String>,
     pub requirements: Option<String>,
@@ -41,11 +44,15 @@ pub struct Application {
     pub notes: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreateApplicationRequest {
+    #[validate(length(min = 1))]
     pub job_id: String,
+    #[validate(length(min = 1))]
     pub candidate_first_name: String,
+    #[validate(length(min = 1))]
     pub candidate_last_name: String,
+    #[validate(email)]
     pub candidate_email: String,
     pub notes: Option<String>,
 }

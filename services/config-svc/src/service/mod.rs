@@ -48,6 +48,15 @@ impl ConfigService {
         }
         Ok(entry)
     }
+
+    /// Handle config updated event: log the change for audit awareness.
+    pub async fn handle_config_updated(&self, key: &str, value: &str) -> AppResult<()> {
+        tracing::info!(
+            "Config updated propagated: key='{}', value='{}'",
+            key, value
+        );
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -168,5 +177,20 @@ mod tests {
 
         let fetched = repo.get("app.features").await.unwrap();
         assert_eq!(fetched.value, r#"{"dark_mode":true,"beta":false}"#);
+    }
+
+    #[tokio::test]
+    async fn test_handle_config_updated() {
+        let pool = setup().await;
+        let svc = ConfigService {
+            repo: ConfigRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Handler should succeed and log
+        let result = svc.handle_config_updated("app.name", "My Updated SaaS").await;
+        assert!(result.is_ok());
     }
 }

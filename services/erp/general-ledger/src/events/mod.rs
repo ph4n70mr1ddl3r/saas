@@ -3,8 +3,8 @@ use saas_common::error::AppResult;
 use saas_nats_bus::NatsBus;
 use saas_proto::events::{
     ApInvoiceCancelled, ApPaymentCreated, ArInvoiceApproved, ArInvoiceCancelled, ArReceiptCreated, AssetCreated, AssetDisposed,
-    BankAccountCreated, CycleCountPosted, DepreciationRunCompleted, ExpenseReportApproved, PayRunCompleted,
-    ReconciliationCompleted, ReturnProcessed, TransferCompleted, VendorInvoiceApproved,
+    BankAccountCreated, CycleCountPosted, DepreciationRunCompleted, ExpenseReportApproved, JournalEntryPosted, JournalEntryReversed,
+    PayRunCompleted, ReconciliationCompleted, ReturnProcessed, TransferCompleted, VendorInvoiceApproved,
     CustomerInvoiceCreated,
 };
 
@@ -267,6 +267,43 @@ pub async fn register(bus: &NatsBus, service: &LedgerService) -> AppResult<()> {
             tracing::info!("Bank account created: {} ({}, {})", name, bank_name, currency);
             if let Err(e) = svc.handle_bank_account_created(&account_id, &name, &bank_name, &currency).await {
                 tracing::error!("Failed to handle bank account created event for {}: {}", account_id, e);
+            }
+        }
+    }).await.ok();
+
+    // Self-subscriber: audit log for journal entry posted
+    let svc = service.clone();
+    bus.subscribe::<JournalEntryPosted, _, _>("erp.gl.journal.posted", move |envelope| {
+        let svc = svc.clone();
+        let entry_id = envelope.payload.entry_id.clone();
+        let entry_number = envelope.payload.entry_number.clone();
+        let posted_by = envelope.payload.posted_by.clone();
+        let line_count = envelope.payload.lines.len();
+        async move {
+            tracing::info!(
+                "[AUDIT] Journal entry posted event: id={}, number={}, posted_by={}, lines={}",
+                entry_id, entry_number, posted_by, line_count
+            );
+            if let Err(e) = svc.handle_journal_entry_posted_audit(&entry_id, &entry_number, &posted_by, line_count).await {
+                tracing::error!("Failed to handle journal entry posted audit event: {}", e);
+            }
+        }
+    }).await.ok();
+
+    // Self-subscriber: audit log for journal entry reversed
+    let svc = service.clone();
+    bus.subscribe::<JournalEntryReversed, _, _>("erp.gl.journal.reversed", move |envelope| {
+        let svc = svc.clone();
+        let entry_id = envelope.payload.entry_id.clone();
+        let original_entry_id = envelope.payload.original_entry_id.clone();
+        let reversed_by = envelope.payload.reversed_by.clone();
+        async move {
+            tracing::info!(
+                "[AUDIT] Journal entry reversed event: reversal_id={}, original_id={}, reversed_by={}",
+                entry_id, original_entry_id, reversed_by
+            );
+            if let Err(e) = svc.handle_journal_entry_reversed_audit(&entry_id, &original_entry_id, &reversed_by).await {
+                tracing::error!("Failed to handle journal entry reversed audit event: {}", e);
             }
         }
     }).await.ok();

@@ -6,6 +6,7 @@ use saas_proto::events::{
     BenefitPlanCreated, BenefitPlanDeactivated, EnrollmentCancelled, EmployeeEnrolled,
 };
 use sqlx::SqlitePool;
+use validator::Validate;
 
 #[derive(Clone)]
 pub struct BenefitsService {
@@ -32,6 +33,9 @@ impl BenefitsService {
     }
 
     pub async fn create_plan(&self, input: CreatePlanRequest) -> AppResult<BenefitPlan> {
+        input
+            .validate()
+            .map_err(|e| AppError::Validation(e.to_string()))?;
         let plan = self.repo.create_plan(&input).await?;
         if let Err(e) = self
             .bus
@@ -55,6 +59,9 @@ impl BenefitsService {
     }
 
     pub async fn update_plan(&self, id: &str, input: UpdatePlanRequest) -> AppResult<BenefitPlan> {
+        input
+            .validate()
+            .map_err(|e| AppError::Validation(e.to_string()))?;
         let plan = self.repo.update_plan(id, &input).await?;
         // Publish deactivation event if plan was deactivated
         if input.is_active == Some(false) {
@@ -108,6 +115,9 @@ impl BenefitsService {
     }
 
     pub async fn create_enrollment(&self, input: CreateEnrollmentRequest) -> AppResult<Enrollment> {
+        input
+            .validate()
+            .map_err(|e| AppError::Validation(e.to_string()))?;
         let plan = self.repo.get_plan(&input.plan_id).await?;
         if !plan.is_active {
             return Err(AppError::Validation(format!(
@@ -922,5 +932,246 @@ mod tests {
             .handle_compensation_changed("comp-002", "emp-noenroll", 90000_00, "updated")
             .await;
         assert!(result.is_ok());
+    }
+
+    // --- Validation tests ---
+
+    #[tokio::test]
+    async fn test_create_plan_rejects_empty_name() {
+        let pool = setup().await;
+        let repo = BenefitsRepo::new(pool.clone());
+        let svc = BenefitsService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_plan(CreatePlanRequest {
+                name: "".into(),
+                plan_type: "medical".into(),
+                description: None,
+                employer_contribution_cents: None,
+                employee_contribution_cents: None,
+                is_active: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            AppError::Validation(msg) => assert!(
+                msg.contains("Name is required"),
+                "Expected 'Name is required' in error, got: {}",
+                msg
+            ),
+            other => panic!("Expected Validation error, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_plan_rejects_empty_plan_type() {
+        let pool = setup().await;
+        let repo = BenefitsRepo::new(pool.clone());
+        let svc = BenefitsService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_plan(CreatePlanRequest {
+                name: "Medical Plus".into(),
+                plan_type: "".into(),
+                description: None,
+                employer_contribution_cents: None,
+                employee_contribution_cents: None,
+                is_active: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            AppError::Validation(msg) => assert!(
+                msg.contains("Plan type is required"),
+                "Expected 'Plan type is required' in error, got: {}",
+                msg
+            ),
+            other => panic!("Expected Validation error, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_plan_rejects_negative_employer_contribution() {
+        let pool = setup().await;
+        let repo = BenefitsRepo::new(pool.clone());
+        let svc = BenefitsService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_plan(CreatePlanRequest {
+                name: "Bad Plan".into(),
+                plan_type: "medical".into(),
+                description: None,
+                employer_contribution_cents: Some(-100),
+                employee_contribution_cents: None,
+                is_active: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            AppError::Validation(msg) => assert!(
+                msg.contains("Must be non-negative"),
+                "Expected 'Must be non-negative' in error, got: {}",
+                msg
+            ),
+            other => panic!("Expected Validation error, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_plan_rejects_negative_employee_contribution() {
+        let pool = setup().await;
+        let repo = BenefitsRepo::new(pool.clone());
+        let svc = BenefitsService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_plan(CreatePlanRequest {
+                name: "Bad Plan".into(),
+                plan_type: "medical".into(),
+                description: None,
+                employer_contribution_cents: None,
+                employee_contribution_cents: Some(-50),
+                is_active: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            AppError::Validation(msg) => assert!(
+                msg.contains("Must be non-negative"),
+                "Expected 'Must be non-negative' in error, got: {}",
+                msg
+            ),
+            other => panic!("Expected Validation error, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_update_plan_rejects_empty_name() {
+        let pool = setup().await;
+        let repo = BenefitsRepo::new(pool.clone());
+        let svc = BenefitsService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Create a valid plan first
+        let plan = svc
+            .create_plan(CreatePlanRequest {
+                name: "Valid".into(),
+                plan_type: "medical".into(),
+                description: None,
+                employer_contribution_cents: None,
+                employee_contribution_cents: None,
+                is_active: Some(true),
+            })
+            .await
+            .unwrap();
+
+        let result = svc
+            .update_plan(
+                &plan.id,
+                UpdatePlanRequest {
+                    name: Some("".into()),
+                    plan_type: None,
+                    description: None,
+                    employer_contribution_cents: None,
+                    employee_contribution_cents: None,
+                    is_active: None,
+                },
+            )
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            AppError::Validation(msg) => assert!(
+                msg.contains("Name is required"),
+                "Expected 'Name is required' in error, got: {}",
+                msg
+            ),
+            other => panic!("Expected Validation error, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_enrollment_rejects_empty_employee_id() {
+        let pool = setup().await;
+        let repo = BenefitsRepo::new(pool.clone());
+        let svc = BenefitsService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_enrollment(CreateEnrollmentRequest {
+                employee_id: "".into(),
+                plan_id: "some-plan".into(),
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            AppError::Validation(msg) => assert!(
+                msg.contains("Employee ID is required"),
+                "Expected 'Employee ID is required' in error, got: {}",
+                msg
+            ),
+            other => panic!("Expected Validation error, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_enrollment_rejects_empty_plan_id() {
+        let pool = setup().await;
+        let repo = BenefitsRepo::new(pool.clone());
+        let svc = BenefitsService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_enrollment(CreateEnrollmentRequest {
+                employee_id: "emp-001".into(),
+                plan_id: "".into(),
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            AppError::Validation(msg) => assert!(
+                msg.contains("Plan ID is required"),
+                "Expected 'Plan ID is required' in error, got: {}",
+                msg
+            ),
+            other => panic!("Expected Validation error, got: {:?}", other),
+        }
     }
 }

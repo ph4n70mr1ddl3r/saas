@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use validator::Validate;
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct BankAccount {
@@ -12,13 +13,16 @@ pub struct BankAccount {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreateBankAccountRequest {
+    #[validate(length(min = 1))]
     pub name: String,
+    #[validate(length(min = 1))]
     pub bank_name: String,
     pub account_number: String,
     pub routing_number: Option<String>,
     pub balance_cents: Option<i64>,
+    #[validate(length(min = 3, max = 3, message = "Currency must be 3-letter ISO code"))]
     pub currency: Option<String>,
 }
 
@@ -43,9 +47,11 @@ pub struct BankTransaction {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreateBankTransactionRequest {
+    #[validate(length(min = 1))]
     pub bank_account_id: String,
+    #[validate(range(min = 1, message = "Amount must be positive"))]
     pub amount_cents: i64,
     pub transaction_date: String,
     pub description: Option<String>,
@@ -92,10 +98,13 @@ pub struct CashFlowStatement {
     pub net_change_cents: i64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct TransferRequest {
+    #[validate(length(min = 1))]
     pub from_account_id: String,
+    #[validate(length(min = 1))]
     pub to_account_id: String,
+    #[validate(range(min = 1, message = "Amount must be positive"))]
     pub amount_cents: i64,
     pub transfer_date: String,
     pub description: Option<String>,

@@ -6,6 +6,7 @@ use saas_proto::events::{
     BankAccountCreated, ReconciliationCompleted, TransferCompleted,
 };
 use sqlx::SqlitePool;
+use validator::Validate;
 
 #[derive(Clone)]
 pub struct CashManagementService {
@@ -35,6 +36,9 @@ impl CashManagementService {
         &self,
         input: &CreateBankAccountRequest,
     ) -> AppResult<BankAccount> {
+        input
+            .validate()
+            .map_err(|e| AppError::Validation(e.to_string()))?;
         // Check for duplicate account number
         let existing = self.repo.list_bank_accounts().await?;
         if existing.iter().any(|a| a.account_number == input.account_number) {
@@ -88,6 +92,9 @@ impl CashManagementService {
         &self,
         input: &CreateBankTransactionRequest,
     ) -> AppResult<BankTransaction> {
+        input
+            .validate()
+            .map_err(|e| AppError::Validation(e.to_string()))?;
         // Validate bank account exists
         self.repo.get_bank_account(&input.bank_account_id).await?;
 
@@ -298,6 +305,9 @@ impl CashManagementService {
         &self,
         input: &TransferRequest,
     ) -> AppResult<(BankTransaction, BankTransaction)> {
+        input
+            .validate()
+            .map_err(|e| AppError::Validation(e.to_string()))?;
         // Validate accounts exist
         let from_account = self.repo.get_bank_account(&input.from_account_id).await?;
         let to_account = self.repo.get_bank_account(&input.to_account_id).await?;
@@ -1206,5 +1216,374 @@ mod tests {
             reference: None,
         }).await;
         assert!(result.is_err());
+    }
+
+    // --- Validation tests ---
+
+    #[tokio::test]
+    async fn test_create_bank_account_validation_empty_name() {
+        let pool = setup().await;
+        let svc = CashManagementService {
+            repo: CashManagementRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_bank_account(&CreateBankAccountRequest {
+                name: "".into(),
+                bank_name: "Bank A".into(),
+                account_number: "1111111111".into(),
+                routing_number: None,
+                balance_cents: Some(100_000),
+                currency: Some("USD".into()),
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("name"),
+            "Expected name validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_bank_account_validation_empty_bank_name() {
+        let pool = setup().await;
+        let svc = CashManagementService {
+            repo: CashManagementRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_bank_account(&CreateBankAccountRequest {
+                name: "Operating".into(),
+                bank_name: "".into(),
+                account_number: "1111111111".into(),
+                routing_number: None,
+                balance_cents: Some(100_000),
+                currency: Some("USD".into()),
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("bank_name"),
+            "Expected bank_name validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_bank_account_validation_invalid_currency() {
+        let pool = setup().await;
+        let svc = CashManagementService {
+            repo: CashManagementRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_bank_account(&CreateBankAccountRequest {
+                name: "Operating".into(),
+                bank_name: "Bank A".into(),
+                account_number: "1111111111".into(),
+                routing_number: None,
+                balance_cents: Some(100_000),
+                currency: Some("US".into()),
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Currency must be 3-letter ISO code"),
+            "Expected currency validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_bank_account_validation_currency_too_long() {
+        let pool = setup().await;
+        let svc = CashManagementService {
+            repo: CashManagementRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_bank_account(&CreateBankAccountRequest {
+                name: "Operating".into(),
+                bank_name: "Bank A".into(),
+                account_number: "1111111111".into(),
+                routing_number: None,
+                balance_cents: Some(100_000),
+                currency: Some("USDD".into()),
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Currency must be 3-letter ISO code"),
+            "Expected currency validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_bank_account_valid_input_succeeds() {
+        let pool = setup().await;
+        let svc = CashManagementService {
+            repo: CashManagementRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let account = svc
+            .create_bank_account(&CreateBankAccountRequest {
+                name: "Operating".into(),
+                bank_name: "Bank A".into(),
+                account_number: "1111111111".into(),
+                routing_number: None,
+                balance_cents: Some(100_000),
+                currency: Some("USD".into()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(account.name, "Operating");
+    }
+
+    #[tokio::test]
+    async fn test_create_bank_transaction_validation_empty_account_id() {
+        let pool = setup().await;
+        let svc = CashManagementService {
+            repo: CashManagementRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_bank_transaction(&CreateBankTransactionRequest {
+                bank_account_id: "".into(),
+                amount_cents: 10_000,
+                transaction_date: "2025-06-01".into(),
+                description: None,
+                r#type: "deposit".into(),
+                reference: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("bank_account_id"),
+            "Expected bank_account_id validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_bank_transaction_validation_zero_amount() {
+        let pool = setup().await;
+        let svc = CashManagementService {
+            repo: CashManagementRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let account = svc
+            .create_bank_account(&CreateBankAccountRequest {
+                name: "Test".into(),
+                bank_name: "Bank".into(),
+                account_number: "12345".into(),
+                routing_number: None,
+                balance_cents: Some(100_000),
+                currency: Some("USD".into()),
+            })
+            .await
+            .unwrap();
+
+        let result = svc
+            .create_bank_transaction(&CreateBankTransactionRequest {
+                bank_account_id: account.id,
+                amount_cents: 0,
+                transaction_date: "2025-06-01".into(),
+                description: None,
+                r#type: "deposit".into(),
+                reference: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Amount must be positive"),
+            "Expected amount validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_bank_transaction_validation_negative_amount() {
+        let pool = setup().await;
+        let svc = CashManagementService {
+            repo: CashManagementRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let account = svc
+            .create_bank_account(&CreateBankAccountRequest {
+                name: "Test".into(),
+                bank_name: "Bank".into(),
+                account_number: "123456".into(),
+                routing_number: None,
+                balance_cents: Some(100_000),
+                currency: Some("USD".into()),
+            })
+            .await
+            .unwrap();
+
+        let result = svc
+            .create_bank_transaction(&CreateBankTransactionRequest {
+                bank_account_id: account.id,
+                amount_cents: -500,
+                transaction_date: "2025-06-01".into(),
+                description: None,
+                r#type: "deposit".into(),
+                reference: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Amount must be positive"),
+            "Expected amount validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_transfer_validation_empty_from_account() {
+        let pool = setup().await;
+        let svc = CashManagementService {
+            repo: CashManagementRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .transfer(&TransferRequest {
+                from_account_id: "".into(),
+                to_account_id: "some-id".into(),
+                amount_cents: 10_000,
+                transfer_date: "2025-06-01".into(),
+                description: None,
+                reference: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("from_account_id"),
+            "Expected from_account_id validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_transfer_validation_empty_to_account() {
+        let pool = setup().await;
+        let svc = CashManagementService {
+            repo: CashManagementRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .transfer(&TransferRequest {
+                from_account_id: "some-id".into(),
+                to_account_id: "".into(),
+                amount_cents: 10_000,
+                transfer_date: "2025-06-01".into(),
+                description: None,
+                reference: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("to_account_id"),
+            "Expected to_account_id validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_transfer_validation_zero_amount() {
+        let pool = setup().await;
+        let svc = CashManagementService {
+            repo: CashManagementRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .transfer(&TransferRequest {
+                from_account_id: "acct-1".into(),
+                to_account_id: "acct-2".into(),
+                amount_cents: 0,
+                transfer_date: "2025-06-01".into(),
+                description: None,
+                reference: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Amount must be positive"),
+            "Expected amount validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_transfer_validation_negative_amount() {
+        let pool = setup().await;
+        let svc = CashManagementService {
+            repo: CashManagementRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .transfer(&TransferRequest {
+                from_account_id: "acct-1".into(),
+                to_account_id: "acct-2".into(),
+                amount_cents: -100,
+                transfer_date: "2025-06-01".into(),
+                description: None,
+                reference: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Amount must be positive"),
+            "Expected amount validation error, got: {}",
+            err
+        );
     }
 }

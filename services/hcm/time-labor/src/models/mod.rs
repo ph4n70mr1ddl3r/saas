@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use validator::Validate;
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Timesheet {
@@ -12,9 +13,11 @@ pub struct Timesheet {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreateTimesheetRequest {
+    #[validate(length(min = 1))]
     pub employee_id: String,
+    #[validate(length(min = 1))]
     pub week_start: String,
 }
 
@@ -29,10 +32,13 @@ pub struct TimeEntry {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreateTimeEntryRequest {
+    #[validate(length(min = 1))]
     pub timesheet_id: String,
+    #[validate(length(min = 1))]
     pub date: String,
+    #[validate(range(min = 0.0, message = "Hours must be non-negative"))]
     pub hours: f64,
     pub project_code: Option<String>,
     pub description: Option<String>,
@@ -50,11 +56,15 @@ pub struct LeaveRequest {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreateLeaveRequestRequest {
+    #[validate(length(min = 1))]
     pub employee_id: String,
+    #[validate(length(min = 1))]
     pub leave_type: String,
+    #[validate(length(min = 1))]
     pub start_date: String,
+    #[validate(length(min = 1))]
     pub end_date: String,
     pub reason: Option<String>,
 }

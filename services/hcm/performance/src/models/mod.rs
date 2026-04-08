@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use validator::Validate;
 
 // --- Review Cycle ---
 
@@ -13,11 +14,14 @@ pub struct ReviewCycle {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreateReviewCycleRequest {
+    #[validate(length(min = 1))]
     pub name: String,
     pub description: Option<String>,
+    #[validate(length(min = 1))]
     pub start_date: String,
+    #[validate(length(min = 1))]
     pub end_date: String,
 }
 
@@ -37,22 +41,30 @@ pub struct Goal {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreateGoalRequest {
+    #[validate(length(min = 1))]
     pub employee_id: String,
+    #[validate(length(min = 1))]
     pub cycle_id: String,
+    #[validate(length(min = 1))]
     pub title: String,
     pub description: Option<String>,
+    #[validate(range(min = 0.0, max = 100.0))]
     pub weight: Option<f64>,
+    #[validate(range(min = 0.0, max = 100.0))]
     pub progress: Option<f64>,
     pub due_date: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct UpdateGoalRequest {
+    #[validate(length(min = 1))]
     pub title: Option<String>,
     pub description: Option<String>,
+    #[validate(range(min = 0.0, max = 100.0))]
     pub weight: Option<f64>,
+    #[validate(range(min = 0.0, max = 100.0))]
     pub progress: Option<f64>,
     pub status: Option<String>,
     pub due_date: Option<String>,
@@ -80,8 +92,9 @@ pub struct CreateReviewAssignmentRequest {
     pub employee_id: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct SubmitReviewRequest {
+    #[validate(range(min = 1, max = 5, message = "Rating must be between 1 and 5"))]
     pub rating: i32,
     pub comments: Option<String>,
 }

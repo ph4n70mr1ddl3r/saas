@@ -1386,6 +1386,37 @@ impl LedgerService {
         Ok(())
     }
 
+    /// Audit handler for journal entry posted events.
+    /// Logs the entry details for audit trail purposes.
+    pub async fn handle_journal_entry_posted_audit(
+        &self,
+        entry_id: &str,
+        entry_number: &str,
+        posted_by: &str,
+        line_count: usize,
+    ) -> AppResult<()> {
+        tracing::info!(
+            "[AUDIT] Journal entry posted: id={}, number={}, posted_by={}, lines={}",
+            entry_id, entry_number, posted_by, line_count
+        );
+        Ok(())
+    }
+
+    /// Audit handler for journal entry reversed events.
+    /// Logs the reversal details for audit trail purposes.
+    pub async fn handle_journal_entry_reversed_audit(
+        &self,
+        entry_id: &str,
+        original_entry_id: &str,
+        reversed_by: &str,
+    ) -> AppResult<()> {
+        tracing::info!(
+            "[AUDIT] Journal entry reversed: reversal_id={}, original_id={}, reversed_by={}",
+            entry_id, original_entry_id, reversed_by
+        );
+        Ok(())
+    }
+
     async fn find_open_period(&self) -> AppResult<Period> {
         self.repo
             .list_periods()
@@ -3377,5 +3408,53 @@ mod tests {
             .await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_handle_journal_entry_posted_audit() {
+        let pool = setup().await;
+        let repo = LedgerRepo::new(pool);
+        let svc = LedgerService {
+            repo,
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Handler should succeed and log for audit
+        let result = svc
+            .handle_journal_entry_posted_audit("je-001", "JE-0001", "user-1", 2)
+            .await;
+        assert!(result.is_ok());
+
+        // Single line entry
+        let result = svc
+            .handle_journal_entry_posted_audit("je-002", "JE-0002", "system", 1)
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_journal_entry_reversed_audit() {
+        let pool = setup().await;
+        let repo = LedgerRepo::new(pool);
+        let svc = LedgerService {
+            repo,
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Handler should succeed and log for audit
+        let result = svc
+            .handle_journal_entry_reversed_audit("je-rev-001", "je-orig-001", "system")
+            .await;
+        assert!(result.is_ok());
+
+        // Different user
+        let result = svc
+            .handle_journal_entry_reversed_audit("je-rev-002", "je-orig-002", "admin")
+            .await;
+        assert!(result.is_ok());
     }
 }

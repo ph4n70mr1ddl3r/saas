@@ -4,6 +4,7 @@ use saas_db::{migrate::run_migrations, pool::create_pool};
 use saas_nats_bus::NatsBus;
 use std::env;
 
+mod events;
 mod handlers;
 mod models;
 mod repository;
@@ -30,7 +31,8 @@ async fn main() -> anyhow::Result<()> {
 
     let bus = NatsBus::connect(&nats_url, "saas-config").await?;
 
-    let service = ConfigService::new(pool, bus);
+    let service = ConfigService::new(pool, bus.clone());
+    events::subscribe(&bus, service.clone()).await?;
     let app = routes::build_router(AppState { service })
         .layer(saas_common::middleware::create_cors_layer())
         .layer(saas_common::middleware::create_trace_layer());

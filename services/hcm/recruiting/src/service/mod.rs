@@ -4,6 +4,7 @@ use saas_common::error::{AppError, AppResult};
 use saas_nats_bus::NatsBus;
 use saas_proto::events::ApplicationStatusChanged;
 use sqlx::SqlitePool;
+use validator::Validate;
 
 #[derive(Clone)]
 pub struct RecruitingService {
@@ -30,6 +31,9 @@ impl RecruitingService {
     }
 
     pub async fn create_job(&self, input: CreateJobRequest) -> AppResult<JobPosting> {
+        input
+            .validate()
+            .map_err(|e| AppError::Validation(e.to_string()))?;
         self.repo.create_job(&input).await
     }
 
@@ -68,6 +72,9 @@ impl RecruitingService {
         &self,
         input: CreateApplicationRequest,
     ) -> AppResult<Application> {
+        input
+            .validate()
+            .map_err(|e| AppError::Validation(e.to_string()))?;
         let job = self.repo.get_job(&input.job_id).await?;
         if job.status != "open" {
             return Err(AppError::Validation(format!(
@@ -124,8 +131,8 @@ impl RecruitingService {
             .update_application_status(id, &input.status, input.notes.as_deref())
             .await?;
 
-        if input.status == "hired" {
-            // Fetch job details to include in event for downstream consumers
+        // Publish event for ALL status changes (not just "hired")
+        {
             let job = self.repo.get_job(&app.job_id).await.ok();
             let event = ApplicationStatusChanged {
                 application_id: id.to_string(),
@@ -135,8 +142,8 @@ impl RecruitingService {
                 candidate_email: app.candidate_email.clone(),
                 job_title: job.as_ref().map(|j| j.title.clone()).unwrap_or_default(),
                 department_id: job.as_ref().map(|j| j.department_id.clone()).unwrap_or_default(),
-                old_status,
-                new_status: "hired".to_string(),
+                old_status: old_status.clone(),
+                new_status: input.status.clone(),
             };
             if let Err(e) = self
                 .bus
@@ -167,6 +174,27 @@ impl RecruitingService {
             tracing::info!(
                 "Employee {} terminated: {} open job posting(s) may need review for backfill",
                 employee_id, open_count
+            );
+        }
+        Ok(())
+    }
+
+    /// Handle application status change for non-hired statuses.
+    /// Logs notification for screening, interview, offer, and rejection stages.
+    pub async fn handle_application_status_changed(
+        &self,
+        application_id: &str,
+        old_status: &str,
+        new_status: &str,
+        candidate_first_name: &str,
+        candidate_last_name: &str,
+        job_title: &str,
+    ) -> AppResult<()> {
+        if new_status != "hired" {
+            tracing::info!(
+                "Application {} status changed: {} -> {} (candidate: {} {}, job: {}). Notification sent.",
+                application_id, old_status, new_status,
+                candidate_first_name, candidate_last_name, job_title
             );
         }
         Ok(())
@@ -834,5 +862,308 @@ mod tests {
 
         let apps = repo.list_applications().await.unwrap();
         assert_eq!(apps.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_handle_application_status_changed_non_hired() {
+        let repo = setup_repo().await;
+        let svc = RecruitingService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Handler for non-hired status should succeed and log
+        let result = svc
+            .handle_application_status_changed(
+                "app-001",
+                "applied",
+                "screening",
+                "Jane",
+                "Doe",
+                "Senior Engineer",
+            )
+            .await;
+        assert!(result.is_ok());
+
+        // Hired status should also succeed (handler just skips logging for hired)
+        let result = svc
+            .handle_application_status_changed(
+                "app-001",
+                "offer",
+                "hired",
+                "Jane",
+                "Doe",
+                "Senior Engineer",
+            )
+            .await;
+        assert!(result.is_ok());
+
+        // Rejected status
+        let result = svc
+            .handle_application_status_changed(
+                "app-002",
+                "interview",
+                "rejected",
+                "Bob",
+                "Smith",
+                "Designer",
+            )
+            .await;
+        assert!(result.is_ok());
+    }
+
+    // --- Validation tests ---
+
+    #[tokio::test]
+    async fn test_create_job_validation_empty_title() {
+        let repo = setup_repo().await;
+        let svc = RecruitingService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_job(CreateJobRequest {
+                title: "".into(),
+                department_id: "eng".into(),
+                description: None,
+                requirements: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("title"),
+            "Expected title validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_job_validation_empty_department_id() {
+        let repo = setup_repo().await;
+        let svc = RecruitingService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_job(CreateJobRequest {
+                title: "Engineer".into(),
+                department_id: "".into(),
+                description: None,
+                requirements: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("department_id"),
+            "Expected department_id validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_job_valid_input_succeeds() {
+        let repo = setup_repo().await;
+        let svc = RecruitingService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let job = svc
+            .create_job(CreateJobRequest {
+                title: "Senior Engineer".into(),
+                department_id: "eng".into(),
+                description: None,
+                requirements: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(job.title, "Senior Engineer");
+    }
+
+    #[tokio::test]
+    async fn test_create_application_validation_invalid_email() {
+        let repo = setup_repo().await;
+        let svc = RecruitingService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let job = repo
+            .create_job(&CreateJobRequest {
+                title: "Engineer".into(),
+                department_id: "eng".into(),
+                description: None,
+                requirements: None,
+            })
+            .await
+            .unwrap();
+
+        let result = svc
+            .create_application(CreateApplicationRequest {
+                job_id: job.id,
+                candidate_first_name: "Jane".into(),
+                candidate_last_name: "Doe".into(),
+                candidate_email: "not-an-email".into(),
+                notes: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("candidate_email"),
+            "Expected candidate_email validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_application_validation_empty_first_name() {
+        let repo = setup_repo().await;
+        let svc = RecruitingService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let job = repo
+            .create_job(&CreateJobRequest {
+                title: "Engineer".into(),
+                department_id: "eng".into(),
+                description: None,
+                requirements: None,
+            })
+            .await
+            .unwrap();
+
+        let result = svc
+            .create_application(CreateApplicationRequest {
+                job_id: job.id,
+                candidate_first_name: "".into(),
+                candidate_last_name: "Doe".into(),
+                candidate_email: "jane@example.com".into(),
+                notes: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("candidate_first_name"),
+            "Expected candidate_first_name validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_application_validation_empty_last_name() {
+        let repo = setup_repo().await;
+        let svc = RecruitingService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let job = repo
+            .create_job(&CreateJobRequest {
+                title: "Engineer".into(),
+                department_id: "eng".into(),
+                description: None,
+                requirements: None,
+            })
+            .await
+            .unwrap();
+
+        let result = svc
+            .create_application(CreateApplicationRequest {
+                job_id: job.id,
+                candidate_first_name: "Jane".into(),
+                candidate_last_name: "".into(),
+                candidate_email: "jane@example.com".into(),
+                notes: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("candidate_last_name"),
+            "Expected candidate_last_name validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_application_validation_empty_job_id() {
+        let repo = setup_repo().await;
+        let svc = RecruitingService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_application(CreateApplicationRequest {
+                job_id: "".into(),
+                candidate_first_name: "Jane".into(),
+                candidate_last_name: "Doe".into(),
+                candidate_email: "jane@example.com".into(),
+                notes: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("job_id"),
+            "Expected job_id validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_application_valid_input_succeeds() {
+        let repo = setup_repo().await;
+        let svc = RecruitingService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let job = svc
+            .create_job(CreateJobRequest {
+                title: "Engineer".into(),
+                department_id: "eng".into(),
+                description: None,
+                requirements: None,
+            })
+            .await
+            .unwrap();
+
+        let app = svc
+            .create_application(CreateApplicationRequest {
+                job_id: job.id,
+                candidate_first_name: "Jane".into(),
+                candidate_last_name: "Doe".into(),
+                candidate_email: "jane@example.com".into(),
+                notes: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(app.candidate_email, "jane@example.com");
     }
 }

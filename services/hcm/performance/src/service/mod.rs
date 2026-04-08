@@ -4,6 +4,7 @@ use saas_common::error::{AppError, AppResult};
 use saas_nats_bus::NatsBus;
 use saas_proto::events::{ReviewCycleActivated, ReviewSubmitted};
 use sqlx::SqlitePool;
+use validator::Validate;
 
 #[derive(Clone)]
 pub struct PerformanceService {
@@ -33,6 +34,9 @@ impl PerformanceService {
         &self,
         input: CreateReviewCycleRequest,
     ) -> AppResult<ReviewCycle> {
+        input
+            .validate()
+            .map_err(|e| AppError::Validation(e.to_string()))?;
         self.repo.create_review_cycle(&input).await
     }
 
@@ -189,6 +193,9 @@ impl PerformanceService {
     }
 
     pub async fn create_goal(&self, input: CreateGoalRequest) -> AppResult<Goal> {
+        input
+            .validate()
+            .map_err(|e| AppError::Validation(e.to_string()))?;
         if let Some(weight) = input.weight {
             if weight < 0.01 || weight > 10.0 {
                 return Err(AppError::Validation(
@@ -265,6 +272,10 @@ impl PerformanceService {
         id: &str,
         input: SubmitReviewRequest,
     ) -> AppResult<ReviewAssignment> {
+        // Validate via derive macros
+        input
+            .validate()
+            .map_err(|e| AppError::Validation(e.to_string()))?;
         // Validate rating range
         if input.rating < 1 || input.rating > 5 {
             return Err(AppError::Validation(
@@ -1329,5 +1340,340 @@ mod tests {
             )
             .await;
         assert!(result.is_ok());
+    }
+
+    // --- Validation tests ---
+
+    #[tokio::test]
+    async fn test_create_review_cycle_rejects_empty_name() {
+        let pool = setup().await;
+        let bus = saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+            .await
+            .unwrap();
+        let svc = PerformanceService::new(pool, bus);
+
+        let result = svc
+            .create_review_cycle(CreateReviewCycleRequest {
+                name: "".into(),
+                description: None,
+                start_date: "2025-01-01".into(),
+                end_date: "2025-03-31".into(),
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            AppError::Validation(msg) => assert!(
+                msg.contains("name"),
+                "Expected validation error about 'name', got: {}",
+                msg
+            ),
+            other => panic!("Expected Validation error, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_review_cycle_rejects_empty_dates() {
+        let pool = setup().await;
+        let bus = saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+            .await
+            .unwrap();
+        let svc = PerformanceService::new(pool, bus);
+
+        let result = svc
+            .create_review_cycle(CreateReviewCycleRequest {
+                name: "Q1 Review".into(),
+                description: None,
+                start_date: "".into(),
+                end_date: "".into(),
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            AppError::Validation(msg) => {
+                // Should mention start_date and/or end_date
+                assert!(
+                    msg.contains("start_date") || msg.contains("end_date"),
+                    "Expected validation error about dates, got: {}",
+                    msg
+                );
+            }
+            other => panic!("Expected Validation error, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_goal_rejects_empty_title() {
+        let pool = setup().await;
+        let bus = saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+            .await
+            .unwrap();
+        let svc = PerformanceService::new(pool, bus);
+
+        // Create a cycle to reference
+        let cycle = svc
+            .create_review_cycle(CreateReviewCycleRequest {
+                name: "Q1".into(),
+                description: None,
+                start_date: "2025-01-01".into(),
+                end_date: "2025-03-31".into(),
+            })
+            .await
+            .unwrap();
+
+        let result = svc
+            .create_goal(CreateGoalRequest {
+                employee_id: "emp-001".into(),
+                cycle_id: cycle.id.clone(),
+                title: "".into(),
+                description: None,
+                weight: None,
+                progress: None,
+                due_date: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            AppError::Validation(msg) => assert!(
+                msg.contains("title"),
+                "Expected validation error about 'title', got: {}",
+                msg
+            ),
+            other => panic!("Expected Validation error, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_goal_rejects_empty_employee_id() {
+        let pool = setup().await;
+        let bus = saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+            .await
+            .unwrap();
+        let svc = PerformanceService::new(pool, bus);
+
+        let cycle = svc
+            .create_review_cycle(CreateReviewCycleRequest {
+                name: "Q1".into(),
+                description: None,
+                start_date: "2025-01-01".into(),
+                end_date: "2025-03-31".into(),
+            })
+            .await
+            .unwrap();
+
+        let result = svc
+            .create_goal(CreateGoalRequest {
+                employee_id: "".into(),
+                cycle_id: cycle.id.clone(),
+                title: "Some goal".into(),
+                description: None,
+                weight: None,
+                progress: None,
+                due_date: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            AppError::Validation(msg) => assert!(
+                msg.contains("employee_id"),
+                "Expected validation error about 'employee_id', got: {}",
+                msg
+            ),
+            other => panic!("Expected Validation error, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_goal_rejects_empty_cycle_id() {
+        let pool = setup().await;
+        let bus = saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+            .await
+            .unwrap();
+        let svc = PerformanceService::new(pool, bus);
+
+        let result = svc
+            .create_goal(CreateGoalRequest {
+                employee_id: "emp-001".into(),
+                cycle_id: "".into(),
+                title: "Some goal".into(),
+                description: None,
+                weight: None,
+                progress: None,
+                due_date: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            AppError::Validation(msg) => assert!(
+                msg.contains("cycle_id"),
+                "Expected validation error about 'cycle_id', got: {}",
+                msg
+            ),
+            other => panic!("Expected Validation error, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_goal_rejects_out_of_range_weight() {
+        let pool = setup().await;
+        let bus = saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+            .await
+            .unwrap();
+        let svc = PerformanceService::new(pool, bus);
+
+        let cycle = svc
+            .create_review_cycle(CreateReviewCycleRequest {
+                name: "Q1".into(),
+                description: None,
+                start_date: "2025-01-01".into(),
+                end_date: "2025-03-31".into(),
+            })
+            .await
+            .unwrap();
+
+        let result = svc
+            .create_goal(CreateGoalRequest {
+                employee_id: "emp-001".into(),
+                cycle_id: cycle.id.clone(),
+                title: "Goal".into(),
+                description: None,
+                weight: Some(200.0), // exceeds max of 100.0 from validator
+                progress: None,
+                due_date: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            AppError::Validation(msg) => assert!(
+                msg.contains("weight"),
+                "Expected validation error about 'weight', got: {}",
+                msg
+            ),
+            other => panic!("Expected Validation error, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_goal_rejects_out_of_range_progress() {
+        let pool = setup().await;
+        let bus = saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+            .await
+            .unwrap();
+        let svc = PerformanceService::new(pool, bus);
+
+        let cycle = svc
+            .create_review_cycle(CreateReviewCycleRequest {
+                name: "Q1".into(),
+                description: None,
+                start_date: "2025-01-01".into(),
+                end_date: "2025-03-31".into(),
+            })
+            .await
+            .unwrap();
+
+        let result = svc
+            .create_goal(CreateGoalRequest {
+                employee_id: "emp-001".into(),
+                cycle_id: cycle.id.clone(),
+                title: "Goal".into(),
+                description: None,
+                weight: None,
+                progress: Some(-5.0), // below min of 0.0 from validator
+                due_date: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            AppError::Validation(msg) => assert!(
+                msg.contains("progress"),
+                "Expected validation error about 'progress', got: {}",
+                msg
+            ),
+            other => panic!("Expected Validation error, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_submit_review_rejects_out_of_range_rating() {
+        let pool = setup().await;
+        let repo = PerformanceRepo::new(pool.clone());
+        let bus = saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+            .await
+            .unwrap();
+        let svc = PerformanceService::new(pool, bus);
+
+        // Create cycle, activate it, and create an assignment
+        let cycle = svc
+            .create_review_cycle(CreateReviewCycleRequest {
+                name: "Q1".into(),
+                description: None,
+                start_date: "2025-01-01".into(),
+                end_date: "2025-03-31".into(),
+            })
+            .await
+            .unwrap();
+
+        repo.update_cycle_status(&cycle.id, "active").await.unwrap();
+
+        let assignment = repo
+            .create_review_assignment(&CreateReviewAssignmentRequest {
+                cycle_id: cycle.id.clone(),
+                reviewer_id: "reviewer-001".into(),
+                employee_id: "emp-001".into(),
+            })
+            .await
+            .unwrap();
+
+        // Rating 0 — below min of 1
+        let result = svc
+            .submit_review(&assignment.id, SubmitReviewRequest {
+                rating: 0,
+                comments: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            AppError::Validation(msg) => assert!(
+                msg.contains("Rating must be between 1 and 5"),
+                "Expected 'Rating must be between 1 and 5' in error, got: {}",
+                msg
+            ),
+            other => panic!("Expected Validation error, got: {:?}", other),
+        }
+
+        // Create another assignment for rating=6 test
+        let assignment2 = repo
+            .create_review_assignment(&CreateReviewAssignmentRequest {
+                cycle_id: cycle.id.clone(),
+                reviewer_id: "reviewer-002".into(),
+                employee_id: "emp-002".into(),
+            })
+            .await
+            .unwrap();
+
+        // Rating 6 — above max of 5
+        let result = svc
+            .submit_review(&assignment2.id, SubmitReviewRequest {
+                rating: 6,
+                comments: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            AppError::Validation(msg) => assert!(
+                msg.contains("Rating must be between 1 and 5"),
+                "Expected 'Rating must be between 1 and 5' in error, got: {}",
+                msg
+            ),
+            other => panic!("Expected Validation error, got: {:?}", other),
+        }
     }
 }

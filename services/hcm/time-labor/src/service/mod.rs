@@ -7,6 +7,7 @@ use saas_proto::events::{
     LeaveRequestRejected,
 };
 use sqlx::SqlitePool;
+use validator::Validate;
 
 #[derive(Clone)]
 pub struct TimeLaborService {
@@ -36,6 +37,9 @@ impl TimeLaborService {
     }
 
     pub async fn create_timesheet(&self, input: CreateTimesheetRequest) -> AppResult<Timesheet> {
+        input
+            .validate()
+            .map_err(|e| AppError::Validation(e.to_string()))?;
         self.repo.create_timesheet(&input).await
     }
 
@@ -148,6 +152,9 @@ impl TimeLaborService {
         &self,
         input: CreateLeaveRequestRequest,
     ) -> AppResult<LeaveRequest> {
+        input
+            .validate()
+            .map_err(|e| AppError::Validation(e.to_string()))?;
         // Validate start_date <= end_date
         if input.start_date > input.end_date {
             return Err(AppError::Validation(
@@ -1025,5 +1032,202 @@ mod tests {
             .handle_leave_rejected_notification("req-002", "emp-002", "sick")
             .await;
         assert!(result.is_ok());
+    }
+
+    // --- Validation tests ---
+
+    #[tokio::test]
+    async fn test_create_timesheet_validation_empty_employee_id() {
+        let repo = setup_repo().await;
+        let svc = TimeLaborService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_timesheet(CreateTimesheetRequest {
+                employee_id: "".into(),
+                week_start: "2025-06-02".into(),
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("employee_id"),
+            "Expected employee_id validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_timesheet_validation_empty_week_start() {
+        let repo = setup_repo().await;
+        let svc = TimeLaborService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_timesheet(CreateTimesheetRequest {
+                employee_id: "emp-001".into(),
+                week_start: "".into(),
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("week_start"),
+            "Expected week_start validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_timesheet_valid_input_succeeds() {
+        let repo = setup_repo().await;
+        let svc = TimeLaborService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let ts = svc
+            .create_timesheet(CreateTimesheetRequest {
+                employee_id: "emp-001".into(),
+                week_start: "2025-06-02".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(ts.employee_id, "emp-001");
+    }
+
+    #[tokio::test]
+    async fn test_create_leave_request_validation_empty_employee_id() {
+        let repo = setup_repo().await;
+        let svc = TimeLaborService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_leave_request(CreateLeaveRequestRequest {
+                employee_id: "".into(),
+                leave_type: "vacation".into(),
+                start_date: "2025-06-01".into(),
+                end_date: "2025-06-05".into(),
+                reason: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("employee_id"),
+            "Expected employee_id validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_leave_request_validation_empty_leave_type() {
+        let repo = setup_repo().await;
+        let svc = TimeLaborService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_leave_request(CreateLeaveRequestRequest {
+                employee_id: "emp-001".into(),
+                leave_type: "".into(),
+                start_date: "2025-06-01".into(),
+                end_date: "2025-06-05".into(),
+                reason: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("leave_type"),
+            "Expected leave_type validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_leave_request_validation_empty_dates() {
+        let repo = setup_repo().await;
+        let svc = TimeLaborService {
+            repo: repo.clone(),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc
+            .create_leave_request(CreateLeaveRequestRequest {
+                employee_id: "emp-001".into(),
+                leave_type: "vacation".into(),
+                start_date: "".into(),
+                end_date: "".into(),
+                reason: None,
+            })
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_create_time_entry_model_validation_negative_hours() {
+        let entry = CreateTimeEntryRequest {
+            timesheet_id: "ts-001".into(),
+            date: "2025-06-01".into(),
+            hours: -5.0,
+            project_code: None,
+            description: None,
+        };
+        use validator::Validate;
+        let result = entry.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Hours must be non-negative"),
+            "Expected hours validation error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_time_entry_model_validation_empty_fields() {
+        let entry = CreateTimeEntryRequest {
+            timesheet_id: "".into(),
+            date: "".into(),
+            hours: 8.0,
+            project_code: None,
+            description: None,
+        };
+        use validator::Validate;
+        let result = entry.validate();
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_create_time_entry_model_validation_valid_succeeds() {
+        let entry = CreateTimeEntryRequest {
+            timesheet_id: "ts-001".into(),
+            date: "2025-06-01".into(),
+            hours: 8.0,
+            project_code: None,
+            description: None,
+        };
+        use validator::Validate;
+        assert!(entry.validate().is_ok());
     }
 }
