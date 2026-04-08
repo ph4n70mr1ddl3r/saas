@@ -1,7 +1,7 @@
 use crate::service::InventoryService;
 use saas_nats_bus::NatsBus;
 use saas_proto::events::{
-    OrderFulfilled, OrderFulfilledLine, PurchaseOrderReceived, ReturnCreated,
+    OrderFulfilled, OrderFulfilledLine, PurchaseOrderCancelled, PurchaseOrderReceived, ReturnCreated,
     SalesOrderCancelled, SalesOrderConfirmed, WorkOrderCompleted, WorkOrderCancelled, WorkOrderStarted,
 };
 
@@ -162,6 +162,25 @@ pub async fn register(bus: &NatsBus, service: InventoryService) -> anyhow::Resul
                 &envelope.payload.reason,
             ).await {
                 tracing::error!("Failed to handle order cancelled for order {}: {}", envelope.payload.order_id, e);
+            }
+        }
+    }).await.ok();
+
+    // PO cancelled -> cancel reservations tied to this PO
+    let svc = service.clone();
+    bus.subscribe::<PurchaseOrderCancelled, _, _>("scm.procurement.po.cancelled", move |envelope| {
+        let svc = svc.clone();
+        async move {
+            tracing::info!(
+                "Processing PO cancelled: po_id={}, supplier_id={}",
+                envelope.payload.po_id, envelope.payload.supplier_id
+            );
+            if let Err(e) = svc.handle_po_cancelled(
+                &envelope.payload.po_id,
+                &envelope.payload.supplier_id,
+                &envelope.payload.reason,
+            ).await {
+                tracing::error!("Failed to handle PO cancelled for PO {}: {}", envelope.payload.po_id, e);
             }
         }
     }).await.ok();

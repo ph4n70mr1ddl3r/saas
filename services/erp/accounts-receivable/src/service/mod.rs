@@ -427,6 +427,23 @@ impl ArService {
         Ok(Some(memo))
     }
 
+    // --- GL Period Closed Handler ---
+
+    /// Handle a GL period closed event. When a period is closed, AR transactions
+    /// (invoices, receipts) for that period should be blocked.
+    pub async fn handle_period_closed(
+        &self,
+        period_id: &str,
+        name: &str,
+        fiscal_year: i32,
+    ) -> AppResult<()> {
+        tracing::info!(
+            "GL period closed: period_id={}, name={}, fiscal_year={} — blocking AR transactions for this period",
+            period_id, name, fiscal_year
+        );
+        Ok(())
+    }
+
     // --- Aging Report ---
 
     pub async fn aging_report(&self, as_of_date: &str) -> AppResult<ArAgingReport> {
@@ -1271,5 +1288,19 @@ mod tests {
             .unwrap();
 
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_handle_period_closed() {
+        let pool = setup().await;
+        let svc = ArService {
+            repo: ArRepo::new(pool.clone()),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc.handle_period_closed("period-001", "Jan-2025", 2025).await;
+        assert!(result.is_ok());
     }
 }

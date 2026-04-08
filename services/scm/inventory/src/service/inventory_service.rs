@@ -571,6 +571,48 @@ impl InventoryService {
         Ok(())
     }
 
+    /// Handle purchase order cancellation by cancelling all active reservations
+    /// tied to the PO (reference_type="purchase_order", reference_id=po_id).
+    pub async fn handle_po_cancelled(
+        &self,
+        po_id: &str,
+        supplier_id: &str,
+        reason: &Option<String>,
+    ) -> AppResult<()> {
+        tracing::info!(
+            "Processing PO cancelled: po_id={}, supplier_id={}, reason={:?}",
+            po_id, supplier_id, reason
+        );
+
+        let reservations = self.reservation_repo.list().await?;
+        let matching: Vec<_> = reservations
+            .iter()
+            .filter(|r| r.reference_type == "purchase_order" && r.reference_id == po_id && r.status == "active")
+            .collect();
+
+        if matching.is_empty() {
+            tracing::info!(
+                "No active reservations found for cancelled PO: po_id={}",
+                po_id
+            );
+            return Ok(());
+        }
+
+        for res in matching {
+            tracing::info!(
+                "Cancelling reservation {} for cancelled PO {} (item={}, warehouse={}, qty={})",
+                res.id, po_id, res.item_id, res.warehouse_id, res.quantity
+            );
+            self.cancel_reservation(&res.id).await?;
+        }
+
+        tracing::info!(
+            "Successfully released reserved stock for cancelled PO: po_id={}, supplier_id={}",
+            po_id, supplier_id
+        );
+        Ok(())
+    }
+
     /// Add returned items back to inventory when a customer return is processed.
     pub async fn handle_return_created(
         &self,
@@ -2278,5 +2320,154 @@ mod tests {
             .await.unwrap().unwrap();
         assert_eq!(sl2.quantity_reserved, 0);
         assert_eq!(sl2.quantity_available, 50);
+    }
+
+    #[tokio::test]
+    async fn test_handle_po_cancelled_cancels_reservations() {
+        let pool = setup().await;
+        let svc = InventoryService::new(
+            pool.clone(),
+            saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        );
+
+        let wh = svc.warehouse_repo.create(&CreateWarehouse {
+            name: "WH-PO-CANCEL".into(),
+            address: None,
+        }).await.unwrap();
+        let item = svc.item_repo.create(&CreateItem {
+            sku: "SKU-PO-CANCEL".into(),
+            name: "PO Cancel Item".into(),
+            description: None,
+            unit_of_measure: None,
+            item_type: "raw_material".into(),
+            reorder_point: 0,
+            safety_stock: 0,
+            economic_order_qty: 0,
+            unit_price_cents: None,
+        }).await.unwrap();
+
+        // Put 100 units on hand
+        svc.stock_level_repo.upsert_receipt(&item.id, &wh.id, 100).await.unwrap();
+
+        // Create a reservation tied to a purchase order
+        svc.create_reservation(CreateReservation {
+            item_id: item.id.clone(),
+            warehouse_id: wh.id.clone(),
+            quantity: 40,
+            reference_type: "purchase_order".into(),
+            reference_id: "PO-CANCEL-001".into(),
+        }).await.unwrap();
+
+        // Verify reservation is active and stock is reserved
+        let sl = svc.stock_level_repo
+            .get_by_item_warehouse(&item.id, &wh.id)
+            .await.unwrap().unwrap();
+        assert_eq!(sl.quantity_on_hand, 100);
+        assert_eq!(sl.quantity_reserved, 40);
+
+        // Handle PO cancellation
+        let result = svc.handle_po_cancelled(
+            "PO-CANCEL-001",
+            "SUPPLIER-001",
+            &Some("Supplier defaulted".into()),
+        ).await;
+        assert!(result.is_ok());
+
+        // Verify reservation is cancelled
+        let reservations = svc.reservation_repo.list().await.unwrap();
+        let cancelled = reservations.iter().find(|r| r.reference_id == "PO-CANCEL-001").unwrap();
+        assert_eq!(cancelled.status, "cancelled");
+
+        // Verify stock is released
+        let sl = svc.stock_level_repo
+            .get_by_item_warehouse(&item.id, &wh.id)
+            .await.unwrap().unwrap();
+        assert_eq!(sl.quantity_on_hand, 100);
+        assert_eq!(sl.quantity_reserved, 0);
+    }
+
+    #[tokio::test]
+    async fn test_handle_po_cancelled_no_reservation() {
+        let pool = setup().await;
+        let svc = InventoryService::new(
+            pool.clone(),
+            saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        );
+
+        // No reservations exist for this PO — should succeed gracefully
+        let result = svc.handle_po_cancelled(
+            "PO-NORES-999",
+            "SUPPLIER-999",
+            &None,
+        ).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_po_cancelled_only_cancels_purchase_order_reservations() {
+        let pool = setup().await;
+        let svc = InventoryService::new(
+            pool.clone(),
+            saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        );
+
+        let wh = svc.warehouse_repo.create(&CreateWarehouse {
+            name: "WH-PO-CANCEL-SELECTIVE".into(),
+            address: None,
+        }).await.unwrap();
+        let item = svc.item_repo.create(&CreateItem {
+            sku: "SKU-PO-SELECTIVE".into(),
+            name: "PO Selective Cancel Item".into(),
+            description: None,
+            unit_of_measure: None,
+            item_type: "raw_material".into(),
+            reorder_point: 0,
+            safety_stock: 0,
+            economic_order_qty: 0,
+            unit_price_cents: None,
+        }).await.unwrap();
+
+        // Put 200 units on hand
+        svc.stock_level_repo.upsert_receipt(&item.id, &wh.id, 200).await.unwrap();
+
+        // Create a purchase_order reservation
+        svc.create_reservation(CreateReservation {
+            item_id: item.id.clone(),
+            warehouse_id: wh.id.clone(),
+            quantity: 30,
+            reference_type: "purchase_order".into(),
+            reference_id: "PO-SELECT-001".into(),
+        }).await.unwrap();
+
+        // Create a sales_order reservation (should NOT be cancelled)
+        svc.create_reservation(CreateReservation {
+            item_id: item.id.clone(),
+            warehouse_id: wh.id.clone(),
+            quantity: 20,
+            reference_type: "sales_order".into(),
+            reference_id: "PO-SELECT-001".into(),
+        }).await.unwrap();
+
+        // Handle PO cancellation
+        let result = svc.handle_po_cancelled(
+            "PO-SELECT-001",
+            "SUPPLIER-SELECT",
+            &None,
+        ).await;
+        assert!(result.is_ok());
+
+        // Verify only the purchase_order reservation is cancelled
+        let reservations = svc.reservation_repo.list().await.unwrap();
+        let po_res = reservations.iter().find(|r| r.reference_type == "purchase_order" && r.reference_id == "PO-SELECT-001").unwrap();
+        assert_eq!(po_res.status, "cancelled");
+
+        let so_res = reservations.iter().find(|r| r.reference_type == "sales_order" && r.reference_id == "PO-SELECT-001").unwrap();
+        assert_eq!(so_res.status, "active");
     }
 }

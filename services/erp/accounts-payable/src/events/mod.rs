@@ -1,7 +1,7 @@
 use crate::routes::AppState;
 use saas_common::error::AppResult;
 use saas_nats_bus::NatsBus;
-use saas_proto::events::{PurchaseOrderReceived, StockReceived};
+use saas_proto::events::{PeriodClosed, PurchaseOrderReceived, StockReceived};
 
 pub async fn register(bus: &NatsBus, state: &AppState) -> AppResult<()> {
     // PO Received -> auto-create AP invoice (three-way match)
@@ -37,6 +37,22 @@ pub async fn register(bus: &NatsBus, state: &AppState) -> AppResult<()> {
             if let Err(e) = svc.handle_stock_received(&item_id, quantity, &reference_type, &reference_id).await {
                 tracing::error!(
                     "Failed to handle stock receipt for item {}: {}", item_id, e
+                );
+            }
+        }
+    }).await.ok();
+
+    // GL Period Closed -> block AP transactions for closed period
+    let svc = state.service.clone();
+    bus.subscribe::<PeriodClosed, _, _>("erp.gl.period.closed", move |envelope| {
+        let svc = svc.clone();
+        let period_id = envelope.payload.period_id.clone();
+        let name = envelope.payload.name.clone();
+        let fiscal_year = envelope.payload.fiscal_year;
+        async move {
+            if let Err(e) = svc.handle_period_closed(&period_id, &name, fiscal_year).await {
+                tracing::error!(
+                    "Failed to handle GL period closed for period {}: {}", period_id, e
                 );
             }
         }

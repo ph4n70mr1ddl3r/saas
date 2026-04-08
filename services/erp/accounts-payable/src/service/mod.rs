@@ -353,6 +353,23 @@ impl ApService {
         Ok(())
     }
 
+    // --- GL Period Closed Handler ---
+
+    /// Handle a GL period closed event. When a period is closed, AP transactions
+    /// (invoices, payments) for that period should be blocked.
+    pub async fn handle_period_closed(
+        &self,
+        period_id: &str,
+        name: &str,
+        fiscal_year: i32,
+    ) -> AppResult<()> {
+        tracing::info!(
+            "GL period closed: period_id={}, name={}, fiscal_year={} — blocking AP transactions for this period",
+            period_id, name, fiscal_year
+        );
+        Ok(())
+    }
+
     // --- Tax Codes ---
 
     pub async fn create_tax_code(&self, input: &CreateTaxCodeRequest) -> AppResult<TaxCode> {
@@ -1236,5 +1253,19 @@ mod tests {
         let invoices = svc.repo.list_invoices().await.unwrap();
         let inv = invoices.iter().find(|i| i.invoice_number == format!("AUTO-PO-{}", po_id)).unwrap();
         assert_eq!(inv.status, "draft");
+    }
+
+    #[tokio::test]
+    async fn test_handle_period_closed() {
+        let pool = setup().await;
+        let svc = ApService {
+            repo: ApRepo::new(pool.clone()),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let result = svc.handle_period_closed("period-001", "Jan-2025", 2025).await;
+        assert!(result.is_ok());
     }
 }

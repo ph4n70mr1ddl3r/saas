@@ -71,6 +71,16 @@ impl PerformanceRepo {
         Ok(rows)
     }
 
+    pub async fn list_goals_by_cycle(&self, cycle_id: &str) -> AppResult<Vec<Goal>> {
+        let rows = sqlx::query_as::<_, Goal>(
+            "SELECT id, employee_id, cycle_id, title, description, weight, progress, status, due_date, created_at FROM goals WHERE cycle_id = ? ORDER BY created_at DESC"
+        )
+        .bind(cycle_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
     pub async fn get_goal(&self, id: &str) -> AppResult<Goal> {
         sqlx::query_as::<_, Goal>(
             "SELECT id, employee_id, cycle_id, title, description, weight, progress, status, due_date, created_at FROM goals WHERE id = ?"
@@ -131,6 +141,16 @@ impl PerformanceRepo {
         let rows = sqlx::query_as::<_, ReviewAssignment>(
             "SELECT id, cycle_id, reviewer_id, employee_id, status, rating, comments, submitted_at, created_at FROM review_assignments ORDER BY created_at DESC"
         )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn list_assignments_by_cycle(&self, cycle_id: &str) -> AppResult<Vec<ReviewAssignment>> {
+        let rows = sqlx::query_as::<_, ReviewAssignment>(
+            "SELECT id, cycle_id, reviewer_id, employee_id, status, rating, comments, submitted_at, created_at FROM review_assignments WHERE cycle_id = ? ORDER BY created_at DESC"
+        )
+        .bind(cycle_id)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows)

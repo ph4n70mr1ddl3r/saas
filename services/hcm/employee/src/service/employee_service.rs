@@ -9,6 +9,7 @@ use saas_common::pagination::PaginationParams;
 use saas_common::response::ApiListResponse;
 use saas_nats_bus::NatsBus;
 use saas_proto::events::ApplicationStatusChanged;
+use saas_proto::events::UserCreated;
 use sqlx::SqlitePool;
 use validator::Validate;
 
@@ -239,5 +240,179 @@ impl EmployeeService {
         };
 
         self.create_employee(input).await
+    }
+
+    /// Handle IAM user created event — auto-create an employee record.
+    /// Uses username as the employee name, email from the user account,
+    /// default department "unassigned" (created if it doesn't exist),
+    /// and today's date as hire date.
+    /// Handles duplicate creation gracefully by catching and logging errors.
+    pub async fn handle_user_created(&self, user_id: &str, username: &str, email: &str) {
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let employee_number = format!("EMP-IAM-{}", &user_id[..8.min(user_id.len())]);
+
+        // Look up or create the "unassigned" department
+        let department_id = match self.ensure_unassigned_department().await {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::error!(
+                    "Failed to ensure unassigned department for IAM user {}: {}",
+                    user_id, e
+                );
+                return;
+            }
+        };
+
+        let input = CreateEmployee {
+            first_name: username.to_string(),
+            last_name: "-".to_string(),
+            email: email.to_string(),
+            phone: None,
+            hire_date: today,
+            department_id,
+            reports_to: None,
+            job_title: "Unassigned".to_string(),
+            employee_number,
+        };
+
+        tracing::info!(
+            "Auto-creating employee from IAM user created event: user_id={}, username={}, email={}",
+            user_id, username, email
+        );
+
+        match self.create_employee(input).await {
+            Ok(emp) => {
+                tracing::info!(
+                    "Successfully auto-created employee {} from IAM user {}",
+                    emp.id, user_id
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to auto-create employee from IAM user {} (may already exist): {}",
+                    user_id, e
+                );
+            }
+        }
+    }
+
+    /// Ensure an "unassigned" department exists, creating it if needed.
+    /// Returns the department ID.
+    async fn ensure_unassigned_department(&self) -> AppResult<String> {
+        let departments = self.dept_repo.list().await?;
+        if let Some(dept) = departments.iter().find(|d| d.name == "Unassigned") {
+            return Ok(dept.id.clone());
+        }
+        let dept = self
+            .dept_repo
+            .create(&CreateDepartment {
+                name: "Unassigned".to_string(),
+                parent_id: None,
+                manager_id: None,
+                cost_center: None,
+            })
+            .await?;
+        Ok(dept.id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use saas_db::test_helpers::create_test_pool;
+
+    async fn setup() -> EmployeeService {
+        let pool = create_test_pool().await;
+        let sql_files = [
+            include_str!("../../migrations/001_create_departments.sql"),
+            include_str!("../../migrations/002_create_employees.sql"),
+            include_str!("../../migrations/003_create_employment_history.sql"),
+        ];
+        let migration_names = [
+            "001_create_departments.sql",
+            "002_create_employees.sql",
+            "003_create_employment_history.sql",
+        ];
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS _migrations (filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        for (i, sql) in sql_files.iter().enumerate() {
+            let name = migration_names[i];
+            let already_applied: bool =
+                sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM _migrations WHERE filename = ?")
+                    .bind(name)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+                    > 0;
+            if !already_applied {
+                let mut tx = pool.begin().await.unwrap();
+                sqlx::raw_sql(sql).execute(&mut *tx).await.unwrap();
+                let now = chrono::Utc::now().to_rfc3339();
+                sqlx::query("INSERT INTO _migrations (filename, applied_at) VALUES (?, ?)")
+                    .bind(name)
+                    .bind(&now)
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
+                tx.commit().await.unwrap();
+            }
+        }
+
+        let bus = saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+            .await
+            .unwrap();
+        EmployeeService::new(pool, bus)
+    }
+
+    #[tokio::test]
+    async fn test_handle_user_created_auto_creates_employee() {
+        let svc = setup().await;
+
+        // Call handle_user_created — it will auto-create the "Unassigned" department
+        svc.handle_user_created("user-abc-123", "jdoe", "jdoe@example.com").await;
+
+        // Verify employee was created
+        let employees = svc.list_employees(
+            &PaginationParams { page: Some(1), per_page: Some(50) },
+            &EmployeeFilters { department_id: None, status: None },
+        ).await.unwrap();
+
+        assert_eq!(employees.data.len(), 1);
+        let emp = &employees.data[0];
+        assert_eq!(emp.first_name, "jdoe");
+        assert_eq!(emp.last_name, "-");
+        assert_eq!(emp.email, "jdoe@example.com");
+        assert_eq!(emp.job_title, "Unassigned");
+        assert!(emp.employee_number.starts_with("EMP-IAM-"));
+
+        // Verify the Unassigned department was auto-created
+        let departments = svc.list_departments().await.unwrap();
+        assert_eq!(departments.len(), 1);
+        assert_eq!(departments[0].name, "Unassigned");
+    }
+
+    #[tokio::test]
+    async fn test_handle_user_created_duplicate_graceful() {
+        let svc = setup().await;
+
+        // First creation should succeed
+        svc.handle_user_created("user-dup-001", "jsmith", "jsmith@example.com").await;
+
+        // Duplicate creation (same email) should not panic — handled gracefully
+        svc.handle_user_created("user-dup-002", "jsmith", "jsmith@example.com").await;
+
+        // Verify only one employee was created with that email
+        let employees = svc.list_employees(
+            &PaginationParams { page: Some(1), per_page: Some(50) },
+            &EmployeeFilters { department_id: None, status: None },
+        ).await.unwrap();
+
+        let jscount = employees.data.iter().filter(|e| e.email == "jsmith@example.com").count();
+        assert_eq!(jscount, 1);
     }
 }

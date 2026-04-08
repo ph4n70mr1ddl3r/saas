@@ -1,7 +1,7 @@
 use crate::routes::AppState;
 use saas_common::error::AppResult;
 use saas_nats_bus::NatsBus;
-use saas_proto::events::{OrderFulfilled, ReturnApproved};
+use saas_proto::events::{OrderFulfilled, PeriodClosed, ReturnApproved};
 
 pub async fn register(bus: &NatsBus, state: &AppState) -> AppResult<()> {
     // Order Fulfilled -> auto-create AR invoice
@@ -41,6 +41,22 @@ pub async fn register(bus: &NatsBus, state: &AppState) -> AppResult<()> {
             );
             if let Err(e) = svc.handle_return_approved(&return_id, &order_id, &item_id, quantity).await {
                 tracing::error!("Failed to create credit memo for return {}: {}", return_id, e);
+            }
+        }
+    }).await.ok();
+
+    // GL Period Closed -> block AR transactions for closed period
+    let svc = state.service.clone();
+    bus.subscribe::<PeriodClosed, _, _>("erp.gl.period.closed", move |envelope| {
+        let svc = svc.clone();
+        let period_id = envelope.payload.period_id.clone();
+        let name = envelope.payload.name.clone();
+        let fiscal_year = envelope.payload.fiscal_year;
+        async move {
+            if let Err(e) = svc.handle_period_closed(&period_id, &name, fiscal_year).await {
+                tracing::error!(
+                    "Failed to handle GL period closed for period {}: {}", period_id, e
+                );
             }
         }
     }).await.ok();

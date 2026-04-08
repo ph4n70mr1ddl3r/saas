@@ -175,6 +175,49 @@ impl ManufacturingService {
         self.bom_repo.create(&input).await
     }
 
+    /// Handle PO cancellation notification.
+    /// Logs the cancellation and checks if any active work orders may be impacted
+    /// because they depend on materials sourced from this PO/supplier.
+    pub async fn handle_po_cancelled(
+        &self,
+        po_id: &str,
+        supplier_id: &str,
+        reason: &Option<String>,
+    ) -> AppResult<()> {
+        tracing::info!(
+            "PO cancelled notification received: po_id={}, supplier_id={}, reason={:?}",
+            po_id, supplier_id, reason
+        );
+
+        // Check for work orders that might be tied to materials from this PO/supplier.
+        // Work orders in non-terminal states (planned, in_progress) are potentially impacted.
+        let work_orders = self.work_order_repo.list().await?;
+        let active_orders: Vec<_> = work_orders
+            .iter()
+            .filter(|wo| wo.status == "planned" || wo.status == "in_progress")
+            .collect();
+
+        if active_orders.is_empty() {
+            tracing::info!(
+                "No active work orders found that could be impacted by PO cancellation: po_id={}",
+                po_id
+            );
+        } else {
+            tracing::warn!(
+                "PO {} from supplier {} cancelled — {} active work order(s) may be impacted by material supply disruption",
+                po_id, supplier_id, active_orders.len()
+            );
+            for wo in &active_orders {
+                tracing::warn!(
+                    "Potentially impacted work order: wo_number={}, item_id={}, quantity={}, status={}",
+                    wo.wo_number, wo.item_id, wo.quantity, wo.status
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     /// Handle sales order confirmed by auto-creating a work order if a BOM exists for the item.
     pub async fn handle_order_confirmed(
         &self,
@@ -209,6 +252,39 @@ impl ManufacturingService {
         );
         let wo = self.create_work_order(input).await?;
         Ok(Some(wo))
+    }
+
+    /// Handle purchase order approved by checking BOMs for materials from this supplier.
+    /// This is a notification/planning handler that logs which BOMs may need production
+    /// scheduling now that materials from the given supplier have been approved.
+    pub async fn handle_po_approved(&self, po_id: &str, supplier_id: &str) -> AppResult<Vec<String>> {
+        tracing::info!(
+            "PO {} approved for supplier {} — checking BOMs for affected materials",
+            po_id, supplier_id
+        );
+
+        let boms = self.bom_repo.list().await?;
+        let mut affected_finished_items = Vec::new();
+
+        for bom in &boms {
+            let components = self.bom_repo.get_components(&bom.id).await?;
+            if !components.is_empty() {
+                tracing::info!(
+                    "BOM '{}' (finished item: {}) has {} component(s) — production may need to be planned/scheduled for materials from supplier {}",
+                    bom.name, bom.finished_item_id, components.len(), supplier_id
+                );
+                affected_finished_items.push(bom.finished_item_id.clone());
+            }
+        }
+
+        if affected_finished_items.is_empty() {
+            tracing::info!(
+                "No BOMs found with components that could be affected by PO {} from supplier {}",
+                po_id, supplier_id
+            );
+        }
+
+        Ok(affected_finished_items)
     }
 }
 
@@ -612,5 +688,119 @@ mod tests {
         let started = svc.start_work_order(&wo.id).await.unwrap();
         assert_eq!(started.status, "in_progress");
         assert!(started.actual_start.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_handle_po_approved_with_boms() {
+        let pool = setup().await;
+        let svc = ManufacturingService {
+            work_order_repo: WorkOrderRepo::new(pool.clone()),
+            bom_repo: BomRepo::new(pool.clone()),
+            routing_step_repo: RoutingStepRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Create a BOM with components — this should be flagged for production planning
+        svc.create_bom(CreateBom {
+            name: "Motor Assembly".into(),
+            description: Some("Electric motor".into()),
+            finished_item_id: "ITEM-MOTOR-001".into(),
+            quantity: Some(1),
+            components: vec![
+                CreateBomComponent {
+                    component_item_id: "COMP-STATOR".into(),
+                    quantity_required: 1,
+                },
+                CreateBomComponent {
+                    component_item_id: "COMP-ROTOR".into(),
+                    quantity_required: 1,
+                },
+            ],
+        })
+        .await
+        .unwrap();
+
+        // Handle PO approved
+        let affected = svc
+            .handle_po_approved("PO-001", "SUPPLIER-ABC")
+            .await
+            .unwrap();
+
+        assert_eq!(affected.len(), 1);
+        assert_eq!(affected[0], "ITEM-MOTOR-001");
+    }
+
+    #[tokio::test]
+    async fn test_handle_po_approved_no_boms() {
+        let pool = setup().await;
+        let svc = ManufacturingService {
+            work_order_repo: WorkOrderRepo::new(pool.clone()),
+            bom_repo: BomRepo::new(pool.clone()),
+            routing_step_repo: RoutingStepRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // No BOMs exist — should return empty list
+        let affected = svc
+            .handle_po_approved("PO-002", "SUPPLIER-XYZ")
+            .await
+            .unwrap();
+
+        assert!(affected.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_po_cancelled_warns_active_work_orders() {
+        let pool = setup().await;
+        let svc = ManufacturingService {
+            work_order_repo: WorkOrderRepo::new(pool.clone()),
+            bom_repo: BomRepo::new(pool.clone()),
+            routing_step_repo: RoutingStepRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // Create a planned work order that could be impacted
+        let wo = svc.create_work_order(CreateWorkOrder {
+            item_id: "ITEM-PO-CANCEL-001".into(),
+            quantity: 50,
+            planned_start: None,
+            planned_end: None,
+        }).await.unwrap();
+        assert_eq!(wo.status, "planned");
+
+        // Handle PO cancelled — should succeed and warn about the active work order
+        let result = svc
+            .handle_po_cancelled("PO-CANCEL-001", "SUPPLIER-001", &Some("Supplier went bankrupt".into()))
+            .await;
+        assert!(result.is_ok());
+
+        // The work order should still exist and be in planned status (not auto-cancelled)
+        let wo_check = svc.get_work_order(&wo.id).await.unwrap();
+        assert_eq!(wo_check.status, "planned");
+    }
+
+    #[tokio::test]
+    async fn test_handle_po_cancelled_no_active_work_orders() {
+        let pool = setup().await;
+        let svc = ManufacturingService {
+            work_order_repo: WorkOrderRepo::new(pool.clone()),
+            bom_repo: BomRepo::new(pool.clone()),
+            routing_step_repo: RoutingStepRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        // No work orders at all — should succeed gracefully
+        let result = svc
+            .handle_po_cancelled("PO-CANCEL-002", "SUPPLIER-002", &None)
+            .await;
+        assert!(result.is_ok());
     }
 }

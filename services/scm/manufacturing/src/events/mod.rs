@@ -1,6 +1,6 @@
 use crate::service::ManufacturingService;
 use saas_nats_bus::NatsBus;
-use saas_proto::events::SalesOrderConfirmed;
+use saas_proto::events::{PurchaseOrderApproved, PurchaseOrderCancelled, SalesOrderConfirmed};
 use sqlx::SqlitePool;
 
 pub async fn register(bus: &NatsBus, service: ManufacturingService) -> anyhow::Result<()> {
@@ -32,6 +32,47 @@ pub async fn register(bus: &NatsBus, service: ManufacturingService) -> anyhow::R
                         );
                     }
                 }
+            }
+        }
+    }).await.ok();
+
+    // PO approved -> check BOMs for production planning
+    let svc = service.clone();
+    bus.subscribe::<PurchaseOrderApproved, _, _>("scm.procurement.po.approved", move |envelope| {
+        let svc = svc.clone();
+        let po_id = envelope.payload.po_id.clone();
+        let supplier_id = envelope.payload.supplier_id.clone();
+        async move {
+            tracing::info!(
+                "Received PO approval event for PO {} from supplier {}",
+                po_id, supplier_id
+            );
+            if let Err(e) = svc.handle_po_approved(&po_id, &supplier_id).await {
+                tracing::error!(
+                    "Failed to handle PO approved event for PO {} from supplier {}: {}",
+                    po_id, supplier_id, e
+                );
+            }
+        }
+    }).await.ok();
+
+    // PO cancelled -> warn about impacted work orders
+    let svc = service.clone();
+    bus.subscribe::<PurchaseOrderCancelled, _, _>("scm.procurement.po.cancelled", move |envelope| {
+        let svc = svc.clone();
+        let po_id = envelope.payload.po_id.clone();
+        let supplier_id = envelope.payload.supplier_id.clone();
+        let reason = envelope.payload.reason.clone();
+        async move {
+            tracing::info!(
+                "Received PO cancelled event for PO {} from supplier {}",
+                po_id, supplier_id
+            );
+            if let Err(e) = svc.handle_po_cancelled(&po_id, &supplier_id, &reason).await {
+                tracing::error!(
+                    "Failed to handle PO cancelled event for PO {} from supplier {}: {}",
+                    po_id, supplier_id, e
+                );
             }
         }
     }).await.ok();

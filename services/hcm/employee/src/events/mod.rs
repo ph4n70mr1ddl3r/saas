@@ -1,14 +1,14 @@
 // Event subscriber registration - subscribes to cross-service events
 use crate::service::EmployeeService;
 use saas_nats_bus::NatsBus;
-use saas_proto::events::ApplicationStatusChanged;
+use saas_proto::events::{ApplicationStatusChanged, UserCreated};
 
 pub async fn register(bus: &NatsBus, service: EmployeeService) -> anyhow::Result<()> {
-    let service = service.clone();
+    let svc1 = service.clone();
     bus.subscribe::<ApplicationStatusChanged, _, _>(
         "hcm.recruiting.application.status_changed",
         move |envelope| {
-            let service = service.clone();
+            let svc1 = svc1.clone();
             let event = envelope.payload.clone();
             async move {
                 if event.new_status != "hired" {
@@ -18,7 +18,7 @@ pub async fn register(bus: &NatsBus, service: EmployeeService) -> anyhow::Result
                     "Received recruiting.application.hired for {} — auto-creating employee",
                     event.candidate_email
                 );
-                if let Err(e) = service.handle_application_hired(&event).await {
+                if let Err(e) = svc1.handle_application_hired(&event).await {
                     tracing::error!(
                         "Failed to auto-create employee for hired application {}: {}",
                         event.application_id,
@@ -29,5 +29,26 @@ pub async fn register(bus: &NatsBus, service: EmployeeService) -> anyhow::Result
         },
     )
     .await?;
+
+    // IAM user created -> auto-create employee
+    let svc2 = service.clone();
+    bus.subscribe::<UserCreated, _, _>(
+        "iam.user.created",
+        move |envelope| {
+            let svc2 = svc2.clone();
+            let user_id = envelope.payload.user_id.clone();
+            let username = envelope.payload.username.clone();
+            let email = envelope.payload.email.clone();
+            async move {
+                tracing::info!(
+                    "Received iam.user.created for user_id={} — auto-creating employee",
+                    user_id
+                );
+                svc2.handle_user_created(&user_id, &username, &email).await;
+            }
+        },
+    )
+    .await?;
+
     Ok(())
 }

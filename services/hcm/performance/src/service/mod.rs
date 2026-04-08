@@ -62,7 +62,109 @@ impl PerformanceService {
                 e
             );
         }
+
+        // Auto-create review assignments for employees with goals in this cycle
+        if let Err(e) = self.auto_create_review_assignments(&activated.id).await {
+            tracing::error!(
+                "Failed to auto-create review assignments for cycle '{}': {}",
+                activated.id,
+                e
+            );
+        }
+
         Ok(activated)
+    }
+
+    /// Automatically create review assignments for employees who have goals
+    /// in the given cycle. Uses round-robin peer assignment: each employee
+    /// is reviewed by the next employee in the list. Employees who already
+    /// have a review assignment in this cycle are skipped. If fewer than
+    /// two employees have goals, no auto-assignments are created (manual
+    /// assignment is still possible via the API).
+    pub async fn auto_create_review_assignments(&self, cycle_id: &str) -> AppResult<Vec<ReviewAssignment>> {
+        let goals = self.repo.list_goals_by_cycle(cycle_id).await?;
+
+        // Collect distinct employee IDs from goals
+        let mut employee_ids: Vec<String> = goals
+            .iter()
+            .map(|g| g.employee_id.clone())
+            .collect();
+        employee_ids.sort();
+        employee_ids.dedup();
+
+        if employee_ids.len() < 2 {
+            tracing::info!(
+                "Fewer than 2 employees with goals in cycle '{}' — skipping auto-assignment",
+                cycle_id
+            );
+            return Ok(vec![]);
+        }
+
+        // Find employees already assigned in this cycle
+        let existing = self.repo.list_assignments_by_cycle(cycle_id).await?;
+        let already_assigned: std::collections::HashSet<String> = existing
+            .iter()
+            .map(|a| a.employee_id.clone())
+            .collect();
+
+        // Filter to employees not yet assigned
+        let unassigned: Vec<String> = employee_ids
+            .into_iter()
+            .filter(|eid| !already_assigned.contains(eid))
+            .collect();
+
+        if unassigned.is_empty() {
+            tracing::info!(
+                "All employees with goals in cycle '{}' already have assignments",
+                cycle_id
+            );
+            return Ok(vec![]);
+        }
+
+        if unassigned.len() < 2 {
+            tracing::info!(
+                "Only 1 unassigned employee in cycle '{}' — need at least 2 for round-robin, skipping",
+                cycle_id
+            );
+            return Ok(vec![]);
+        }
+
+        // Round-robin: each employee is reviewed by the next one in the list,
+        // with the last employee reviewed by the first.
+        let mut created = Vec::new();
+        for i in 0..unassigned.len() {
+            let employee_id = &unassigned[i];
+            let reviewer_idx = (i + 1) % unassigned.len();
+            let reviewer_id = &unassigned[reviewer_idx];
+
+            let input = CreateReviewAssignmentRequest {
+                cycle_id: cycle_id.to_string(),
+                reviewer_id: reviewer_id.clone(),
+                employee_id: employee_id.clone(),
+            };
+
+            match self.repo.create_review_assignment(&input).await {
+                Ok(assignment) => {
+                    tracing::info!(
+                        "Auto-created review assignment: employee '{}' reviewed by '{}' in cycle '{}'",
+                        employee_id,
+                        reviewer_id,
+                        cycle_id
+                    );
+                    created.push(assignment);
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to auto-create review assignment for employee '{}' in cycle '{}': {}",
+                        employee_id,
+                        cycle_id,
+                        e
+                    );
+                }
+            }
+        }
+
+        Ok(created)
     }
 
     pub async fn close_review_cycle(&self, id: &str) -> AppResult<ReviewCycle> {
@@ -897,5 +999,294 @@ mod tests {
         assert_eq!(goals.len(), 1);
         assert_eq!(goals[0].employee_id, "emp-999");
         assert!(goals[0].title.contains("onboarding"));
+    }
+
+    #[tokio::test]
+    async fn test_auto_create_review_assignments_with_multiple_employees() {
+        let repo = setup_repo().await;
+
+        // Create a cycle
+        let cycle = repo
+            .create_review_cycle(&CreateReviewCycleRequest {
+                name: "Q1 Review".into(),
+                description: None,
+                start_date: "2025-01-01".into(),
+                end_date: "2025-03-31".into(),
+            })
+            .await
+            .unwrap();
+
+        // Create goals for 3 employees in this cycle
+        for emp in ["emp-001", "emp-002", "emp-003"] {
+            repo.create_goal(&CreateGoalRequest {
+                employee_id: emp.to_string(),
+                cycle_id: cycle.id.clone(),
+                title: format!("Goal for {}", emp),
+                description: None,
+                weight: Some(1.0),
+                progress: None,
+                due_date: None,
+            })
+            .await
+            .unwrap();
+        }
+
+        // Activate the cycle
+        repo.update_cycle_status(&cycle.id, "active").await.unwrap();
+
+        // Simulate auto_create_review_assignments logic at repo level
+        let goals = repo.list_goals_by_cycle(&cycle.id).await.unwrap();
+        let mut employee_ids: Vec<String> = goals.iter().map(|g| g.employee_id.clone()).collect();
+        employee_ids.sort();
+        employee_ids.dedup();
+
+        assert_eq!(employee_ids.len(), 3, "Should find 3 distinct employees");
+
+        // Create round-robin assignments: emp-001 reviewed by emp-002,
+        // emp-002 reviewed by emp-003, emp-003 reviewed by emp-001
+        let mut assignments = Vec::new();
+        for i in 0..employee_ids.len() {
+            let reviewer_idx = (i + 1) % employee_ids.len();
+            let assignment = repo
+                .create_review_assignment(&CreateReviewAssignmentRequest {
+                    cycle_id: cycle.id.clone(),
+                    reviewer_id: employee_ids[reviewer_idx].clone(),
+                    employee_id: employee_ids[i].clone(),
+                })
+                .await
+                .unwrap();
+            assignments.push(assignment);
+        }
+
+        assert_eq!(assignments.len(), 3);
+
+        // Verify round-robin pairing
+        assert_eq!(assignments[0].employee_id, "emp-001");
+        assert_eq!(assignments[0].reviewer_id, "emp-002");
+
+        assert_eq!(assignments[1].employee_id, "emp-002");
+        assert_eq!(assignments[1].reviewer_id, "emp-003");
+
+        assert_eq!(assignments[2].employee_id, "emp-003");
+        assert_eq!(assignments[2].reviewer_id, "emp-001");
+
+        // All assignments should be pending
+        for a in &assignments {
+            assert_eq!(a.status, "pending");
+        }
+
+        // Verify they appear in the cycle's assignments
+        let cycle_assignments = repo.list_assignments_by_cycle(&cycle.id).await.unwrap();
+        assert_eq!(cycle_assignments.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_auto_assignments_skips_single_employee() {
+        let repo = setup_repo().await;
+
+        let cycle = repo
+            .create_review_cycle(&CreateReviewCycleRequest {
+                name: "Q1 Review".into(),
+                description: None,
+                start_date: "2025-01-01".into(),
+                end_date: "2025-03-31".into(),
+            })
+            .await
+            .unwrap();
+
+        // Only one employee with goals
+        repo.create_goal(&CreateGoalRequest {
+            employee_id: "emp-001".into(),
+            cycle_id: cycle.id.clone(),
+            title: "Only goal".into(),
+            description: None,
+            weight: None,
+            progress: None,
+            due_date: None,
+        })
+        .await
+        .unwrap();
+
+        repo.update_cycle_status(&cycle.id, "active").await.unwrap();
+
+        // Simulate auto-assignment logic: fewer than 2 employees means skip
+        let goals = repo.list_goals_by_cycle(&cycle.id).await.unwrap();
+        let mut employee_ids: Vec<String> = goals.iter().map(|g| g.employee_id.clone()).collect();
+        employee_ids.sort();
+        employee_ids.dedup();
+        assert_eq!(employee_ids.len(), 1);
+
+        // No assignments should be created
+        let assignments = repo.list_assignments_by_cycle(&cycle.id).await.unwrap();
+        assert_eq!(assignments.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_auto_assignments_no_goals() {
+        let repo = setup_repo().await;
+
+        let cycle = repo
+            .create_review_cycle(&CreateReviewCycleRequest {
+                name: "Q1 Review".into(),
+                description: None,
+                start_date: "2025-01-01".into(),
+                end_date: "2025-03-31".into(),
+            })
+            .await
+            .unwrap();
+
+        repo.update_cycle_status(&cycle.id, "active").await.unwrap();
+
+        // No goals at all — auto-assignment should produce nothing
+        let goals = repo.list_goals_by_cycle(&cycle.id).await.unwrap();
+        assert_eq!(goals.len(), 0);
+
+        let assignments = repo.list_assignments_by_cycle(&cycle.id).await.unwrap();
+        assert_eq!(assignments.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_auto_assignments_skips_already_assigned() {
+        let repo = setup_repo().await;
+
+        let cycle = repo
+            .create_review_cycle(&CreateReviewCycleRequest {
+                name: "Q1 Review".into(),
+                description: None,
+                start_date: "2025-01-01".into(),
+                end_date: "2025-03-31".into(),
+            })
+            .await
+            .unwrap();
+
+        // Create goals for 3 employees
+        for emp in ["emp-001", "emp-002", "emp-003"] {
+            repo.create_goal(&CreateGoalRequest {
+                employee_id: emp.to_string(),
+                cycle_id: cycle.id.clone(),
+                title: format!("Goal for {}", emp),
+                description: None,
+                weight: None,
+                progress: None,
+                due_date: None,
+            })
+            .await
+            .unwrap();
+        }
+
+        // Manually create an assignment for emp-001 before auto-assignment
+        repo.create_review_assignment(&CreateReviewAssignmentRequest {
+            cycle_id: cycle.id.clone(),
+            reviewer_id: "emp-manual-reviewer".into(),
+            employee_id: "emp-001".into(),
+        })
+        .await
+        .unwrap();
+
+        repo.update_cycle_status(&cycle.id, "active").await.unwrap();
+
+        // Simulate auto-assignment logic: gather employees, filter out already-assigned
+        let goals = repo.list_goals_by_cycle(&cycle.id).await.unwrap();
+        let mut employee_ids: Vec<String> = goals.iter().map(|g| g.employee_id.clone()).collect();
+        employee_ids.sort();
+        employee_ids.dedup();
+
+        let existing = repo.list_assignments_by_cycle(&cycle.id).await.unwrap();
+        let already_assigned: std::collections::HashSet<String> =
+            existing.iter().map(|a| a.employee_id.clone()).collect();
+
+        let unassigned: Vec<String> = employee_ids
+            .into_iter()
+            .filter(|eid| !already_assigned.contains(eid))
+            .collect();
+
+        // Only emp-002 and emp-003 should be unassigned
+        assert_eq!(unassigned.len(), 2);
+        assert!(unassigned.contains(&"emp-002".to_string()));
+        assert!(unassigned.contains(&"emp-003".to_string()));
+        assert!(!unassigned.contains(&"emp-001".to_string()));
+
+        // Create round-robin for the 2 unassigned employees
+        for i in 0..unassigned.len() {
+            let reviewer_idx = (i + 1) % unassigned.len();
+            repo.create_review_assignment(&CreateReviewAssignmentRequest {
+                cycle_id: cycle.id.clone(),
+                reviewer_id: unassigned[reviewer_idx].clone(),
+                employee_id: unassigned[i].clone(),
+            })
+            .await
+            .unwrap();
+        }
+
+        // Total assignments: 1 manual + 2 auto = 3
+        let all_assignments = repo.list_assignments_by_cycle(&cycle.id).await.unwrap();
+        assert_eq!(all_assignments.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_auto_assignments_employees_with_multiple_goals() {
+        let repo = setup_repo().await;
+
+        let cycle = repo
+            .create_review_cycle(&CreateReviewCycleRequest {
+                name: "Q1 Review".into(),
+                description: None,
+                start_date: "2025-01-01".into(),
+                end_date: "2025-03-31".into(),
+            })
+            .await
+            .unwrap();
+
+        // emp-001 has 3 goals, emp-002 has 1 goal — should still create
+        // just 2 assignments (one per distinct employee)
+        for _ in 0..3 {
+            repo.create_goal(&CreateGoalRequest {
+                employee_id: "emp-001".into(),
+                cycle_id: cycle.id.clone(),
+                title: "Goal for emp-001".into(),
+                description: None,
+                weight: None,
+                progress: None,
+                due_date: None,
+            })
+            .await
+            .unwrap();
+        }
+        repo.create_goal(&CreateGoalRequest {
+            employee_id: "emp-002".into(),
+            cycle_id: cycle.id.clone(),
+            title: "Goal for emp-002".into(),
+            description: None,
+            weight: None,
+            progress: None,
+            due_date: None,
+        })
+        .await
+        .unwrap();
+
+        repo.update_cycle_status(&cycle.id, "active").await.unwrap();
+
+        // Verify dedup: only 2 distinct employees
+        let goals = repo.list_goals_by_cycle(&cycle.id).await.unwrap();
+        assert_eq!(goals.len(), 4); // 3 + 1
+        let mut employee_ids: Vec<String> = goals.iter().map(|g| g.employee_id.clone()).collect();
+        employee_ids.sort();
+        employee_ids.dedup();
+        assert_eq!(employee_ids.len(), 2);
+
+        // Create round-robin for the 2 employees
+        for i in 0..employee_ids.len() {
+            let reviewer_idx = (i + 1) % employee_ids.len();
+            repo.create_review_assignment(&CreateReviewAssignmentRequest {
+                cycle_id: cycle.id.clone(),
+                reviewer_id: employee_ids[reviewer_idx].clone(),
+                employee_id: employee_ids[i].clone(),
+            })
+            .await
+            .unwrap();
+        }
+
+        let assignments = repo.list_assignments_by_cycle(&cycle.id).await.unwrap();
+        assert_eq!(assignments.len(), 2);
     }
 }
