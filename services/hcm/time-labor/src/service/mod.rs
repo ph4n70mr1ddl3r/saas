@@ -334,6 +334,59 @@ impl TimeLaborService {
         }
         Ok(())
     }
+
+    /// Handle timesheet rejected notification event.
+    /// Logs the notification for the timesheet rejection.
+    pub async fn handle_timesheet_rejected_notification(
+        &self,
+        timesheet_id: &str,
+        employee_id: &str,
+        week_start: &str,
+    ) -> anyhow::Result<()> {
+        tracing::info!(
+            "Notification: Timesheet rejected — timesheet_id={}, employee_id={}, week_start={}",
+            timesheet_id,
+            employee_id,
+            week_start
+        );
+        Ok(())
+    }
+
+    /// Handle leave request approved notification event.
+    /// Logs the notification for the leave approval.
+    pub async fn handle_leave_approved_notification(
+        &self,
+        request_id: &str,
+        employee_id: &str,
+        leave_type: &str,
+        days: f64,
+    ) -> anyhow::Result<()> {
+        tracing::info!(
+            "Notification: Leave approved — request_id={}, employee_id={}, leave_type={}, days={}",
+            request_id,
+            employee_id,
+            leave_type,
+            days
+        );
+        Ok(())
+    }
+
+    /// Handle leave request rejected notification event.
+    /// Logs the notification for the leave rejection.
+    pub async fn handle_leave_rejected_notification(
+        &self,
+        request_id: &str,
+        employee_id: &str,
+        leave_type: &str,
+    ) -> anyhow::Result<()> {
+        tracing::info!(
+            "Notification: Leave rejected — request_id={}, employee_id={}, leave_type={}",
+            request_id,
+            employee_id,
+            leave_type
+        );
+        Ok(())
+    }
 }
 
 fn calculate_leave_days(start_date: &str, end_date: &str) -> f64 {
@@ -921,5 +974,56 @@ mod tests {
         // Cannot reject again
         let result = svc.reject_timesheet(&ts.id).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_handle_timesheet_rejected_notification() {
+        let pool = setup().await;
+        let bus = saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+            .await
+            .unwrap();
+        let svc = TimeLaborService {
+            repo: TimeLaborRepo::new(pool),
+            bus,
+        };
+
+        let result = svc
+            .handle_timesheet_rejected_notification("ts-001", "emp-001", "2025-06-02")
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_leave_approved_notification() {
+        let pool = setup().await;
+        let bus = saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+            .await
+            .unwrap();
+        let svc = TimeLaborService {
+            repo: TimeLaborRepo::new(pool),
+            bus,
+        };
+
+        let result = svc
+            .handle_leave_approved_notification("req-001", "emp-001", "vacation", 5.0)
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_leave_rejected_notification() {
+        let pool = setup().await;
+        let bus = saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+            .await
+            .unwrap();
+        let svc = TimeLaborService {
+            repo: TimeLaborRepo::new(pool),
+            bus,
+        };
+
+        let result = svc
+            .handle_leave_rejected_notification("req-002", "emp-002", "sick")
+            .await;
+        assert!(result.is_ok());
     }
 }

@@ -143,6 +143,43 @@ impl RoleService {
         }
         Ok(())
     }
+
+    /// Handle role created event (audit logging for self-subscribed events).
+    pub fn handle_role_created(&self, role_id: &str, name: &str) {
+        tracing::info!(
+            "[AUDIT] Role created event received: role_id={}, name={}",
+            role_id,
+            name
+        );
+    }
+
+    /// Handle role updated event (audit logging for self-subscribed events).
+    pub fn handle_role_updated(&self, role_id: &str, name: &Option<String>) {
+        tracing::info!(
+            "[AUDIT] Role updated event received: role_id={}, name={:?}",
+            role_id,
+            name
+        );
+    }
+
+    /// Handle role permissions changed event (audit logging for self-subscribed events).
+    pub fn handle_role_permissions_changed(&self, role_id: &str, permission_count: u32) {
+        tracing::warn!(
+            "[AUDIT] Role permissions changed: role_id={}, permission_count={} — \
+             downstream permission caches should be invalidated",
+            role_id,
+            permission_count
+        );
+    }
+
+    /// Handle role deleted event (audit logging for self-subscribed events).
+    pub fn handle_role_deleted(&self, role_id: &str, name: &str) {
+        tracing::info!(
+            "[AUDIT] Role deleted event received: role_id={}, name={}",
+            role_id,
+            name
+        );
+    }
 }
 mod tests {
     use super::*;

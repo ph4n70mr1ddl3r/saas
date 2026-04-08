@@ -14,11 +14,23 @@ pub struct AuthState {
     pub role_service: RoleService,
 }
 
-pub fn build_router(pool: SqlitePool, bus: NatsBus) -> Router {
+/// Build services from pool and bus, returning them for event registration.
+pub fn build_services(
+    pool: SqlitePool,
+    bus: NatsBus,
+) -> (AuthService, UserService, RoleService) {
     let auth_service = AuthService::new(pool.clone(), bus.clone());
     let user_service = UserService::new(pool.clone(), bus.clone());
     let role_service = RoleService::new(pool, bus);
+    (auth_service, user_service, role_service)
+}
 
+/// Build a router from pre-created services.
+pub fn build_router_from_services(
+    auth_service: AuthService,
+    user_service: UserService,
+    role_service: RoleService,
+) -> Router {
     Router::<AuthState>::new()
         // Auth routes (public)
         .route("/api/v1/auth/login", post(handlers::auth::login))

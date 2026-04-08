@@ -1,11 +1,11 @@
 use crate::service::PerformanceService;
 use saas_nats_bus::NatsBus;
-use saas_proto::events::EmployeeCreated;
+use saas_proto::events::{EmployeeCreated, ReviewSubmitted};
 
 pub async fn subscribe(bus: &NatsBus, service: PerformanceService) -> anyhow::Result<()> {
-    let service = service.clone();
+    let svc1 = service.clone();
     bus.subscribe::<EmployeeCreated, _, _>("hcm.employee.created", move |envelope| {
-        let service = service.clone();
+        let svc1 = svc1.clone();
         let employee_id = envelope.payload.employee_id.clone();
         let first_name = envelope.payload.first_name.clone();
         let last_name = envelope.payload.last_name.clone();
@@ -16,7 +16,7 @@ pub async fn subscribe(bus: &NatsBus, service: PerformanceService) -> anyhow::Re
                 last_name,
                 employee_id
             );
-            if let Err(e) = service.handle_employee_created(&employee_id, &first_name, &last_name).await {
+            if let Err(e) = svc1.handle_employee_created(&employee_id, &first_name, &last_name).await {
                 tracing::error!(
                     "Failed to create default goal for employee {}: {}",
                     employee_id,
@@ -26,5 +26,43 @@ pub async fn subscribe(bus: &NatsBus, service: PerformanceService) -> anyhow::Re
         }
     })
     .await?;
+
+    let svc2 = service.clone();
+    bus.subscribe::<ReviewSubmitted, _, _>("hcm.performance.review.submitted", move |envelope| {
+        let svc2 = svc2.clone();
+        let assignment_id = envelope.payload.assignment_id.clone();
+        let cycle_id = envelope.payload.cycle_id.clone();
+        let employee_id = envelope.payload.employee_id.clone();
+        let reviewer_id = envelope.payload.reviewer_id.clone();
+        let rating = envelope.payload.rating;
+        async move {
+            tracing::info!(
+                "Received review.submitted event — assignment_id={}, cycle_id={}, employee_id={}, reviewer_id={}, rating={}",
+                assignment_id,
+                cycle_id,
+                employee_id,
+                reviewer_id,
+                rating
+            );
+            if let Err(e) = svc2
+                .handle_review_submitted_notification(
+                    &assignment_id,
+                    &cycle_id,
+                    &employee_id,
+                    &reviewer_id,
+                    rating,
+                )
+                .await
+            {
+                tracing::error!(
+                    "Failed to handle review.submitted notification for assignment {}: {}",
+                    assignment_id,
+                    e
+                );
+            }
+        }
+    })
+    .await?;
+
     Ok(())
 }

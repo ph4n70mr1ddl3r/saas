@@ -289,6 +289,60 @@ impl OrderManagementService {
         }
     }
 
+    /// Handle WorkOrderCompleted event — auto-advance sales orders that now have
+    /// manufactured items available. Confirmed orders advance to "picking",
+    /// picking orders advance to "shipped" (ready for delivery).
+    pub async fn handle_work_order_completed(&self, work_order_id: &str, item_id: &str, quantity: i64) {
+        tracing::info!(
+            "Processing work order completed: wo={}, item={}, qty={}",
+            work_order_id, item_id, quantity
+        );
+
+        let orders = match self.list_sales_orders().await {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::warn!("Failed to list sales orders for work order completion: {}", e);
+                return;
+            }
+        };
+
+        for order in &orders {
+            if order.status != "confirmed" && order.status != "picking" {
+                continue;
+            }
+            let detail = match self.get_sales_order(&order.id).await {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+            let has_matching_line = detail.lines.iter().any(|l| l.item_id == item_id);
+            if !has_matching_line {
+                continue;
+            }
+
+            let new_status = match order.status.as_str() {
+                "confirmed" => "picking",
+                "picking" => "shipped",
+                _ => continue,
+            };
+
+            match self.order_repo.update_status(&order.id, new_status).await {
+                Ok(_) => {
+                    tracing::info!(
+                        "Auto-advanced sales order {} from '{}' to '{}' (work order {} completed: item={}, qty={})",
+                        order.order_number, order.status, new_status, work_order_id, item_id, quantity
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to update sales order {} status to '{}': {}",
+                        order.order_number, new_status, e
+                    );
+                }
+            }
+        }
+    }
+
     // Returns
     pub async fn list_returns(&self) -> AppResult<Vec<ReturnResponse>> {
         self.return_repo.list().await
@@ -1244,5 +1298,99 @@ mod tests {
 
         let updated = svc.order_repo.get_by_id(&order.id).await.unwrap();
         assert_eq!(updated.status, "picking");
+    }
+
+    #[tokio::test]
+    async fn test_handle_work_order_completed_advances_confirmed_to_picking() {
+        let pool = setup().await;
+        let svc = OrderManagementService {
+            order_repo: SalesOrderRepo::new(pool.clone()),
+            fulfillment_repo: FulfillmentRepo::new(pool.clone()),
+            return_repo: ReturnRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let order = svc.order_repo.create(&CreateSalesOrder {
+            customer_id: "CUST-WO1".into(),
+            order_date: "2026-04-01".into(),
+            shipping_address: None,
+            notes: None,
+            lines: vec![CreateSalesOrderLine {
+                item_id: "ITEM-MFG".into(),
+                quantity: 10,
+                unit_price_cents: 500,
+            }],
+        }).await.unwrap();
+        svc.order_repo.update_status(&order.id, "confirmed").await.unwrap();
+
+        svc.handle_work_order_completed("WO-001", "ITEM-MFG", 10).await;
+
+        let updated = svc.order_repo.get_by_id(&order.id).await.unwrap();
+        assert_eq!(updated.status, "picking");
+    }
+
+    #[tokio::test]
+    async fn test_handle_work_order_completed_advances_picking_to_shipped() {
+        let pool = setup().await;
+        let svc = OrderManagementService {
+            order_repo: SalesOrderRepo::new(pool.clone()),
+            fulfillment_repo: FulfillmentRepo::new(pool.clone()),
+            return_repo: ReturnRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let order = svc.order_repo.create(&CreateSalesOrder {
+            customer_id: "CUST-WO2".into(),
+            order_date: "2026-04-01".into(),
+            shipping_address: None,
+            notes: None,
+            lines: vec![CreateSalesOrderLine {
+                item_id: "ITEM-MFG2".into(),
+                quantity: 5,
+                unit_price_cents: 300,
+            }],
+        }).await.unwrap();
+        svc.order_repo.update_status(&order.id, "confirmed").await.unwrap();
+        svc.order_repo.update_status(&order.id, "picking").await.unwrap();
+
+        svc.handle_work_order_completed("WO-002", "ITEM-MFG2", 5).await;
+
+        let updated = svc.order_repo.get_by_id(&order.id).await.unwrap();
+        assert_eq!(updated.status, "shipped");
+    }
+
+    #[tokio::test]
+    async fn test_handle_work_order_completed_no_matching_item() {
+        let pool = setup().await;
+        let svc = OrderManagementService {
+            order_repo: SalesOrderRepo::new(pool.clone()),
+            fulfillment_repo: FulfillmentRepo::new(pool.clone()),
+            return_repo: ReturnRepo::new(pool),
+            bus: saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        };
+
+        let order = svc.order_repo.create(&CreateSalesOrder {
+            customer_id: "CUST-WO3".into(),
+            order_date: "2026-04-01".into(),
+            shipping_address: None,
+            notes: None,
+            lines: vec![CreateSalesOrderLine {
+                item_id: "ITEM-OTHER".into(),
+                quantity: 3,
+                unit_price_cents: 100,
+            }],
+        }).await.unwrap();
+        svc.order_repo.update_status(&order.id, "confirmed").await.unwrap();
+
+        svc.handle_work_order_completed("WO-003", "ITEM-DIFFERENT", 3).await;
+
+        let updated = svc.order_repo.get_by_id(&order.id).await.unwrap();
+        assert_eq!(updated.status, "confirmed"); // unchanged
     }
 }

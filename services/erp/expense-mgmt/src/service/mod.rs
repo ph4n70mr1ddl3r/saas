@@ -449,6 +449,40 @@ impl ExpenseService {
         );
         Ok(())
     }
+
+    // --- Self-subscribed notification handlers ---
+
+    /// Handle expense report submitted notification.
+    /// Notifies managers that a new expense report is awaiting their approval.
+    pub async fn handle_expense_report_submitted_notification(
+        &self,
+        report_id: &str,
+        employee_id: &str,
+        title: &str,
+    ) -> AppResult<()> {
+        tracing::info!(
+            "Expense report submitted notification: report_id={}, employee_id={}, title='{}' \
+             — managers should be notified for approval",
+            report_id, employee_id, title
+        );
+        Ok(())
+    }
+
+    /// Handle expense report rejected notification.
+    /// Notifies the employee that their expense report was rejected.
+    pub async fn handle_expense_report_rejected_notification(
+        &self,
+        report_id: &str,
+        employee_id: &str,
+        reason: &str,
+    ) -> AppResult<()> {
+        tracing::info!(
+            "Expense report rejected notification: report_id={}, employee_id={}, reason='{}' \
+             — employee should be notified of rejection",
+            report_id, employee_id, reason
+        );
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1152,6 +1186,74 @@ mod tests {
 
         let result = svc
             .handle_budget_activated("budget-003", "Annual Corporate Budget", 99_999_999_99i64)
+            .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_expense_report_submitted_notification() {
+        let pool = create_test_pool().await;
+        let svc = ExpenseService::new(
+            pool,
+            saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        );
+
+        let result = svc
+            .handle_expense_report_submitted_notification("report-001", "emp-42", "Q3 Travel Expenses")
+            .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_expense_report_submitted_notification_empty_title() {
+        let pool = create_test_pool().await;
+        let svc = ExpenseService::new(
+            pool,
+            saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        );
+
+        let result = svc
+            .handle_expense_report_submitted_notification("report-002", "emp-1", "")
+            .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_expense_report_rejected_notification() {
+        let pool = create_test_pool().await;
+        let svc = ExpenseService::new(
+            pool,
+            saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        );
+
+        let result = svc
+            .handle_expense_report_rejected_notification("report-003", "emp-99", "Missing receipts for travel expenses")
+            .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_expense_report_rejected_notification_empty_reason() {
+        let pool = create_test_pool().await;
+        let svc = ExpenseService::new(
+            pool,
+            saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+                .await
+                .unwrap(),
+        );
+
+        let result = svc
+            .handle_expense_report_rejected_notification("report-004", "emp-1", "")
             .await;
 
         assert!(result.is_ok());

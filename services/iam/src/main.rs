@@ -3,6 +3,7 @@ use saas_db::{migrate::run_migrations, pool::create_pool};
 use saas_nats_bus::NatsBus;
 use std::env;
 
+mod events;
 mod handlers;
 mod models;
 mod repository;
@@ -27,7 +28,15 @@ async fn main() -> anyhow::Result<()> {
 
     let bus = NatsBus::connect(&nats_url, "saas-iam").await?;
 
-    let app = routes::build_router(pool, bus)
+    // Create services for event registration
+    let (auth_service, user_service, role_service) = routes::build_services(pool, bus.clone());
+
+    // Register event subscribers for audit logging
+    if let Err(e) = events::register(&bus, auth_service.clone(), role_service.clone()).await {
+        tracing::warn!("Failed to register event subscribers (non-fatal): {}", e);
+    }
+
+    let app = routes::build_router_from_services(auth_service, user_service, role_service)
         .layer(saas_common::middleware::create_cors_layer())
         .layer(saas_common::middleware::create_trace_layer());
 

@@ -330,6 +330,27 @@ impl PerformanceService {
         self.repo.create_feedback(&input).await
     }
 
+    /// Handle review submitted notification event.
+    /// Logs the notification for the review submission.
+    pub async fn handle_review_submitted_notification(
+        &self,
+        assignment_id: &str,
+        cycle_id: &str,
+        employee_id: &str,
+        reviewer_id: &str,
+        rating: i32,
+    ) -> anyhow::Result<()> {
+        tracing::info!(
+            "Notification: Review submitted — assignment_id={}, cycle_id={}, employee_id={}, reviewer_id={}, rating={}",
+            assignment_id,
+            cycle_id,
+            employee_id,
+            reviewer_id,
+            rating
+        );
+        Ok(())
+    }
+
     /// Handle new employee creation — auto-create a default onboarding goal
     /// in the first active review cycle.
     pub async fn handle_employee_created(
@@ -1288,5 +1309,25 @@ mod tests {
 
         let assignments = repo.list_assignments_by_cycle(&cycle.id).await.unwrap();
         assert_eq!(assignments.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_handle_review_submitted_notification() {
+        let pool = setup().await;
+        let bus = saas_nats_bus::NatsBus::connect("nats://localhost:4222", "test")
+            .await
+            .unwrap();
+        let svc = PerformanceService::new(pool, bus);
+
+        let result = svc
+            .handle_review_submitted_notification(
+                "assignment-001",
+                "cycle-001",
+                "emp-001",
+                "reviewer-001",
+                4,
+            )
+            .await;
+        assert!(result.is_ok());
     }
 }

@@ -121,6 +121,16 @@ impl AuthService {
         }
         Ok(removed)
     }
+
+    /// Handle token revocation event (audit logging for self-subscribed events).
+    pub fn handle_token_revoked(&self, jti: &str, user_id: &str, expires_at: &str) {
+        tracing::info!(
+            "[AUDIT] Token revoked event received: jti={}, user_id={}, expires_at={}",
+            jti,
+            user_id,
+            expires_at
+        );
+    }
 }
 
 #[cfg(test)]
