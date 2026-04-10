@@ -29,6 +29,7 @@ async fn main() -> anyhow::Result<()> {
     saas_auth_core::jwt::init_jwt_secret();
 
     let port: u16 = env::var("PORT").unwrap_or_else(|_| "8000".into()).parse()?;
+    let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0".into());
 
     let mut service_map: HashMap<String, String> = HashMap::new();
     service_map.insert(
@@ -126,8 +127,8 @@ async fn main() -> anyhow::Result<()> {
         .layer(saas_common::middleware::create_trace_layer())
         .into_make_service_with_connect_info::<std::net::SocketAddr>();
 
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
-    tracing::info!("API Gateway listening on port {}", port);
+    let listener = tokio::net::TcpListener::bind(format!("{}:{}", bind_addr, port)).await?;
+    tracing::info!("API Gateway listening on {}:{}", bind_addr, port);
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;

@@ -1,16 +1,12 @@
-version: "3.9"
-
 networks:
   frontend:
   backend:
 
 x-healthcheck: &default-healthcheck
-  healthcheck:
-    test: ["CMD", "nc", "-z", "localhost", "8000"]
-    interval: 10s
-    timeout: 5s
-    retries: 10
-    start_period: 15s
+  interval: 10s
+  timeout: 5s
+  retries: 10
+  start_period: 15s
 
 services:
   nats:
@@ -47,7 +43,9 @@ services:
     networks:
       - backend
     restart: unless-stopped
-    <<: *default-healthcheck
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8001"]
+      <<: *default-healthcheck
 
   config-svc:
     build:
@@ -67,7 +65,9 @@ services:
     networks:
       - backend
     restart: unless-stopped
-    <<: *default-healthcheck
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8002"]
+      <<: *default-healthcheck
 
   # === HCM Module ===
   employee:
@@ -88,7 +88,9 @@ services:
     networks:
       - backend
     restart: unless-stopped
-    <<: *default-healthcheck
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8010"]
+      <<: *default-healthcheck
 
   payroll:
     build:
@@ -108,7 +110,9 @@ services:
     networks:
       - backend
     restart: unless-stopped
-    <<: *default-healthcheck
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8011"]
+      <<: *default-healthcheck
 
   benefits:
     build:
@@ -128,7 +132,9 @@ services:
     networks:
       - backend
     restart: unless-stopped
-    <<: *default-healthcheck
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8012"]
+      <<: *default-healthcheck
 
   time-labor:
     build:
@@ -148,7 +154,9 @@ services:
     networks:
       - backend
     restart: unless-stopped
-    <<: *default-healthcheck
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8013"]
+      <<: *default-healthcheck
 
   recruiting:
     build:
@@ -168,7 +176,9 @@ services:
     networks:
       - backend
     restart: unless-stopped
-    <<: *default-healthcheck
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8014"]
+      <<: *default-healthcheck
 
   # === HCM Performance Management ===
   performance:
@@ -189,7 +199,9 @@ services:
     networks:
       - backend
     restart: unless-stopped
-    <<: *default-healthcheck
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8015"]
+      <<: *default-healthcheck
 
   # === ERP Module ===
   general-ledger:
@@ -210,7 +222,9 @@ services:
     networks:
       - backend
     restart: unless-stopped
-    <<: *default-healthcheck
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8020"]
+      <<: *default-healthcheck
 
   accounts-payable:
     build:
@@ -230,7 +244,9 @@ services:
     networks:
       - backend
     restart: unless-stopped
-    <<: *default-healthcheck
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8021"]
+      <<: *default-healthcheck
 
   accounts-receivable:
     build:
@@ -250,7 +266,9 @@ services:
     networks:
       - backend
     restart: unless-stopped
-    <<: *default-healthcheck
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8022"]
+      <<: *default-healthcheck
 
   fixed-assets:
     build:
@@ -270,7 +288,9 @@ services:
     networks:
       - backend
     restart: unless-stopped
-    <<: *default-healthcheck
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8023"]
+      <<: *default-healthcheck
 
   cash-management:
     build:
@@ -290,7 +310,9 @@ services:
     networks:
       - backend
     restart: unless-stopped
-    <<: *default-healthcheck
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8024"]
+      <<: *default-healthcheck
 
   # === ERP Expense Management ===
   expense-mgmt:
@@ -311,7 +333,9 @@ services:
     networks:
       - backend
     restart: unless-stopped
-    <<: *default-healthcheck
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8025"]
+      <<: *default-healthcheck
 
   # === SCM Module ===
   inventory:
@@ -332,7 +356,9 @@ services:
     networks:
       - backend
     restart: unless-stopped
-    <<: *default-healthcheck
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8030"]
+      <<: *default-healthcheck
 
   procurement:
     build:
@@ -352,7 +378,9 @@ services:
     networks:
       - backend
     restart: unless-stopped
-    <<: *default-healthcheck
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8031"]
+      <<: *default-healthcheck
 
   order-management:
     build:
@@ -372,7 +400,9 @@ services:
     networks:
       - backend
     restart: unless-stopped
-    <<: *default-healthcheck
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8032"]
+      <<: *default-healthcheck
 
   manufacturing:
     build:
@@ -392,7 +422,9 @@ services:
     networks:
       - backend
     restart: unless-stopped
-    <<: *default-healthcheck
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8033"]
+      <<: *default-healthcheck
 
   # === Gateway (front door) ===
   gateway:
@@ -425,7 +457,7 @@ services:
       ORDERS_URL: http://order-management:8032
       MANUFACTURING_URL: http://manufacturing:8033
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     depends_on:
       iam:
         condition: service_healthy
@@ -467,6 +499,9 @@ services:
       - frontend
       - backend
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8000"]
+      <<: *default-healthcheck
 
 volumes:
   nats-data:

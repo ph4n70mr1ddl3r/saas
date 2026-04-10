@@ -16,8 +16,12 @@ test:
 test-%:
 	cargo test -p saas-$*
 
-# Clean build artifacts
+# Clean build artifacts only (preserves databases)
 clean:
+	cargo clean
+
+# Clean everything including databases (destructive)
+clean-all:
 	cargo clean
 	rm -rf data/
 
@@ -37,7 +41,7 @@ migrate:
 
 # Start NATS locally
 nats:
-	docker run -d --name nats -p 4222:4222 -p 8222:8222 nats:2-alpine --jetstream
+	docker run -d --name nats -p 127.0.0.1:4222:4222 -p 127.0.0.1:8222:8222 nats:2-alpine --jetstream
 
 # Stop local NATS
 nats-stop:

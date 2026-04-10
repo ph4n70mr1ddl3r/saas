@@ -13,7 +13,9 @@ impl UserRepo {
         Self { pool }
     }
 
-    pub async fn list(&self, pag: &PaginationParams) -> AppResult<(Vec<UserRow>, u64)> {
+    /// List users with password hashes. Private — prefer `list_safe()` for any
+    /// handler-facing usage to avoid leaking password hashes.
+    async fn list(&self, pag: &PaginationParams) -> AppResult<(Vec<UserRow>, u64)> {
         let offset = pag.offset();
         let limit = pag.per_page();
         let rows = sqlx::query_as::<_, UserRow>(

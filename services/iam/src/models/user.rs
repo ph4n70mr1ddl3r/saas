@@ -7,7 +7,7 @@ pub struct CreateUser {
     pub username: String,
     #[validate(email)]
     pub email: String,
-    #[validate(length(min = 8))]
+    #[validate(length(min = 8, max = 128))]
     pub password: String,
     #[validate(length(min = 1, max = 100))]
     pub display_name: String,
@@ -24,9 +24,9 @@ pub struct UpdateUser {
 
 #[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct ChangePassword {
-    #[validate(length(min = 1, max = 1024))]
+    #[validate(length(min = 1, max = 128))]
     pub current_password: String,
-    #[validate(length(min = 8))]
+    #[validate(length(min = 8, max = 128))]
     pub new_password: String,
 }
 
@@ -34,7 +34,7 @@ pub struct ChangePassword {
 pub struct LoginRequest {
     #[validate(length(min = 1, max = 255))]
     pub username: String,
-    #[validate(length(min = 1, max = 1024))]
+    #[validate(length(min = 1, max = 128))]
     pub password: String,
 }
 

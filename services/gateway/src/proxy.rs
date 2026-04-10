@@ -23,7 +23,7 @@ const SAFE_RESPONSE_HEADERS: &[&str] = &[
 const MAX_RESPONSE_BODY: usize = 10 * 1024 * 1024; // 10 MiB
 
 /// Sanitize a request URI to prevent path traversal attacks.
-/// Handles percent-encoding of dots and double-encoding attempts.
+/// Decodes percent-encoding first, then filters path traversal segments.
 fn sanitize_request_uri(uri: &axum::http::Uri) -> String {
     let path = uri.path();
 
@@ -31,12 +31,12 @@ fn sanitize_request_uri(uri: &axum::http::Uri) -> String {
     let decoded_path = percent_decode_str(path);
     let normalized: String = decoded_path
         .split('/')
-        .filter(|segment| {
+        .filter(|segment: &&str| {
             if segment.is_empty() {
                 return false;
             }
-            let seg = segment.replace("%2e", ".").replace("%2E", ".");
-            seg != ".." && seg != "."
+            // After decoding, check for path traversal in the decoded segment
+            *segment != ".." && *segment != "."
         })
         .collect::<Vec<_>>()
         .join("/");
