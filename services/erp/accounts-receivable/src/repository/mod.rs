@@ -334,7 +334,7 @@ impl ArRepo {
         .fetch_one(&self.pool).await? > 0;
         if closed { return Ok(true); }
         // Also check fiscal year
-        let year: i32 = date[..4].parse().unwrap_or(0);
+        let year: i32 = date.get(..4).and_then(|s| s.parse().ok()).unwrap_or(0);
         let year_closed: bool = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM closed_fiscal_years WHERE fiscal_year = ?"
         )
@@ -364,7 +364,7 @@ impl ArRepo {
                 END AS aging_bucket
             FROM ar_invoices i
             JOIN customers c ON c.id = i.customer_id
-            WHERE i.status IN ('sent', 'partial')
+            WHERE i.status IN ('approved', 'sent', 'partial')
             ORDER BY c.name, i.due_date
             "#,
         )

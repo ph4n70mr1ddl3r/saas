@@ -1,7 +1,9 @@
+use saas_auth_core::revocation::RevocationCache;
 use saas_common::tracing_setup;
 use saas_db::{migrate::run_migrations, pool::create_pool};
 use saas_nats_bus::NatsBus;
 use std::env;
+use std::sync::Arc;
 
 mod events;
 mod handlers;
@@ -15,6 +17,10 @@ async fn main() -> anyhow::Result<()> {
     tracing_setup::init("saas-iam");
 
     saas_auth_core::jwt::init_jwt_secret();
+
+    // Initialize revocation cache so logout actually works
+    let revocation_cache = Arc::new(RevocationCache::new());
+    saas_auth_core::extractor::set_revocation_cache(revocation_cache);
 
     let database_url = env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:./data/iam.db".into());
     let nats_url = env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".into());

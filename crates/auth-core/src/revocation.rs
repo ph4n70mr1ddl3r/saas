@@ -21,8 +21,14 @@ impl RevocationCache {
     }
 
     /// Check if a token with the given JTI has been revoked.
+    /// Also evicts a small batch of stale entries to bound memory growth.
     pub fn is_revoked(&self, jti: &str) -> bool {
-        let cache = self.revoked.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cache = self.revoked.lock().unwrap_or_else(|e| e.into_inner());
+        // Opportunistic eviction: prune stale entries periodically (every 256 checks)
+        // to prevent unbounded growth without making every check expensive.
+        if cache.len() > 256 {
+            Self::evict_stale(&mut cache);
+        }
         match cache.get(jti) {
             Some(revoked_at) => revoked_at.elapsed() < REVOCATION_TTL,
             None => false,

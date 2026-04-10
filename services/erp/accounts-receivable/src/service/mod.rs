@@ -9,7 +9,14 @@ fn derive_period_dates(name: &str, fiscal_year: i32) -> (String, String) {
     let year = fiscal_year;
     match name.to_lowercase().as_str() {
         n if n.starts_with("jan") => (format!("{}-01-01", year), format!("{}-01-31", year)),
-        n if n.starts_with("feb") => (format!("{}-02-01", year), format!("{}-02-28", year)),
+        n if n.starts_with("feb") => {
+            let feb_end = if (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0) {
+                "29"
+            } else {
+                "28"
+            };
+            (format!("{}-02-01", year), format!("{}-02-{}", year, feb_end))
+        }
         n if n.starts_with("mar") => (format!("{}-03-01", year), format!("{}-03-31", year)),
         n if n.starts_with("apr") => (format!("{}-04-01", year), format!("{}-04-30", year)),
         n if n.starts_with("may") => (format!("{}-05-01", year), format!("{}-05-31", year)),

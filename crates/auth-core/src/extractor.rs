@@ -88,12 +88,14 @@ impl<S: Send + Sync> FromRequestParts<S> for AuthUser {
                     _ => AuthError::InvalidToken(format!("Invalid token: {}", e)),
                 })?;
 
-            // Check revocation cache
-            if let Some(ref jti) = claims.jti {
-                if let Some(cache) = REVOCATION_CACHE.get() {
-                    if cache.is_revoked(jti) {
-                        return Err(AuthError::RevokedToken);
-                    }
+            // Check revocation cache — reject tokens without a JTI since they
+            // cannot be individually revoked.
+            let jti = claims.jti.as_deref().ok_or_else(|| {
+                AuthError::InvalidToken("Token missing jti claim".into())
+            })?;
+            if let Some(cache) = REVOCATION_CACHE.get() {
+                if cache.is_revoked(jti) {
+                    return Err(AuthError::RevokedToken);
                 }
             }
 

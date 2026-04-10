@@ -308,16 +308,18 @@ impl LedgerRepo {
         Ok(row)
     }
 
-    /// Delete a draft journal entry and its lines.
+    /// Delete a draft journal entry and its lines inside a transaction.
     pub async fn delete_journal_entry(&self, id: &str) -> AppResult<()> {
+        let mut tx = self.pool.begin().await?;
         sqlx::query("DELETE FROM journal_lines WHERE entry_id = ?")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
         sqlx::query("DELETE FROM journal_entries WHERE id = ?")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
         Ok(())
     }
 

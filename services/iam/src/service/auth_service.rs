@@ -91,6 +91,12 @@ impl AuthService {
 
         self.token_repo.revoke_token(jti, user_id, &expires_at).await?;
 
+        // Also update the in-memory revocation cache so subsequent requests
+        // are rejected without hitting the database.
+        if let Some(cache) = saas_auth_core::extractor::get_revocation_cache() {
+            cache.revoke(jti.to_string());
+        }
+
         if let Err(e) = self
             .bus
             .publish(

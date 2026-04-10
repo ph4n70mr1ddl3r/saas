@@ -202,23 +202,25 @@ impl ExpenseRepo {
     }
 
     pub async fn delete_report(&self, id: &str) -> AppResult<()> {
-        // Delete associated lines, per_diems, mileage first
+        // Delete associated lines, per_diems, mileage inside a transaction
+        let mut tx = self.pool.begin().await?;
         sqlx::query("DELETE FROM mileage WHERE report_id = ?")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
         sqlx::query("DELETE FROM per_diems WHERE report_id = ?")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
         sqlx::query("DELETE FROM expense_lines WHERE report_id = ?")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
         sqlx::query("DELETE FROM expense_reports WHERE id = ?")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -380,7 +382,7 @@ impl ExpenseRepo {
     pub async fn create_mileage(&self, input: &CreateMileageRequest) -> AppResult<Mileage> {
         let id = uuid::Uuid::new_v4().to_string();
 
-        let total_cents = (input.distance_miles * input.rate_per_mile_cents as f64) as i64;
+        let total_cents = (input.distance_miles * input.rate_per_mile_cents as f64).round() as i64;
 
         sqlx::query(
             "INSERT INTO mileage (id, report_id, origin, destination, distance_miles, rate_per_mile_cents, total_cents, expense_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -606,11 +608,11 @@ mod tests {
         };
 
         let m = repo.create_mileage(&m_input).await.unwrap();
-        // 150.5 * 65 = 9782 (truncated as i64)
-        assert_eq!(m.total_cents, (150.5_f64 * 65.0_f64) as i64);
+        // 150.5 * 65 = 9782.5, rounds to 9783 with proper rounding
+        assert_eq!(m.total_cents, (150.5_f64 * 65.0_f64).round() as i64);
 
         let updated_report = repo.get_report(&report.id).await.unwrap();
-        assert_eq!(updated_report.total_cents, (150.5_f64 * 65.0_f64) as i64);
+        assert_eq!(updated_report.total_cents, (150.5_f64 * 65.0_f64).round() as i64);
     }
 
     #[tokio::test]

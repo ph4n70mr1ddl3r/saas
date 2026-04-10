@@ -40,19 +40,7 @@ async fn proxy_handler(
     let ip = addr.ip().to_string();
 
     {
-        // Fast path: check if IP exists with read lock
-        let ip_exists = {
-            let limiters = state.rate_limiter.read().await;
-            limiters.contains_key(&ip)
-        };
-
-        if ip_exists {
-            // Existing IP: try consume under read lock (try_consume uses interior
-            // mutability via the bucket's internal state)
-            // Fall through to write lock for the actual mutation
-        }
-
-        // Use write lock for actual rate limit check (TokenBucket::try_consume needs &mut)
+        // Rate limit check — acquire write lock only for new IPs or token refill
         let mut limiters = state.rate_limiter.write().await;
         let bucket = limiters
             .entry(ip.clone())

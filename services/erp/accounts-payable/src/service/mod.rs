@@ -11,7 +11,14 @@ fn derive_period_dates(name: &str, fiscal_year: i32) -> (String, String) {
     let year = fiscal_year;
     match name.to_lowercase().as_str() {
         n if n.starts_with("jan") => (format!("{}-01-01", year), format!("{}-01-31", year)),
-        n if n.starts_with("feb") => (format!("{}-02-01", year), format!("{}-02-28", year)),
+        n if n.starts_with("feb") => {
+            let feb_end = if (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0) {
+                "29"
+            } else {
+                "28"
+            };
+            (format!("{}-02-01", year), format!("{}-02-{}", year, feb_end))
+        }
         n if n.starts_with("mar") => (format!("{}-03-01", year), format!("{}-03-31", year)),
         n if n.starts_with("apr") => (format!("{}-04-01", year), format!("{}-04-30", year)),
         n if n.starts_with("may") => (format!("{}-05-01", year), format!("{}-05-31", year)),
@@ -137,7 +144,10 @@ impl ApService {
 
         let tc = self.repo.get_tax_code_by_code(tax_code).await?;
         let subtotal: i64 = input.lines.iter().map(|l| l.amount_cents).sum();
-        let tax_amount = (subtotal as f64 * tc.rate).round() as i64;
+        // Use integer basis-point math to avoid floating-point rounding errors.
+        // rate is stored as 0.0-1.0; convert to basis points (0-10000).
+        let basis_points = (tc.rate * 10000.0).round() as i64;
+        let tax_amount = (subtotal * basis_points + 5000) / 10000; // +5000 for rounding
         Ok(tax_amount)
     }
 
@@ -381,14 +391,14 @@ impl ApService {
 
         match matching {
             Some(invoice) => {
-                if invoice.status == "pending" || invoice.status == "approved" {
+                if invoice.status == "draft" || invoice.status == "approved" {
                     tracing::info!(
                         "Goods receipt confirmed for three-way match: po_id={}, invoice={}, status={}",
                         reference_id, invoice.invoice_number, invoice.status
                     );
                 } else {
                     tracing::info!(
-                        "Goods receipt matched PO invoice {} but status is '{}' (expected pending/approved)",
+                        "Goods receipt matched PO invoice {} but status is '{}' (expected draft/approved)",
                         invoice.invoice_number, invoice.status
                     );
                 }

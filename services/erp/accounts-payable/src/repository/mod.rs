@@ -310,7 +310,7 @@ impl ApRepo {
         .fetch_one(&self.pool).await? > 0;
         if closed { return Ok(true); }
         // Also check fiscal year
-        let year: i32 = date[..4].parse().unwrap_or(0);
+        let year: i32 = date.get(..4).and_then(|s| s.parse().ok()).unwrap_or(0);
         let year_closed: bool = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM closed_fiscal_years WHERE fiscal_year = ?"
         )
